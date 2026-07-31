@@ -1,3 +1,2 @@
---no-deps
-yfinance
-FinanceDataReader
+yfinance --no-deps
+FinanceDataReader --no-deps
