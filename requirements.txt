@@ -1,0 +1,7 @@
+streamlit
+FinanceDataReader
+yfinance
+pandas
+numpy
+xgboost
+matplotlib
