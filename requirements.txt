@@ -1,2 +1,2 @@
-yfinance --no-deps
-FinanceDataReader --no-deps
+yfinance --no-deps --no-build-isolation
+FinanceDataReader --no-deps --no-build-isolation
