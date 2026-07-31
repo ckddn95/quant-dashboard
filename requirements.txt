@@ -1,2 +1,2 @@
-yfinance
-FinanceDataReader
+yfinance --prefer-binary
+FinanceDataReader --prefer-binary
