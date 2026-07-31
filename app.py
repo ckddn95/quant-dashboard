@@ -1,3 +1,21 @@
+import subprocess
+import sys
+
+try:
+  import yfinance
+  import FinanceDataReader
+except ImportError:
+  subprocess.check_call([
+      sys.executable,
+      "-m",
+      "pip",
+      "install",
+      "--user",
+      "yfinance",
+      "FinanceDataReader",
+  ])
+  import yfinance
+  import FinanceDataReader
 import streamlit as st
 import FinanceDataReader as fdr
 import yfinance as yf
