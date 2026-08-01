@@ -11,9 +11,20 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # 웹 페이지 설정
-st.set_page_config(page_title="프리미엄 퀀트 대시보드", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Premium Quant Dashboard", page_icon="📈", layout="wide")
 
-st.title("🌅 프리미엄 반자동 퀀트 투자 대시보드")
+# --- 🎨 사용자 지정 CSS (폰트 크기 축소 및 버튼 높이 정렬) ---
+st.markdown("""
+<style>
+/* Metric(평가액, 현금 등) 숫자 폰트 크기 축소 */
+[data-testid="stMetricValue"] {
+    font-size: 1.6rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# 1. 메인 타이틀 영어로 변경 & 폰트 크기 축소(## H2 사용)
+st.markdown("## 🌅 Premium Quant Investment Dashboard")
 st.markdown("종목을 자유롭게 추가·제거하고, AI 분석을 통해 내 포트폴리오를 관리하며, 가상의 AI 펀드와 수익률을 비교해보세요.")
 
 # ==========================================
@@ -25,7 +36,7 @@ with st.expander("💡 이 대시보드는 어떻게 작동하나요? (데이터
     * **국내 주식 주가:** 한국거래소(KRX) 데이터를 기준으로 수집합니다. (`FinanceDataReader` 활용)
     * **거시경제 지표:** 글로벌 금융 플랫폼 야후 파이낸스(Yahoo Finance)의 핵심 지표를 융합하여 분석합니다.
       - `VIX (공포지수)`: 시장의 불안 심리와 변동성 측정
-      - `US 10Y (미국 10년물 국채 금리)`: 글로벌 매크로 자금 흐름 파 파악
+      - `US 10Y (미국 10년물 국채 금리)`: 글로벌 매크로 자금 흐름 파악
       - `SOXX (반도체 지수)`: 국내 증시에 영향이 큰 기술주 투심 파악
       - `USD/KRW (원/달러 환율)`: 외국인 수급 환경 및 환차손익 분석
 
@@ -117,9 +128,23 @@ st.sidebar.subheader("📋 현재 등록된 종목")
 stocks_to_delete = []
 for name, info in st.session_state.portfolio.items():
     col1, col2 = st.sidebar.columns([3, 1])
-    col1.text(f"{name} ({info['code']})")
-    if col2.button("삭제", key=f"del_{info['code']}"):
-        stocks_to_delete.append(name)
+    
+    with col1:
+        # [신규 기능] 텍스트 대신 수량을 직접 입력받고 즉시 저장하는 위젯
+        updated_qty = st.number_input(
+            f"{name} ({info['code']})", 
+            min_value=0, 
+            value=info['qty'], 
+            step=1, 
+            key=f"qty_input_{info['code']}"
+        )
+        st.session_state.portfolio[name]['qty'] = updated_qty
+        
+    with col2:
+        # 입력창과 삭제 버튼의 높이 여백 맞추기
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("삭제", key=f"del_{info['code']}"):
+            stocks_to_delete.append(name)
 
 for name in stocks_to_delete:
     del st.session_state.portfolio[name]
@@ -377,9 +402,8 @@ with tab3:
     st.subheader("⏪ 퀀트 전략 백테스트 (최대 3년 지정 가능)")
     st.warning("⚠️ 웹 환경 보호(서버 과부하 방지)를 위해 **월간(20영업일) 리밸런싱** 기준으로 진행됩니다.")
     
-    # 달력 위젯으로 날짜 선택
     today_kst = get_kst_today().date()
-    default_start = today_kst - timedelta(days=365 * 3) # 기본값: 3년 전
+    default_start = today_kst - timedelta(days=365 * 3)
     
     col_d1, col_d2 = st.columns(2)
     with col_d1:
@@ -387,9 +411,8 @@ with tab3:
     with col_d2:
         bt_end = st.date_input("🗓️ 백테스트 종료일", value=today_kst, max_value=today_kst)
 
-    # 3년 초과 검증
     duration_days = (bt_end - bt_start).days
-    is_valid_duration = 0 < duration_days <= (365 * 3 + 5) # 윤년 포함 여유 5일
+    is_valid_duration = 0 < duration_days <= (365 * 3 + 5) 
 
     if not is_valid_duration:
         st.error("🚨 백테스트 기간은 최소 1일에서 최대 3년(약 1095일) 이내로 설정해 주세요.")
@@ -401,7 +424,6 @@ with tab3:
         try:
             status_text.text("1/3. 주가 및 거시경제 데이터를 불러오는 중... (잠시만 기다려주세요)")
             
-            # 머신러닝 학습(SMA 60등)을 위해 시작일보다 5년 전 과거 데이터부터 여유있게 가져옵니다.
             fetch_start = (bt_start - timedelta(days=365 * 5)).strftime('%Y-%m-%d')
             bt_end_str = bt_end.strftime('%Y-%m-%d')
 
@@ -428,13 +450,12 @@ with tab3:
                 df = safe_datetime_index(df)
                 stock_data[name] = df[['Close', 'Volume']]
 
-            # 사용자가 선택한 실제 영업일(Business Days) 추출
             valid_dates = pd.date_range(bt_start.strftime('%Y-%m-%d'), bt_end_str, freq='B')
             bt_portfolio = {name: 0 for name in ai_target_stocks.keys()}
             bt_cash = 10000000.0
             bt_history = []
 
-            step_size = 20 # 20영업일(월간) 주기 리밸런싱
+            step_size = 20
             total_steps = len(range(0, len(valid_dates), step_size))
             
             for step_idx, i in enumerate(range(0, len(valid_dates), step_size)):
@@ -483,7 +504,6 @@ with tab3:
                 total_val = bt_cash + current_eval
                 max_w = 1.0 / len(ai_target_stocks)
                 
-                # 매도
                 for name, res in signals.items():
                     p, tar = res['price'], total_val * max_w * res['weight']
                     curr = bt_portfolio[name] * p
@@ -493,7 +513,6 @@ with tab3:
                             bt_portfolio[name] -= sell_qty
                             bt_cash += (sell_qty * p) * (1 - SELL_FEE)
                             
-                # 매수
                 for name, res in signals.items():
                     p, tar = res['price'], total_val * max_w * res['weight']
                     curr = bt_portfolio[name] * p
@@ -515,9 +534,8 @@ with tab3:
             
             st.success(f"🎉 설정하신 기간({bt_start} ~ {bt_end}) 시뮬레이션 완료!")
             
-            # 결과 및 동적 CAGR(연평균 수익률) 계산
             final_val = df_bt['Total_Val'].iloc[-1]
-            years = duration_days / 365.25 # 실제 선택된 일수를 연단위로 환산
+            years = duration_days / 365.25 
             cagr = ((final_val / 10000000.0) ** (1 / years) - 1) * 100 if years > 0 else 0
             tot_ret = (final_val / 10000000.0 - 1) * 100
             
