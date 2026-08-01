@@ -22,7 +22,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("## 🚀 Multi-Portfolio AI Quant Dashboard")
-st.markdown("포트폴리오 관리, 구체적 매매 주문 산출, AI 투명성 검증, 실전 트래커, 그리고 포트폴리오 연동형 동일 기준 백테스트를 제공합니다.")
+st.markdown("포트폴리오 관리, 점수 비례 분산 배분 매매 주문 산출, AI 투명성 검증, 그리고 보유 주식 수 변화 시각화 백테스트를 제공합니다.")
 
 # ==========================================
 # ⏰ 유틸리티 함수
@@ -177,7 +177,7 @@ for name in stocks_to_delete:
     st.rerun()
 
 # ==========================================
-# AI 분석 및 투명성 데이터 수집 함수
+# AI 분석 및 비례 분산 배분 함수 (투명성 포함)
 # ==========================================
 def analyze_portfolio_detailed_with_transparency(stocks_dict, current_cash):
     if not stocks_dict: return {}, 0.0, 0.0, {}
@@ -294,7 +294,9 @@ def analyze_portfolio_detailed_with_transparency(stocks_dict, current_cash):
     total_stock_eval = sum(info['qty'] * stock_metrics[name]['price'] for name, info in stocks_dict.items() if name in stock_metrics)
     total_asset = current_cash + total_stock_eval
 
-    top3 = sorted(scores, key=scores.get, reverse=True)[:3]
+    # 💡 점수 비례 분산 배분 (Proportional Score Allocation)
+    valid_scores = {n: s for n, s in scores.items() if not stock_metrics[n]['force_sell'] and s > 0}
+    total_score_sum = sum(valid_scores.values())
     results = {}
 
     for name, m_info in stock_metrics.items():
@@ -302,12 +304,11 @@ def analyze_portfolio_detailed_with_transparency(stocks_dict, current_cash):
         qty = m_info['qty']
         curr_amt = qty * curr_p
         
-        if m_info['force_sell']:
+        if m_info['force_sell'] or name not in valid_scores:
             target_amt = 0.0
-        elif name in top3 and scores.get(name, 0) > 0:
-            target_amt = total_asset * (1.0 / 3.0)
         else:
-            target_amt = 0.0
+            weight = scores[name] / total_score_sum if total_score_sum > 0 else 0.0
+            target_amt = total_asset * weight
 
         diff_amt = target_amt - curr_amt
 
@@ -338,7 +339,7 @@ def analyze_portfolio_detailed_with_transparency(stocks_dict, current_cash):
 tab1, tab2, tab3 = st.tabs([
     f"📊 [{st.session_state.active_portfolio}] 현황 & 매매 주문", 
     f"🤖 [{st.session_state.active_portfolio}] 실전 AI 트래커", 
-    f"⏪ [{st.session_state.active_portfolio}] 백테스트 시뮬레이터"
+    f"⏪ [{st.session_state.active_portfolio}] 포트폴리오 연동 백테스트"
 ])
 
 # ------------------------------------------
@@ -429,7 +430,7 @@ with tab1:
                 * **추세 점수 (`trend_score`):** 현재 주가와 120일선(`SMA_120`)의 비율을 반영하여 장기 추세 우상향 종목에 가점을 줍니다. (`P / SMA_120`)
                 * **거시경제 점수 (`vix_score`):** VIX 공포지수가 높을수록 점수를 깎아 방어적으로 작동합니다. (`1.0 - (VIX - 15) / 25`)
                 * **최종 점수 공식:** `Final Score = ai_score × trend_score × vix_score`
-                * **Top 3 쏠림 배분:** 전체 종목 중 최종 점수가 가장 높은 **상위 3개 종목에 자산의 각 33.3%씩 집중 투자**하며, 나머지 자산은 현금으로 보유합니다.
+                * **점수 비례 분산 배분 (Proportional Allocation):** 긍정적인 평가를 받은 모든 종목에 대해 **AI 최종 점수 비율에 비례하여 자산을 분산 투자**하여 섹터별 분산 효과를 높입니다.
                 * **강제 청산(손절/매도) 룰:** ① 매수가 대비 -5% 하락 시 손절, ② 주가가 120일선 아래로 이탈하거나 VIX가 28 이상으로 치솟을 경우 매크로 리스크로 판단하여 전량 현금화합니다.
                 """)
 
@@ -532,11 +533,11 @@ with tab2:
                     st.line_chart(df_res['Total_Val'])
 
 # ------------------------------------------
-# 탭 3: 포트폴리오 연동형 동일 기준 백테스트 시뮬레이터 (💡 실전 AI와 완벽히 동일한 기준 적용)
+# 탭 3: 포트폴리오 연동형 백테스트 시뮬레이터 (보유 주식 수 변화 막대 차트 포함)
 # ------------------------------------------
 with tab3:
     st.subheader(f"⏪ [{st.session_state.active_portfolio}] 포트폴리오 연동형 동일 기준 백테스트 시뮬레이터")
-    st.info("현재 포트폴리오에 담긴 종목들을 대상으로, 실전 AI의 운영 방식(XGBoost 예측 + 120일선 추세/VIX 방어 + Top 3 모멘텀 집중 투자)과 **100% 동일한 기준과 룰**로 과거 성과를 백테스트합니다.")
+    st.info("현재 포트폴리오에 담긴 종목들을 대상으로, 실전 AI의 운영 방식(점수 비례 분산 배분 + 120일선 추세/VIX 방어)과 동일한 룰로 백테스트를 수행하고 주식 수 변화를 시각화합니다.")
     
     today_kst = get_kst_today().date()
     default_start = today_kst - timedelta(days=365 * 3)
@@ -554,12 +555,11 @@ with tab3:
         elif bt_start >= bt_end:
             st.error("시작일은 종료일보다 빨라야 합니다.")
         else:
-            with st.spinner("포트폴리오 종목 데이터 수집 및 실전 AI 동일 기준 백테스트 엔진 구동 중... ⏳"):
+            with st.spinner("포트폴리오 종목 데이터 수집 및 점수 비례 분산 백테스트 엔진 구동 중... ⏳"):
                 start_str = bt_start.strftime('%Y-%m-%d')
                 end_str = bt_end.strftime('%Y-%m-%d')
                 fetch_start_dt = (bt_start - timedelta(days=400)).strftime('%Y-%m-%d')
                 
-                # 거시경제 데이터 수집
                 def get_bt_yf(ticker):
                     try:
                         d = yf.download(ticker, start=fetch_start_dt, end=end_str, progress=False)
@@ -578,7 +578,6 @@ with tab3:
                 except:
                     ex_rate = pd.Series(dtype=float)
 
-                # 포트폴리오 내 종목별 데이터 프레임 구축 및 AI 모델 사전 학습
                 bt_clean_data = {}
                 bt_models = {}
                 bt_features = ['Close', 'Volume', 'Exchange_Rate', 'VIX_Fear_Index', 'US_10Y_Yield', 'Sector_SOXX', 
@@ -613,7 +612,6 @@ with tab3:
                         for col in bt_features + ['Target_5D']: raw[col] = pd.to_numeric(raw[col], errors='coerce')
                         bt_clean_data[name] = raw
 
-                        # 백테스트 시작일 이전 데이터로 머신러닝 학습 (동일 기준)
                         train_df = raw[raw.index < start_str].dropna(subset=bt_features + ['Target_5D'])
                         if len(train_df) > 50:
                             bt_models[name] = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.03, random_state=42).fit(train_df[bt_features], train_df['Target_5D'])
@@ -627,8 +625,8 @@ with tab3:
                     sim_cash = current_port_data['cash']
                     sim_port = {n: 0 for n in bt_clean_data}
                     history_val = []
+                    history_shares = []  # 💡 보유 주식 수 변화 기록용
 
-                    # 백테스트 일일 루프 (실전 AI 운영 방식과 100% 동일 로직 적용)
                     for step_idx, d in enumerate(dates):
                         active_prices = {}
                         for n in bt_clean_data:
@@ -637,7 +635,6 @@ with tab3:
                                 active_prices[n] = sub.iloc[-1]['Close']
                         if not active_prices: continue
 
-                        # 5영업일 주기 리밸런싱 및 AI 점수 산출 (실전 트래커 및 AI 분석과 동일)
                         if step_idx % 5 == 0:
                             scores = {}
                             for n in active_prices:
@@ -659,8 +656,10 @@ with tab3:
                                             scores[n] = ai_s * tr_s * vx_s
 
                             total_v = sim_cash + sum(sim_port[n] * active_prices[n] for n in active_prices if n in sim_port)
-                            top3 = sorted(scores, key=scores.get, reverse=True)[:3]
-                            target_weights = {n: (1.0 / 3.0 if n in top3 and scores.get(n, 0) > 0 else 0.0) for n in active_prices}
+                            valid_scores = {n: s for n, s in scores.items() if s > 0}
+                            total_score_sum = sum(valid_scores.values())
+                            
+                            target_weights = {n: (scores[n] / total_score_sum if total_score_sum > 0 else 0.0) for n in active_prices}
 
                             # 매도 실행
                             for n, w in target_weights.items():
@@ -692,6 +691,7 @@ with tab3:
 
                         eval_v = sum(sim_port[n] * active_prices.get(n, 0) for n in sim_port)
                         history_val.append({'Date': d, 'Total_Val': sim_cash + eval_v})
+                        history_shares.append({'Date': d, **sim_port})
 
                     if history_val:
                         df_res = pd.DataFrame(history_val).set_index('Date')
@@ -705,3 +705,9 @@ with tab3:
                         
                         st.markdown("### 📈 포트폴리오 연동형 동일 기준 백테스트 자산 추이")
                         st.line_chart(df_res['Total_Val'])
+
+                        # 💡 종목별 보유 주 수 변화 막대 차트 시각화
+                        st.markdown("### 📊 종목별 보유 주식 수(Quantity) 변화 추이")
+                        st.info("백테스트 기간 동안 각 종목의 수량이 리밸런싱에 따라 어떻게 증감했는지 보여줍니다.")
+                        df_shares = pd.DataFrame(history_shares).set_index('Date')
+                        st.bar_chart(df_shares)
