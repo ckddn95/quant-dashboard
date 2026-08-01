@@ -1,3 +1,4 @@
 yfinance
 finance-datareader
 xgboost
+scikit-learn
