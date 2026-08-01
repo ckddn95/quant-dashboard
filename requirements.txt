@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 xgboost
-FinanceDataReader
+Finance-DataReader
 yfinance
 matplotlib
 tqdm
