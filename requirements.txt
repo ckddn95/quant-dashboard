@@ -1,2 +1,3 @@
 yfinance
 finance-datareader
+xgboost
