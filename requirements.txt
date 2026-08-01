@@ -1,4 +1,8 @@
+streamlit
+pandas
+numpy
 yfinance
 finance-datareader
 xgboost
 scikit-learn
+lxml
