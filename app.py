@@ -60,33 +60,26 @@ def get_krx_stocks_info():
 krx_stocks, krx_fundamentals = get_krx_stocks_info()
 
 # ==========================================
-# 2. 멀티 포트폴리오 세션 상태 초기화
+# 2. 멀티 포트폴리오 세션 상태 초기화 (첫 페이지 종목 비우기)
 # ==========================================
 if 'portfolios' not in st.session_state:
     st.session_state.portfolios = {
-        "기본 포트폴리오 (주도주 6선)": {
+        "기본 포트폴리오": {
             "cash": 30000000.0,
             "created_date": "2024-01-02",
-            "stocks": {
-                '삼성전자': {'code': '005930', 'qty': 10, 'buy_price': 70000.0},
-                'LG에너지솔루션': {'code': '373220', 'qty': 2, 'buy_price': 400000.0},
-                '현대차': {'code': '005380', 'qty': 5, 'buy_price': 200000.0},
-                'POSCO홀딩스': {'code': '005490', 'qty': 5, 'buy_price': 350000.0},
-                '삼성바이오로직스': {'code': '207940', 'qty': 1, 'buy_price': 800000.0},
-                'KB금융': {'code': '105560', 'qty': 10, 'buy_price': 60000.0}
-            }
+            "stocks": {} # 💡 첫 페이지에서는 종목이 없도록 빈 상태로 초기화
         }
     }
 
 if 'active_portfolio' not in st.session_state:
-    st.session_state.active_portfolio = "기본 포트폴리오 (주도주 6선)"
+    st.session_state.active_portfolio = "기본 포트폴리오"
 
 current_port_data = st.session_state.portfolios[st.session_state.active_portfolio]
 if 'created_date' not in current_port_data:
     current_port_data['created_date'] = "2024-01-02"
 
 # ==========================================
-# 3. 사이드바: 포트폴리오 및 종목 관리
+# 3. 사이드바: 포트폴리오 및 종목 관리 (일괄 등록 기능 추가)
 # ==========================================
 st.sidebar.header("📁 포트폴리오 관리")
 
@@ -123,8 +116,25 @@ parsed_date = datetime.strptime(current_port_data['created_date'], '%Y-%m-%d').d
 new_c_date = st.sidebar.date_input("포트폴리오 생성일", value=parsed_date)
 current_port_data['created_date'] = new_c_date.strftime('%Y-%m-%d')
 
+# 💡 [신규] 섹터별 대표종목 일괄 등록 기능
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔍 종목 검색 및 추가")
+st.sidebar.subheader("⚡ 섹터별 대표종목 일괄 등록")
+st.sidebar.markdown("주도주 6선(삼성전자, LG에너지솔루션, 현대차, POSCO홀딩스, 삼성바이오로직스, KB금융)을 한 번에 추가합니다.")
+if st.sidebar.button("주도주 6선 일괄 추가하기"):
+    sector_leaders = {
+        '삼성전자': {'code': '005930', 'qty': 0, 'buy_price': 0.0},
+        'LG에너지솔루션': {'code': '373220', 'qty': 0, 'buy_price': 0.0},
+        '현대차': {'code': '005380', 'qty': 0, 'buy_price': 0.0},
+        'POSCO홀딩스': {'code': '005490', 'qty': 0, 'buy_price': 0.0},
+        '삼성바이오로직스': {'code': '207940', 'qty': 0, 'buy_price': 0.0},
+        'KB금융': {'code': '105560', 'qty': 0, 'buy_price': 0.0}
+    }
+    current_port_data['stocks'].update(sector_leaders)
+    st.sidebar.success("주도주 6선 일괄 등록 완료!")
+    st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔍 개별 종목 검색 및 추가")
 search_kw = st.sidebar.text_input("종목명 검색 (예: 삼성, NAVER)", "")
 filtered_stocks = {n: c for n, c in krx_stocks.items() if search_kw.lower() in n.lower()} if search_kw else {}
 options = ["선택 안 함"] + list(filtered_stocks.keys()) if filtered_stocks else ["검색어를 입력하세요"]
@@ -145,6 +155,8 @@ if st.sidebar.button("포트폴리오에 종목 추가"):
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 현재 등록된 종목 관리")
+if not current_port_data['stocks']:
+    st.sidebar.info("등록된 종목이 없습니다.")
 stocks_to_delete = []
 for name, info in list(current_port_data['stocks'].items()):
     with st.sidebar.container():
@@ -264,7 +276,6 @@ def analyze_portfolio_detailed_with_transparency(stocks_dict, current_cash):
                 }
                 scores[name] = score
 
-                # 투명성용 진단 상세 기록
                 diagnostic_details[name] = {
                     'Predicted_5D (%)': f"{pred_5d * 100:+.2f}%",
                     'AI Score': f"{ai_score:.2f}",
@@ -330,7 +341,7 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 # ------------------------------------------
-# 탭 1: 포트폴리오 현황 & 매매 주문 & 투명성 정보
+# 탭 1: 포트폴리오 현황 & 매매 의견 & 투명성 정보
 # ------------------------------------------
 with tab1:
     st.subheader(f"📌 현재 활성 포트폴리오: `{st.session_state.active_portfolio}`")
@@ -338,7 +349,7 @@ with tab1:
     if st.button("🚀 AI 분석 실행 및 주문서/투명성 리포트 생성", type="primary"):
         stocks = current_port_data['stocks']
         if not stocks:
-            st.error("등록된 종목이 없습니다. 사이드바에서 종목을 추가해 주세요.")
+            st.warning("등록된 종목이 없습니다. 사이드바의 '⚡ 섹터별 대표종목 일괄 등록' 버튼을 누르거나 개별 종목을 추가해 주세요.")
         else:
             with st.spinner("AI 모델 연산 및 데이터 수집 검증 중... ⏳"):
                 analysis_res, total_asset, total_stock_eval, diag_details = analyze_portfolio_detailed_with_transparency(stocks, current_port_data['cash'])
@@ -374,18 +385,13 @@ with tab1:
                 st.markdown("### 📋 종목별 보유 현황 및 AI 구체적 매매 주문서")
                 st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
 
-                # ==========================================
-                # 🔍 [새로운 기능] AI 투명성 및 데이터 검증 섹션
-                # ==========================================
                 st.markdown("---")
                 st.markdown("## 🔍 AI 투명성 검증 및 모델 작동 근거 리포트")
                 
-                # 1. 데이터 수집 상태 검증 (Health Check)
                 st.subheader("1️⃣ 데이터 수집 상태 검증 (Health Check)")
                 st.markdown("외부 API 및 한국거래소(KRX)로부터 참고 데이터를 정상적으로 수신했는지 확인합니다.")
                 
                 health_data = []
-                # 거시경제 지표 수검
                 try:
                     vix_test = yf.download('^VIX', period='5d', progress=False)
                     vix_status = "정상 수신 완료 ✅" if not vix_test.empty else "수신 실패 ❌"
@@ -408,10 +414,7 @@ with tab1:
 
                 st.dataframe(pd.DataFrame(health_data), use_container_width=True)
 
-                # 2. AI가 참고 및 학습한 데이터 목록
                 st.subheader("2️⃣ AI가 참고 및 학습한 데이터(특징량) 목록")
-                st.markdown("머신러닝(XGBoost) 모델이 주가 예측을 위해 실시간으로 입력받고 학습하는 14가지 핵심 팩터입니다.")
-                
                 features_desc = [
                     {"분류": "가격 및 거래량", "팩터명": "Close, Volume, Daily_Return, Vol_Ratio_5", "설명": "일별 종가, 거래량, 일간 수익률 및 5일 평균 대비 거래량 급증 비율"},
                     {"분류": "기술적 지표", "팩터명": "SMA_5, SMA_60, SMA_120, RSI_14", "설명": "5일, 60일, 120일(장기 추세선) 이동평균선 및 14일 기준 상대강도지수(RSI)"},
@@ -421,7 +424,6 @@ with tab1:
                 ]
                 st.dataframe(pd.DataFrame(features_desc), use_container_width=True)
 
-                # 3. 매매 의견 결정 근거 및 가중치 공식
                 st.subheader("3️⃣ 매매 의견 결정 근거 및 가중치 점수 산출 공식")
                 st.markdown("""
                 * **AI 예측 점수 (`ai_score`):** 모델이 예측한 5일 뒤 수익률(`Target_5D`)을 0.1 ~ 1.0 사이로 정규화합니다.
@@ -432,7 +434,6 @@ with tab1:
                 * **강제 청산(손절/매도) 룰:** ① 매수가 대비 -5% 하락 시 손절, ② 주가가 120일선 아래로 이탈하거나 VIX가 28 이상으로 치솟을 경우 매크로 리스크로 판단하여 전량 현금화합니다.
                 """)
 
-                # 4. 종목별 상세 AI 점수 및 진단 내역
                 st.subheader("4️⃣ 종목별 상세 AI 점수 및 진단 내역")
                 if diag_details:
                     st.dataframe(pd.DataFrame(diag_details).T, use_container_width=True)
@@ -447,7 +448,7 @@ with tab2:
     if st.button("📈 생성일 기준 자동매매 시뮬레이션 실행", type="primary"):
         stocks = current_port_data['stocks']
         if not stocks:
-            st.error("종목이 등록되어 있지 않습니다.")
+            st.error("종목이 등록되어 있지 않습니다. 사이드바에서 종목을 추가하거나 일괄 등록을 진행해 주세요.")
         else:
             with st.spinner("생성일부터 현재까지 자동매매 백테스트 연산 중... ⏳"):
                 start_str = current_port_data['created_date']
