@@ -22,7 +22,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("## 🚀 Multi-Portfolio AI Quant Dashboard")
-st.markdown("포트폴리오 관리, 구체적 매매 주문 산출, AI 투명성 검증(데이터 수집 상태 및 예측 근거), 그리고 실전 자동매매 트래커를 제공합니다.")
+st.markdown("포트폴리오 관리, 구체적 매매 주문 산출, AI 투명성 검증, 실전 트래커, 그리고 포트폴리오 연동형 동일 기준 백테스트를 제공합니다.")
 
 # ==========================================
 # ⏰ 유틸리티 함수
@@ -60,14 +60,14 @@ def get_krx_stocks_info():
 krx_stocks, krx_fundamentals = get_krx_stocks_info()
 
 # ==========================================
-# 2. 멀티 포트폴리오 세션 상태 초기화 (첫 페이지 종목 비우기)
+# 2. 멀티 포트폴리오 세션 상태 초기화
 # ==========================================
 if 'portfolios' not in st.session_state:
     st.session_state.portfolios = {
         "기본 포트폴리오": {
             "cash": 30000000.0,
             "created_date": "2024-01-02",
-            "stocks": {} # 💡 첫 페이지에서는 종목이 없도록 빈 상태로 초기화
+            "stocks": {}
         }
     }
 
@@ -77,9 +77,11 @@ if 'active_portfolio' not in st.session_state:
 current_port_data = st.session_state.portfolios[st.session_state.active_portfolio]
 if 'created_date' not in current_port_data:
     current_port_data['created_date'] = "2024-01-02"
+if 'stocks' not in current_port_data:
+    current_port_data['stocks'] = {}
 
 # ==========================================
-# 3. 사이드바: 포트폴리오 및 종목 관리 (일괄 등록 기능 추가)
+# 3. 사이드바: 포트폴리오별 독립 관리
 # ==========================================
 st.sidebar.header("📁 포트폴리오 관리")
 
@@ -106,21 +108,19 @@ with st.sidebar.expander("➕ 새 포트폴리오 만들기"):
 
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"💰 [{st.session_state.active_portfolio}] 자산 설정")
-cash_input_str = st.sidebar.text_input("보유 현금 (KRW)", value=f"{current_port_data['cash']:,.0f}")
+cash_input_str = st.sidebar.text_input("보유 현금 (KRW)", value=f"{current_port_data['cash']:,.0f}", key=f"cash_{st.session_state.active_portfolio}")
 try:
     current_port_data['cash'] = float(cash_input_str.replace(",", ""))
 except ValueError:
     st.sidebar.error("숫자만 입력해 주세요.")
 
 parsed_date = datetime.strptime(current_port_data['created_date'], '%Y-%m-%d').date() if 'created_date' in current_port_data else datetime.today().date()
-new_c_date = st.sidebar.date_input("포트폴리오 생성일", value=parsed_date)
+new_c_date = st.sidebar.date_input("포트폴리오 생성일", value=parsed_date, key=f"date_{st.session_state.active_portfolio}")
 current_port_data['created_date'] = new_c_date.strftime('%Y-%m-%d')
 
-# 💡 [신규] 섹터별 대표종목 일괄 등록 기능
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚡ 섹터별 대표종목 일괄 등록")
-st.sidebar.markdown("주도주 6선(삼성전자, LG에너지솔루션, 현대차, POSCO홀딩스, 삼성바이오로직스, KB금융)을 한 번에 추가합니다.")
-if st.sidebar.button("주도주 6선 일괄 추가하기"):
+st.sidebar.subheader(f"⚡ [{st.session_state.active_portfolio}] 대표종목 일괄 등록")
+if st.sidebar.button("주도주 6선 일괄 추가하기", key=f"bulk_{st.session_state.active_portfolio}"):
     sector_leaders = {
         '삼성전자': {'code': '005930', 'qty': 0, 'buy_price': 0.0},
         'LG에너지솔루션': {'code': '373220', 'qty': 0, 'buy_price': 0.0},
@@ -130,19 +130,19 @@ if st.sidebar.button("주도주 6선 일괄 추가하기"):
         'KB금융': {'code': '105560', 'qty': 0, 'buy_price': 0.0}
     }
     current_port_data['stocks'].update(sector_leaders)
-    st.sidebar.success("주도주 6선 일괄 등록 완료!")
+    st.sidebar.success("주도주 6선 추가 완료!")
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔍 개별 종목 검색 및 추가")
-search_kw = st.sidebar.text_input("종목명 검색 (예: 삼성, NAVER)", "")
+st.sidebar.subheader(f"🔍 [{st.session_state.active_portfolio}] 개별 종목 추가")
+search_kw = st.sidebar.text_input("종목명 검색 (예: 삼성, NAVER)", key=f"search_{st.session_state.active_portfolio}")
 filtered_stocks = {n: c for n, c in krx_stocks.items() if search_kw.lower() in n.lower()} if search_kw else {}
 options = ["선택 안 함"] + list(filtered_stocks.keys()) if filtered_stocks else ["검색어를 입력하세요"]
-sel_stock_label = st.sidebar.selectbox("조회된 종목", options=options)
-add_qty = st.sidebar.number_input("초기 보유 수량", min_value=0, value=0, step=1)
-add_avg_p = st.sidebar.number_input("매수 평균가 (원)", min_value=0.0, value=0.0, step=100.0)
+sel_stock_label = st.sidebar.selectbox("조회된 종목", options=options, key=f"sel_{st.session_state.active_portfolio}")
+add_qty = st.sidebar.number_input("초기 보유 수량", min_value=0, value=0, step=1, key=f"add_q_{st.session_state.active_portfolio}")
+add_avg_p = st.sidebar.number_input("매수 평균가 (원)", min_value=0.0, value=0.0, step=100.0, key=f"add_p_{st.session_state.active_portfolio}")
 
-if st.sidebar.button("포트폴리오에 종목 추가"):
+if st.sidebar.button("포트폴리오에 종목 추가", key=f"btn_add_{st.session_state.active_portfolio}"):
     if sel_stock_label not in ["선택 안 함", "검색어를 입력하세요"]:
         code = filtered_stocks[sel_stock_label]
         current_port_data['stocks'][sel_stock_label] = {
@@ -154,9 +154,10 @@ if st.sidebar.button("포트폴리오에 종목 추가"):
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📋 현재 등록된 종목 관리")
+st.sidebar.subheader(f"📋 [{st.session_state.active_portfolio}] 등록된 종목 관리")
 if not current_port_data['stocks']:
     st.sidebar.info("등록된 종목이 없습니다.")
+
 stocks_to_delete = []
 for name, info in list(current_port_data['stocks'].items()):
     with st.sidebar.container():
@@ -335,9 +336,9 @@ def analyze_portfolio_detailed_with_transparency(stocks_dict, current_cash):
 # 메인 화면 탭 구성
 # ==========================================
 tab1, tab2, tab3 = st.tabs([
-    "📊 포트폴리오 현황 & 매매 주문 (AI 투명성 검증)", 
-    "🤖 실전 AI 트래커 (자동매매 시뮬레이션)", 
-    "⏪ 마스터 백테스트 시뮬레이터"
+    f"📊 [{st.session_state.active_portfolio}] 현황 & 매매 주문", 
+    f"🤖 [{st.session_state.active_portfolio}] 실전 AI 트래커", 
+    f"⏪ [{st.session_state.active_portfolio}] 백테스트 시뮬레이터"
 ])
 
 # ------------------------------------------
@@ -349,7 +350,7 @@ with tab1:
     if st.button("🚀 AI 분석 실행 및 주문서/투명성 리포트 생성", type="primary"):
         stocks = current_port_data['stocks']
         if not stocks:
-            st.warning("등록된 종목이 없습니다. 사이드바의 '⚡ 섹터별 대표종목 일괄 등록' 버튼을 누르거나 개별 종목을 추가해 주세요.")
+            st.warning("등록된 종목이 없습니다. 사이드바의 '대표종목 일괄 등록' 버튼을 누르거나 개별 종목을 추가해 주세요.")
         else:
             with st.spinner("AI 모델 연산 및 데이터 수집 검증 중... ⏳"):
                 analysis_res, total_asset, total_stock_eval, diag_details = analyze_portfolio_detailed_with_transparency(stocks, current_port_data['cash'])
@@ -389,8 +390,6 @@ with tab1:
                 st.markdown("## 🔍 AI 투명성 검증 및 모델 작동 근거 리포트")
                 
                 st.subheader("1️⃣ 데이터 수집 상태 검증 (Health Check)")
-                st.markdown("외부 API 및 한국거래소(KRX)로부터 참고 데이터를 정상적으로 수신했는지 확인합니다.")
-                
                 health_data = []
                 try:
                     vix_test = yf.download('^VIX', period='5d', progress=False)
@@ -442,13 +441,13 @@ with tab1:
 # 탭 2: 실전 AI 트래커
 # ------------------------------------------
 with tab2:
-    st.subheader(f"🤖 실전 AI 트래커 (자동매매 성적 검증)")
-    st.info(f"포트폴리오 생성일(`{current_port_data['created_date']}`)부터 오늘까지, AI 봇이 5영업일마다 정기적으로 자동 리밸런싱을 수행했다고 가정했을 때의 가상 성적 곡선입니다.")
+    st.subheader(f"🤖 실전 AI 트래커 ([{st.session_state.active_portfolio}] 자동매매 성적 검증)")
+    st.info(f"현재 선택된 포트폴리오의 생성일(`{current_port_data['created_date']}`)부터 오늘까지, AI 봇이 5영업일마다 정기적으로 자동 리밸런싱을 수행했다고 가정했을 때의 가상 성적 곡선입니다.")
     
-    if st.button("📈 생성일 기준 자동매매 시뮬레이션 실행", type="primary"):
+    if st.button(f"📈 [{st.session_state.active_portfolio}] 자동매매 시뮬레이션 실행", type="primary"):
         stocks = current_port_data['stocks']
         if not stocks:
-            st.error("종목이 등록되어 있지 않습니다. 사이드바에서 종목을 추가하거나 일괄 등록을 진행해 주세요.")
+            st.error("현재 포트폴리오에 등록된 종목이 없습니다. 사이드바에서 종목을 추가해 주세요.")
         else:
             with st.spinner("생성일부터 현재까지 자동매매 백테스트 연산 중... ⏳"):
                 start_str = current_port_data['created_date']
@@ -524,7 +523,7 @@ with tab2:
                     final_val = df_res['Total_Val'].iloc[-1]
                     total_ret = ((final_val / current_port_data['cash']) - 1) * 100
 
-                    st.success("✅ 실전 AI 자동매매 트래커 연산 완료!")
+                    st.success(f"✅ [{st.session_state.active_portfolio}] 자동매매 트래커 연산 완료!")
                     c1, c2 = st.columns(2)
                     c1.metric("초기 자본", f"{current_port_data['cash']:,.0f} 원")
                     c2.metric("현재 자동운용 평가액 (수익률)", f"{final_val:,.0f} 원", f"{total_ret:+.2f}%")
@@ -533,85 +532,176 @@ with tab2:
                     st.line_chart(df_res['Total_Val'])
 
 # ------------------------------------------
-# 탭 3: 마스터 백테스트 시뮬레이터
+# 탭 3: 포트폴리오 연동형 동일 기준 백테스트 시뮬레이터 (💡 실전 AI와 완벽히 동일한 기준 적용)
 # ------------------------------------------
 with tab3:
-    st.subheader("⏪ 마스터 퀀트 전략 백테스트 시뮬레이터")
-    st.info("과거 임의의 기간 동안 주도주 6선 마스터 전략의 성과를 검증합니다.")
+    st.subheader(f"⏪ [{st.session_state.active_portfolio}] 포트폴리오 연동형 동일 기준 백테스트 시뮬레이터")
+    st.info("현재 포트폴리오에 담긴 종목들을 대상으로, 실전 AI의 운영 방식(XGBoost 예측 + 120일선 추세/VIX 방어 + Top 3 모멘텀 집중 투자)과 **100% 동일한 기준과 룰**로 과거 성과를 백테스트합니다.")
     
     today_kst = get_kst_today().date()
     default_start = today_kst - timedelta(days=365 * 3)
     
     col_d1, col_d2 = st.columns(2)
     with col_d1:
-        bt_start = st.date_input("🗓️ 백테스트 시작일", value=default_start, max_value=today_kst)
+        bt_start = st.date_input("🗓️ 백테스트 시작일", value=default_start, max_value=today_kst, key="bt_start_input")
     with col_d2:
-        bt_end = st.date_input("🗓️ 백테스트 종료일", value=today_kst, max_value=today_kst)
+        bt_end = st.date_input("🗓️ 백테스트 종료일", value=today_kst, max_value=today_kst, key="bt_end_input")
 
-    if st.button("▶️ 백테스트 실행하기", type="primary"):
-        if bt_start >= bt_end:
+    if st.button(f"▶️ [{st.session_state.active_portfolio}] 동일 기준 백테스트 실행하기", type="primary"):
+        stocks = current_port_data['stocks']
+        if not stocks:
+            st.error("현재 포트폴리오에 등록된 종목이 없습니다. 사이드바에서 종목을 먼저 추가해 주세요.")
+        elif bt_start >= bt_end:
             st.error("시작일은 종료일보다 빨라야 합니다.")
         else:
-            with st.spinner("과거 데이터 수집 및 백테스트 엔진 시뮬레이션 중... ⏳"):
-                bt_stocks = {
-                    '삼성전자': '005930', 'LG에너지솔루션': '373220', '현대차': '005380',
-                    'POSCO홀딩스': '005490', '삼성바이오로직스': '207940', 'KB금융': '105560'
-                }
+            with st.spinner("포트폴리오 종목 데이터 수집 및 실전 AI 동일 기준 백테스트 엔진 구동 중... ⏳"):
                 start_str = bt_start.strftime('%Y-%m-%d')
                 end_str = bt_end.strftime('%Y-%m-%d')
                 fetch_start_dt = (bt_start - timedelta(days=400)).strftime('%Y-%m-%d')
                 
-                vix = yf.download('^VIX', start=fetch_start_dt, end=end_str, progress=False)
-                if isinstance(vix.columns, pd.MultiIndex): vix.columns = vix.columns.get_level_values(0)
-                vix_s = safe_datetime_index(vix['Close'] if 'Close' in vix.columns else vix.iloc[:, 0])
+                # 거시경제 데이터 수집
+                def get_bt_yf(ticker):
+                    try:
+                        d = yf.download(ticker, start=fetch_start_dt, end=end_str, progress=False)
+                        if isinstance(d.columns, pd.MultiIndex): d.columns = d.columns.get_level_values(0)
+                        return safe_datetime_index(d['Close'] if 'Close' in d.columns else d.iloc[:, 0])
+                    except:
+                        return pd.Series(dtype=float)
 
+                vix = get_bt_yf('^VIX')
+                tnx = get_bt_yf('^TNX')
+                soxx = get_bt_yf('SOXX')
                 try:
-                    ex_rate = fdr.DataReader('USD/KRW', fetch_start_dt, end_str)
-                    if isinstance(ex_rate.columns, pd.MultiIndex): ex_rate.columns = ex_rate.columns.get_level_values(0)
-                    ex_s = safe_datetime_index(ex_rate['Close'])
+                    ex = fdr.DataReader('USD/KRW', fetch_start_dt, end_str)
+                    if isinstance(ex.columns, pd.MultiIndex): ex.columns = ex.columns.get_level_values(0)
+                    ex_rate = safe_datetime_index(ex['Close'])
                 except:
-                    ex_s = pd.Series(dtype=float)
+                    ex_rate = pd.Series(dtype=float)
 
-                bt_data = {}
-                for name, code in bt_stocks.items():
-                    df = fdr.DataReader(code, fetch_start_dt, end_str)
-                    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                    df = safe_datetime_index(df)
-                    raw = pd.concat([df['Close'], vix_s, ex_s], axis=1).ffill().bfill()
-                    raw.columns = ['Close', 'VIX', 'Ex']
-                    raw['SMA_120'] = raw['Close'].rolling(window=120).mean()
-                    bt_data[name] = raw
+                # 포트폴리오 내 종목별 데이터 프레임 구축 및 AI 모델 사전 학습
+                bt_clean_data = {}
+                bt_models = {}
+                bt_features = ['Close', 'Volume', 'Exchange_Rate', 'VIX_Fear_Index', 'US_10Y_Yield', 'Sector_SOXX', 
+                               'SMA_5', 'SMA_60', 'SMA_120', 'Daily_Return', 'RSI_14', 'Vol_Ratio_5', 'PER', 'PBR']
 
-                dates = pd.date_range(start_str, end_str, freq='B')
-                sim_cash = 30000000.0
-                sim_port = {n: 0 for n in bt_stocks}
-                history_val = []
-                
-                first_prices = {n: bt_data[n].loc[bt_data[n].index >= start_str].iloc[0]['Close'] for n in bt_stocks if not bt_data[n].loc[bt_data[n].index >= start_str].empty}
-                if first_prices:
-                    alloc = sim_cash / len(first_prices)
-                    for n, p in first_prices.items():
-                        q = int(alloc // p)
-                        sim_port[n] = q
-                        sim_cash -= q * p
+                for name, info in stocks.items():
+                    code = info['code']
+                    try:
+                        df_st = fdr.DataReader(code, fetch_start_dt, end_str)
+                        if isinstance(df_st.columns, pd.MultiIndex): df_st.columns = df_st.columns.get_level_values(0)
+                        df_st = safe_datetime_index(df_st)
+                        
+                        raw = pd.concat([df_st[['Close', 'Volume']], ex_rate, vix, tnx, soxx], axis=1).ffill().bfill()
+                        raw.columns = ['Close', 'Volume', 'Exchange_Rate', 'VIX_Fear_Index', 'US_10Y_Yield', 'Sector_SOXX']
+                        raw['SMA_5'] = raw['Close'].rolling(window=5).mean()
+                        raw['SMA_60'] = raw['Close'].rolling(window=60).mean()
+                        raw['SMA_120'] = raw['Close'].rolling(window=120).mean()
+                        raw['Daily_Return'] = raw['Close'].pct_change()
+                        
+                        delta = raw['Close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                        rs = gain / (loss + 1e-9)
+                        raw['RSI_14'] = 100 - (100 / (1 + rs))
+                        raw['Vol_Ratio_5'] = raw['Volume'] / (raw['Volume'].rolling(5).mean() + 1e-9)
+                        
+                        fund = krx_fundamentals.get(code, {'PER': 0.0, 'PBR': 0.0})
+                        raw['PER'] = fund['PER']
+                        raw['PBR'] = fund['PBR']
+                        raw['Target_5D'] = raw['Close'].pct_change(5).shift(-5)
+                        
+                        for col in bt_features + ['Target_5D']: raw[col] = pd.to_numeric(raw[col], errors='coerce')
+                        bt_clean_data[name] = raw
 
-                for d in dates:
-                    eval_v = 0
-                    for n in bt_stocks:
-                        sub = bt_data[n][bt_data[n].index <= d]
-                        if not sub.empty:
-                            p = sub.iloc[-1]['Close']
-                            eval_v += sim_port[n] * p
-                    history_val.append({'Date': d, 'Total_Val': sim_cash + eval_v})
+                        # 백테스트 시작일 이전 데이터로 머신러닝 학습 (동일 기준)
+                        train_df = raw[raw.index < start_str].dropna(subset=bt_features + ['Target_5D'])
+                        if len(train_df) > 50:
+                            bt_models[name] = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.03, random_state=42).fit(train_df[bt_features], train_df['Target_5D'])
+                    except:
+                        continue
 
-                df_res = pd.DataFrame(history_val).set_index('Date')
-                final_val = df_res['Total_Val'].iloc[-1]
-                total_ret = ((final_val / 30000000.0) - 1) * 100
+                if not bt_clean_data:
+                    st.error("백테스트를 수행할 유효한 종목 데이터가 없습니다.")
+                else:
+                    dates = pd.date_range(start_str, end_str, freq='B')
+                    sim_cash = current_port_data['cash']
+                    sim_port = {n: 0 for n in bt_clean_data}
+                    history_val = []
 
-                st.success("✅ 백테스트 시뮬레이션 완료!")
-                col_m1, col_m2 = st.columns(2)
-                col_m1.metric("초기 자본", "30,000,000 원")
-                col_m2.metric("최종 자산 및 누적 수익률", f"{final_val:,.0f} 원", f"{total_ret:+.2f}%")
-                
-                st.markdown("### 📈 백테스트 자산 평가액 추이 그래프")
-                st.line_chart(df_res['Total_Val'])
+                    # 백테스트 일일 루프 (실전 AI 운영 방식과 100% 동일 로직 적용)
+                    for step_idx, d in enumerate(dates):
+                        active_prices = {}
+                        for n in bt_clean_data:
+                            sub = bt_clean_data[n][bt_clean_data[n].index <= d]
+                            if not sub.empty and pd.notna(sub.iloc[-1]['Close']):
+                                active_prices[n] = sub.iloc[-1]['Close']
+                        if not active_prices: continue
+
+                        # 5영업일 주기 리밸런싱 및 AI 점수 산출 (실전 트래커 및 AI 분석과 동일)
+                        if step_idx % 5 == 0:
+                            scores = {}
+                            for n in active_prices:
+                                sub_df = bt_clean_data[n][bt_clean_data[n].index <= d]
+                                if not sub_df.empty and bt_models.get(n) is not None:
+                                    today_d = sub_df.iloc[-1]
+                                    if not today_d[bt_features].isna().any():
+                                        pred_5d = bt_models[n].predict(today_d[bt_features].values.reshape(1, -1))[0]
+                                        p = today_d['Close']
+                                        sma120 = today_d['SMA_120']
+                                        v = today_d['VIX_Fear_Index']
+
+                                        if p < sma120 or v >= 28:
+                                            scores[n] = 0.0
+                                        else:
+                                            ai_s = np.clip((pred_5d + 0.005) / 0.025, 0.1, 1.0)
+                                            tr_s = np.clip(p / sma120, 0.5, 1.0) if sma120 > 0 else 1.0
+                                            vx_s = np.clip(1.0 - (v - 15) / 25, 0.3, 1.0)
+                                            scores[n] = ai_s * tr_s * vx_s
+
+                            total_v = sim_cash + sum(sim_port[n] * active_prices[n] for n in active_prices if n in sim_port)
+                            top3 = sorted(scores, key=scores.get, reverse=True)[:3]
+                            target_weights = {n: (1.0 / 3.0 if n in top3 and scores.get(n, 0) > 0 else 0.0) for n in active_prices}
+
+                            # 매도 실행
+                            for n, w in target_weights.items():
+                                if n in sim_port:
+                                    p = active_prices[n]
+                                    curr_amt = sim_port[n] * p
+                                    tar_amt = total_v * w
+                                    if curr_amt > tar_amt * 1.03 or w == 0.0:
+                                        sell_q = sim_port[n] if w == 0.0 else int((curr_amt - tar_amt) // p)
+                                        if 0 < sell_q <= sim_port[n]:
+                                            sim_port[n] -= sell_q
+                                            sim_cash += sell_q * p * 0.99815
+
+                            # 매수 실행
+                            for n, w in target_weights.items():
+                                if n in sim_port and w > 0:
+                                    p = active_prices[n]
+                                    curr_amt = sim_port[n] * p
+                                    tar_amt = total_v * w
+                                    if tar_amt > curr_amt * 1.03:
+                                        buy_q = int((tar_amt - curr_amt) // p)
+                                        cost = buy_q * p * 1.00015
+                                        while cost > sim_cash and buy_q > 0:
+                                            buy_q -= 1
+                                            cost = buy_q * p * 1.00015
+                                        if buy_q > 0:
+                                            sim_port[n] += buy_q
+                                            sim_cash -= cost
+
+                        eval_v = sum(sim_port[n] * active_prices.get(n, 0) for n in sim_port)
+                        history_val.append({'Date': d, 'Total_Val': sim_cash + eval_v})
+
+                    if history_val:
+                        df_res = pd.DataFrame(history_val).set_index('Date')
+                        final_val = df_res['Total_Val'].iloc[-1]
+                        total_ret = ((final_val / current_port_data['cash']) - 1) * 100
+
+                        st.success(f"✅ [{st.session_state.active_portfolio}] 동일 기준 백테스트 완료!")
+                        col_m1, col_m2 = st.columns(2)
+                        col_m1.metric("초기 자본", f"{current_port_data['cash']:,.0f} 원")
+                        col_m2.metric("최종 자산 및 누적 수익률", f"{final_val:,.0f} 원", f"{total_ret:+.2f}%")
+                        
+                        st.markdown("### 📈 포트폴리오 연동형 동일 기준 백테스트 자산 추이")
+                        st.line_chart(df_res['Total_Val'])
