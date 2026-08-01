@@ -20,39 +20,30 @@ st.title("🌅 프리미엄 반자동 퀀트 투자 대시보드")
 st.markdown("종목을 자유롭게 추가·제거하고, 미국 마감 지표를 반영한 정밀 매매 지시서를 확인할 수 있는 웹 서비스입니다.")
 
 # ==========================================
-# 1. 섹터별 주요 종목 데이터 정의 (FDR용 6자리 코드)
+# 1. 한국거래소(KRX) 전체 종목 데이터 불러오기 (캐싱 적용으로 속도 향상)
 # ==========================================
-stock_dict = {
-    "반도체": {
-        "Samsung Electronics (삼성전자)": "005930",
-        "SK hynix (SK하이닉스)": "000660",
-    },
-    "2차전지": {
-        "LG Energy Solution (LG에너지솔루션)": "373220",
-        "POSCO Future M (포스코퓨처엠)": "003670",
-    },
-    "자동차": {
-        "Hyundai Motor Company (현대차)": "005380",
-        "Kia Corporation (기아)": "000270",
-    },
-    "철강": {
-        "POSCO Holdings (POSCO홀딩스)": "005490",
-    },
-    "바이오": {
-        "Samsung Biologics (삼성바이오로직스)": "207940",
-        "Celltrion (셀트리온)": "068270",
-    },
-    "금융": {
-        "KB Financial Group (KB금융)": "105560",
-        "Shinhan Financial Group (신한지주)": "055550",
-    },
-}
+@st.cache_data
+def get_krx_stocks():
+    # KRX 전체 종목 데이터를 불러와서 { '종목명': '종목코드' } 딕셔너리로 만듭니다.
+    df_krx = fdr.StockListing('KRX')
+    return dict(zip(df_krx['Name'], df_krx['Code']))
 
-# 전체 종목 리스트 평탄화
-flat_stocks = {}
-for sector, items in stock_dict.items():
-    for name, code in items.items():
-        flat_stocks[f"[{sector}] {name}"] = code
+krx_stocks = get_krx_stocks()
+
+# 검색어가 없을 때 기본으로 보여줄 주요 섹터별 관심 종목 리스트
+default_stocks = {
+    "[반도체] 삼성전자": "005930",
+    "[반도체] SK하이닉스": "000660",
+    "[2차전지] LG에너지솔루션": "373220",
+    "[2차전지] 포스코퓨처엠": "003670",
+    "[자동차] 현대차": "005380",
+    "[자동차] 기아": "000270",
+    "[철강] POSCO홀딩스": "005490",
+    "[바이오] 삼성바이오로직스": "207940",
+    "[바이오] 셀트리온": "068270",
+    "[금융] KB금융": "105560",
+    "[금융] 신한지주": "055550"
+}
 
 # ==========================================
 # 2. 세션 상태 초기화 (동적 종목 추가/삭제 지원)
@@ -76,35 +67,40 @@ initial_cash = st.sidebar.number_input("현재 보유 현금 (KRW)", value=45_00
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 종목 검색 및 추가")
 
-# 키워드 검색 기능 추가
-search_keyword = st.sidebar.text_input("검색어 입력 (예: 삼성, 바이오, 2차전지)", "")
+# 키워드 검색 기능 (이제 전체 시장 종목 검색 가능!)
+search_keyword = st.sidebar.text_input("🔍 종목명 검색 (예: 삼성, 카카오, NAVER)", "")
 
-# 유연한 검색 필터링
+# 검색어가 있으면 KRX 전체 종목에서 필터링, 없으면 기본 관심 종목 표시
 if search_keyword:
     keywords = search_keyword.lower().split()
-    filtered_stocks = {}
-    for k, v in flat_stocks.items():
-        if all(kw in k.lower() for kw in keywords):
-            filtered_stocks[k] = v
+    filtered_stocks = {
+        name: code for name, code in krx_stocks.items()
+        if all(kw in str(name).lower() for kw in keywords)
+    }
 else:
-    filtered_stocks = flat_stocks
+    filtered_stocks = default_stocks
+
+# 검색 결과가 없을 때의 처리
+if not filtered_stocks and search_keyword:
+    st.sidebar.warning("검색된 종목이 없습니다.")
+    options = ["선택 안 함"]
+else:
+    options = ["선택 안 함"] + list(filtered_stocks.keys())
 
 # 검색된 종목을 선택할 수 있는 드롭다운
-selected_label = st.sidebar.selectbox(
-    "조회된 종목 중 선택하세요", 
-    options=["선택 안 함"] + list(filtered_stocks.keys())
-)
+selected_label = st.sidebar.selectbox("조회된 종목 중 선택하세요", options=options)
 
 new_qty = st.sidebar.number_input("초기 보유 수량 입력", value=0, step=1)
 
 if st.sidebar.button("종목 리스트에 추가"):
     if selected_label != "선택 안 함":
         new_code = filtered_stocks[selected_label]
-        # 한글 이름만 깔끔하게 추출 (예: "[반도체] Samsung Electronics (삼성전자)" -> "삼성전자")
-        if "(" in selected_label and ")" in selected_label:
-            new_name = selected_label.split("(")[-1].replace(")", "").strip()
+        
+        # 이름 정제: 기본 종목의 '[반도체]' 같은 태그가 있다면 깔끔하게 제거하고 종목명만 추출
+        if "]" in selected_label:
+            new_name = selected_label.split("]")[-1].strip()
         else:
-            new_name = selected_label.split("] ")[-1].strip()
+            new_name = selected_label
             
         st.session_state.portfolio[new_name] = {'code': new_code, 'qty': int(new_qty)}
         st.sidebar.success(f"'{new_name}'이(가) 추가되었습니다!")
