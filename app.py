@@ -17,7 +17,7 @@ st.title("🌅 프리미엄 반자동 퀀트 투자 대시보드")
 st.markdown("종목을 자유롭게 추가·제거하고, AI 분석을 통해 내 포트폴리오를 관리하며, 가상의 AI 펀드와 수익률을 비교해보세요.")
 
 # ==========================================
-# 🌟 [신규 추가] 대시보드 운영 원리 및 신뢰도 안내
+# 🌟 대시보드 운영 원리 및 신뢰도 안내
 # ==========================================
 with st.expander("💡 이 대시보드는 어떻게 작동하나요? (데이터 출처 및 AI 로직 안내)"):
     st.markdown("""
@@ -25,7 +25,7 @@ with st.expander("💡 이 대시보드는 어떻게 작동하나요? (데이터
     * **국내 주식 주가:** 한국거래소(KRX) 데이터를 기준으로 수집합니다. (`FinanceDataReader` 활용)
     * **거시경제 지표:** 글로벌 금융 플랫폼 야후 파이낸스(Yahoo Finance)의 핵심 지표를 융합하여 분석합니다.
       - `VIX (공포지수)`: 시장의 불안 심리와 변동성 측정
-      - `US 10Y (미국 10년물 국채 금리)`: 글로벌 매크로 자금 흐름 파악
+      - `US 10Y (미국 10년물 국채 금리)`: 글로벌 매크로 자금 흐름 파 파악
       - `SOXX (반도체 지수)`: 국내 증시에 영향이 큰 기술주 투심 파악
       - `USD/KRW (원/달러 환율)`: 외국인 수급 환경 및 환차손익 분석
 
@@ -41,9 +41,14 @@ with st.expander("💡 이 대시보드는 어떻게 작동하나요? (데이터
     > ⚠️ **면책 조항:** 본 대시보드가 제공하는 AI 매매 지시 및 시뮬레이션 수익률은 과거의 데이터 패턴을 기반으로 한 참고 자료일 뿐이며, 미래의 실제 수익을 보장하지 않습니다. 최종 투자 결정과 책임은 투자자 본인에게 있습니다.
     """)
 
-# --- ⏰ 한국 시간(KST) 기준 날짜 가져오기 함수 ---
+# --- ⏰ 유틸리티 함수 모음 ---
 def get_kst_today():
     return datetime.utcnow() + timedelta(hours=9)
+
+def safe_datetime_index(obj):
+    """타임존 오류 없이 날짜(인덱스)를 00:00:00으로 통일하는 안전한 함수"""
+    obj.index = pd.to_datetime(obj.index, utc=True).tz_localize(None).normalize()
+    return obj
 
 # ==========================================
 # 1. 한국거래소(KRX) 전체 종목 데이터 캐싱
@@ -56,7 +61,7 @@ def get_krx_stocks():
 krx_stocks = get_krx_stocks()
 
 # ==========================================
-# 2. 내 포트폴리오 초기 세팅 (0주 세팅 유지)
+# 2. 내 포트폴리오 초기 세팅
 # ==========================================
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = {
@@ -141,7 +146,7 @@ rebal_threshold = st.sidebar.slider(
 
 
 # ==========================================
-# 공통 AI 및 데이터 처리 함수 (KST 시차 반영)
+# 공통 AI 및 데이터 처리 함수
 # ==========================================
 def fetch_and_predict(codes_list):
     now_kst = get_kst_today()
@@ -155,8 +160,7 @@ def fetch_and_predict(codes_list):
             s = data['Close'] if 'Close' in data.columns else data.iloc[:, 0]
             if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
             s = s.rename(col_name)
-            s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
-            return s
+            return safe_datetime_index(s)
         except:
             return pd.Series(dtype=float, name=col_name)
 
@@ -167,13 +171,13 @@ def fetch_and_predict(codes_list):
     ex_rate = fdr.DataReader('USD/KRW', start_date, end_date)
     if isinstance(ex_rate.columns, pd.MultiIndex): ex_rate.columns = ex_rate.columns.get_level_values(0)
     ex_rate = ex_rate['Close'].rename('Exchange_Rate')
-    ex_rate.index = pd.to_datetime(ex_rate.index).tz_localize(None).normalize()
+    ex_rate = safe_datetime_index(ex_rate)
 
     results = {}
     for name, code in codes_list.items():
         df_stock = fdr.DataReader(code, start_date, end_date)
         if isinstance(df_stock.columns, pd.MultiIndex): df_stock.columns = df_stock.columns.get_level_values(0)
-        df_stock.index = pd.to_datetime(df_stock.index).tz_localize(None).normalize()
+        df_stock = safe_datetime_index(df_stock)
 
         raw_df = pd.concat([df_stock[['Close', 'Volume']], ex_rate, vix, tnx, soxx], axis=1).ffill().bfill()
         raw_df['SMA_5'] = raw_df['Close'].rolling(window=5).mean()
@@ -215,7 +219,7 @@ def fetch_and_predict(codes_list):
 tab1, tab2, tab3 = st.tabs([
     "📊 내 포트폴리오 지시서", 
     "🤖 실전 AI 트래커 (일간)", 
-    "⏪ 과거 장기 백테스트 (2021~2024)"
+    "⏪ 자유 기간 백테스트"
 ])
 
 ai_target_stocks = {
@@ -367,50 +371,75 @@ with tab2:
         st.line_chart(history_df['Total_Val'])
 
 # ------------------------------------------
-# 탭 3: 2021~2024 장기 시뮬레이션
+# 탭 3: 자유 기간 백테스트 (최대 3년)
 # ------------------------------------------
 with tab3:
-    st.subheader("⏪ 2021~2024 퀀트 전략 백테스트")
+    st.subheader("⏪ 퀀트 전략 백테스트 (최대 3년 지정 가능)")
     st.warning("⚠️ 웹 환경 보호(서버 과부하 방지)를 위해 **월간(20영업일) 리밸런싱** 기준으로 진행됩니다.")
     
-    if st.button("▶️ 2021~2024 백테스트 실행하기", type="primary"):
+    # 달력 위젯으로 날짜 선택
+    today_kst = get_kst_today().date()
+    default_start = today_kst - timedelta(days=365 * 3) # 기본값: 3년 전
+    
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        bt_start = st.date_input("🗓️ 백테스트 시작일", value=default_start, max_value=today_kst)
+    with col_d2:
+        bt_end = st.date_input("🗓️ 백테스트 종료일", value=today_kst, max_value=today_kst)
+
+    # 3년 초과 검증
+    duration_days = (bt_end - bt_start).days
+    is_valid_duration = 0 < duration_days <= (365 * 3 + 5) # 윤년 포함 여유 5일
+
+    if not is_valid_duration:
+        st.error("🚨 백테스트 기간은 최소 1일에서 최대 3년(약 1095일) 이내로 설정해 주세요.")
+        
+    elif st.button("▶️ 선택한 기간 백테스트 실행하기", type="primary"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         try:
-            status_text.text("1/3. 2016~2024년 주가 및 거시경제 데이터를 불러오는 중...")
+            status_text.text("1/3. 주가 및 거시경제 데이터를 불러오는 중... (잠시만 기다려주세요)")
             
+            # 머신러닝 학습(SMA 60등)을 위해 시작일보다 5년 전 과거 데이터부터 여유있게 가져옵니다.
+            fetch_start = (bt_start - timedelta(days=365 * 5)).strftime('%Y-%m-%d')
+            bt_end_str = bt_end.strftime('%Y-%m-%d')
+
             def get_hist_series(ticker, col_name):
-                data = yf.download(ticker, start='2016-01-01', end='2024-12-31', progress=False)
+                data = yf.download(ticker, start=fetch_start, end=bt_end_str, progress=False)
                 if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
                 s = data['Close'] if 'Close' in data.columns else data.iloc[:, 0]
-                return s.rename(col_name).tz_localize(None).normalize()
+                s = s.rename(col_name)
+                return safe_datetime_index(s)
 
             h_vix = get_hist_series('^VIX', 'VIX_Fear_Index')
             h_tnx = get_hist_series('^TNX', 'US_10Y_Yield')
             h_soxx = get_hist_series('SOXX', 'Sector_SOXX')
             
-            h_ex = fdr.DataReader('USD/KRW', '2016-01-01', '2024-12-31')
+            h_ex = fdr.DataReader('USD/KRW', fetch_start, bt_end_str)
             if isinstance(h_ex.columns, pd.MultiIndex): h_ex.columns = h_ex.columns.get_level_values(0)
-            h_ex = h_ex['Close'].rename('Exchange_Rate').tz_localize(None).normalize()
+            h_ex = h_ex['Close'].rename('Exchange_Rate')
+            h_ex = safe_datetime_index(h_ex)
 
             stock_data = {}
             for name, code in ai_target_stocks.items():
-                df = fdr.DataReader(code, '2016-01-01', '2024-12-31')
+                df = fdr.DataReader(code, fetch_start, bt_end_str)
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                stock_data[name] = df[['Close', 'Volume']].tz_localize(None).normalize()
+                df = safe_datetime_index(df)
+                stock_data[name] = df[['Close', 'Volume']]
 
-            valid_dates = pd.date_range('2021-01-01', '2024-12-31', freq='B')
+            # 사용자가 선택한 실제 영업일(Business Days) 추출
+            valid_dates = pd.date_range(bt_start.strftime('%Y-%m-%d'), bt_end_str, freq='B')
             bt_portfolio = {name: 0 for name in ai_target_stocks.keys()}
             bt_cash = 10000000.0
             bt_history = []
 
-            step_size = 20 
+            step_size = 20 # 20영업일(월간) 주기 리밸런싱
             total_steps = len(range(0, len(valid_dates), step_size))
             
             for step_idx, i in enumerate(range(0, len(valid_dates), step_size)):
                 current_date = valid_dates[i]
-                status_text.text(f"2/3. AI 가상 펀드 운용 중... ({current_date.strftime('%Y-%m')} 진행 중)")
+                status_text.text(f"2/3. AI 펀드 운용 중... ({current_date.strftime('%Y-%m')} 진행 중)")
                 progress_bar.progress((step_idx + 1) / total_steps)
                 
                 signals = {}
@@ -454,6 +483,7 @@ with tab3:
                 total_val = bt_cash + current_eval
                 max_w = 1.0 / len(ai_target_stocks)
                 
+                # 매도
                 for name, res in signals.items():
                     p, tar = res['price'], total_val * max_w * res['weight']
                     curr = bt_portfolio[name] * p
@@ -463,6 +493,7 @@ with tab3:
                             bt_portfolio[name] -= sell_qty
                             bt_cash += (sell_qty * p) * (1 - SELL_FEE)
                             
+                # 매수
                 for name, res in signals.items():
                     p, tar = res['price'], total_val * max_w * res['weight']
                     curr = bt_portfolio[name] * p
@@ -482,16 +513,18 @@ with tab3:
             status_text.text("3/3. 차트 생성 중...")
             df_bt = pd.DataFrame(bt_history).set_index('Date')
             
-            st.success("🎉 4년 장기 시뮬레이션 완료!")
+            st.success(f"🎉 설정하신 기간({bt_start} ~ {bt_end}) 시뮬레이션 완료!")
             
+            # 결과 및 동적 CAGR(연평균 수익률) 계산
             final_val = df_bt['Total_Val'].iloc[-1]
-            cagr = ((final_val / 10000000.0) ** (1/4) - 1) * 100
+            years = duration_days / 365.25 # 실제 선택된 일수를 연단위로 환산
+            cagr = ((final_val / 10000000.0) ** (1 / years) - 1) * 100 if years > 0 else 0
             tot_ret = (final_val / 10000000.0 - 1) * 100
             
             c1, c2, c3 = st.columns(3)
             c1.metric("초기 자본", "10,000,000 원")
-            c2.metric("최종 자산 (2024년 말)", f"{final_val:,.0f} 원")
-            c3.metric("누적 수익률 (CAGR)", f"{tot_ret:+.2f} %", f"연 {cagr:+.2f}%")
+            c2.metric("최종 자산", f"{final_val:,.0f} 원")
+            c3.metric(f"누적 수익률 ({years:.1f}년)", f"{tot_ret:+.2f} %", f"연평균 {cagr:+.2f}%")
             
             st.line_chart(df_bt['Total_Val'])
             
