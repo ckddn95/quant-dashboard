@@ -1,19 +1,20 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import warnings
 warnings.filterwarnings('ignore')
 
 # 페이지 설정
 st.set_page_config(
-    page_title="Core-Satellite 퀀트 시스템",
+    page_title="Core-Satellite Quant System",
     page_icon="📈",
     layout="wide"
 )
 
-# 제목만 영어로 유지, 나머지는 모두 한글
+# 제목만 영어로
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("나만의 포트폴리오를 생성하고 전략(대형주/중소형주)을 부여한 뒤, 개별 종목을 검색 및 관리하여 시뮬레이션을 실행하는 실전형 퀀트 대시보드입니다.")
+st.markdown("나만의 포트폴리오를 생성하고 전략을 부여한 뒤, 실시간 데이터를 바탕으로 **종목별 매수/매도 진단**과 시뮬레이션을 실행하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 1. 마스터 종목 풀 (검색용 DB)
@@ -29,6 +30,34 @@ MASTER_STOCKS = {
     '삼천당제약': '000250', '실리콘투': '257720', '엘앤에프': '066970', '브이티': '018290',
     'ISC': '095340', '원익IPS': '240810', '에이비엘바이오': '298380'
 }
+
+# ==========================================
+# 실시간 주가 데이터 수집 및 지표 계산 함수
+# ==========================================
+@st.cache_data(ttl=3600) # 1시간 동안 데이터 캐싱 (속도 최적화)
+def fetch_stock_status(ticker_code):
+    try:
+        # 코스피(.KS)와 코스닥(.KQ) 순차 시도
+        for suffix in ['.KS', '.KQ']:
+            df = yf.download(f"{ticker_code}{suffix}", period="1y", progress=False)
+            if not df.empty and len(df) > 0:
+                if isinstance(df.columns, pd.MultiIndex): 
+                    df.columns = df.columns.get_level_values(0)
+                
+                close_prices = df['Close'].dropna()
+                if len(close_prices) == 0: continue
+                
+                current_price = float(close_prices.iloc[-1])
+                # 120일선 계산
+                ma120 = float(close_prices.rolling(window=120).mean().iloc[-1]) if len(close_prices) >= 120 else current_price
+                # 최근 6개월(약 120영업일) 고점 계산
+                recent_high = float(close_prices.tail(120).max())
+                drawdown = ((current_price / recent_high) - 1) * 100 if recent_high > 0 else 0.0
+                
+                return current_price, ma120, drawdown
+    except Exception:
+        pass
+    return None, None, None
 
 # ==========================================
 # 2. 데이터 저장소(Session State) 초기화
@@ -56,12 +85,11 @@ if 'portfolios' not in st.session_state:
 # ==========================================
 # 3. 사이드바: 포트폴리오 관리 및 설정
 # ==========================================
-st.sidebar.header("포트폴리오 자금 및 설정")
+st.sidebar.header("Portfolio Capital & Settings")
 
-# 기존 포트폴리오 리스트 및 금액 수정
+# 기존 포트폴리오 금액 수정
 for p_name, p_data in list(st.session_state.portfolios.items()):
     strat = p_data['strategy']
-    
     st.sidebar.markdown(f"**[{strat}] {p_name}**")
     
     new_cash = st.sidebar.number_input(
@@ -73,8 +101,6 @@ for p_name, p_data in list(st.session_state.portfolios.items()):
         label_visibility="collapsed"
     )
     st.session_state.portfolios[p_name]['cash'] = new_cash
-    
-    # 숫자 아래에 콤마 포맷으로 직관적 표시
     st.sidebar.caption(f"💰 설정 금액: **{new_cash:,.0f} 원**")
     
     if st.sidebar.button(f"🗑️ {p_name} 삭제", key=f"del_{p_name}"):
@@ -83,7 +109,7 @@ for p_name, p_data in list(st.session_state.portfolios.items()):
     st.sidebar.markdown("---")
 
 # 새 포트폴리오 추가 기능
-st.sidebar.subheader("➕ 새 포트폴리오 추가")
+st.sidebar.subheader("➕ Add New Portfolio")
 new_p_name = st.sidebar.text_input("포트폴리오 이름 (예: 1번 단기계좌)", key="new_p_name")
 new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"], key="new_p_strat")
 new_p_cash = st.sidebar.number_input("초기 투자금", value=5_000_000, step=1_000_000, format="%d", key="new_p_cash")
@@ -100,32 +126,33 @@ if st.sidebar.button("추가하기", use_container_width=True):
     elif new_p_name in st.session_state.portfolios:
         st.sidebar.warning("동일한 이름이 존재합니다.")
 
+st.sidebar.markdown("---")
+st.sidebar.header("Strategy Parameters")
+sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-15, step=1)
+
 # ==========================================
-# 4. 탭 구성: 종목 관리 vs 시뮬레이션
+# 4. 탭 구성
 # ==========================================
-tab1, tab2 = st.tabs(["종목 관리 및 세팅", "시뮬레이션 실행"])
+tab1, tab2 = st.tabs(["Portfolio Configuration & Stock Pools", "Simulation & Backtest"])
 
 with tab1:
-    st.header("포트폴리오별 종목 관리")
-    st.markdown("관리할 포트폴리오를 선택한 뒤, 종목을 검색하여 쉽게 추가하거나 표에서 직접 삭제할 수 있습니다.")
+    st.header("포트폴리오별 종목 관리 및 실시간 진단")
+    st.markdown("포트폴리오에 종목을 추가한 뒤, **진단 버튼**을 눌러 설정된 룰에 따른 매매 액션 플랜을 확인하세요.")
     
     if not st.session_state.portfolios:
         st.info("사이드바에서 포트폴리오를 먼저 추가해주세요.")
     else:
-        # 드롭다운으로 관리할 포트폴리오 선택
-        selected_port = st.selectbox(
-            "관리할 포트폴리오 선택", 
-            options=list(st.session_state.portfolios.keys())
-        )
+        selected_port = st.selectbox("관리할 포트폴리오 선택", options=list(st.session_state.portfolios.keys()))
         
         if selected_port:
             port_info = st.session_state.portfolios[selected_port]
-            st.subheader(f"📂 {selected_port} (전략: {port_info['strategy']})")
+            current_strategy = port_info['strategy']
+            st.subheader(f"📂 {selected_port} (전략: {current_strategy})")
             
             # 대표주 일괄 추가 버튼
             col_rep, _ = st.columns([1, 3])
             with col_rep:
-                if port_info['strategy'] == '대형주 (Core)':
+                if current_strategy == '대형주 (Core)':
                     if st.button("🏢 대형 대표주 채우기", use_container_width=True):
                         rep_df = pd.DataFrame({'종목명': ['POSCO홀딩스', 'NAVER'], '티커': ['005490', '035420']})
                         comb = pd.concat([port_info['stocks'], rep_df]).drop_duplicates(subset=['티커']).reset_index(drop=True)
@@ -140,24 +167,21 @@ with tab1:
             
             st.markdown("---")
             
-            # 🔍 스마트 종목 검색 및 자동 추가 기능
+            # 스마트 종목 검색
             st.subheader("🔍 개별 종목 검색 및 추가")
             search_kw = st.text_input("추가하고 싶은 종목명 입력 (예: 삼성, 에코프로)", key=f"search_{selected_port}")
             
             if search_kw:
-                # 검색어 필터링 로직
                 filtered_stocks = [name for name in MASTER_STOCKS.keys() if search_kw in name]
-                
                 if filtered_stocks:
                     col_search1, col_search2 = st.columns([3, 1])
                     with col_search1:
                         selected_stock = st.selectbox("검색 결과 (선택하세요)", filtered_stocks, key=f"sel_{selected_port}")
                     with col_search2:
-                        st.markdown("<br>", unsafe_allow_html=True) # 버튼 높이 맞춤
+                        st.markdown("<br>", unsafe_allow_html=True)
                         if st.button("➕ 종목 추가", key=f"add_btn_{selected_port}", use_container_width=True):
                             ticker = MASTER_STOCKS[selected_stock]
                             new_row = pd.DataFrame({'종목명': [selected_stock], '티커': [ticker]})
-                            # 중복 방지하며 데이터프레임에 결합
                             comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
                             st.session_state.portfolios[selected_port]['stocks'] = comb
                             st.rerun()
@@ -165,22 +189,72 @@ with tab1:
                     st.warning("일치하는 종목이 없습니다. 정확한 이름을 입력해보세요.")
 
             st.markdown("---")
-            st.markdown("**현재 포트폴리오 구성 종목 (표 내부에서 직접 삭제 가능)**")
+            st.markdown("**현재 포트폴리오 구성 종목**")
             
-            # 종목 데이터 에디터 (수동 타이핑 및 삭제 가능)
+            # 종목 데이터 에디터
             edited_df = st.data_editor(
                 port_info['stocks'],
                 num_rows="dynamic",
                 use_container_width=True,
                 key=f"editor_{selected_port}"
             )
-            # 변경된 데이터 즉시 저장
             st.session_state.portfolios[selected_port]['stocks'] = edited_df
 
+            st.markdown("---")
+            # ==========================================
+            # 실시간 포트폴리오 진단 기능 (매수/매도 추천)
+            # ==========================================
+            st.subheader("🩺 실시간 매매 액션 플랜 진단")
+            
+            if st.button("현재 포트폴리오 진단 실행", type="primary"):
+                if edited_df.empty:
+                    st.warning("진단할 종목이 없습니다. 먼저 종목을 추가해주세요.")
+                else:
+                    with st.spinner("야후 파이낸스에서 실시간 데이터를 분석 중입니다..."):
+                        results = []
+                        for idx, row in edited_df.iterrows():
+                            s_name = row['종목명']
+                            s_ticker = row['티커']
+                            
+                            c_price, ma120, drawdown = fetch_stock_status(s_ticker)
+                            
+                            if c_price is None:
+                                results.append({'종목명': s_name, '현재가': '데이터 없음', '진단 기준': '-', '액션 플랜': '⚠️ 확인 불가'})
+                                continue
+                            
+                            # 대형주 룰 적용 (120일선 추세)
+                            if current_strategy == '대형주 (Core)':
+                                condition = f"120일선: {ma120:,.0f}원"
+                                if c_price >= ma120:
+                                    action = "🟢 매수 / 보유 (추세 양호)"
+                                else:
+                                    action = "🔴 매도 / 현금화 (추세 이탈)"
+                                    
+                            # 중소형주 룰 적용 (손절 컷 및 모멘텀)
+                            else:
+                                condition = f"고점대비 낙폭: {drawdown:+.2f}%"
+                                if drawdown <= sat_stop_loss:
+                                    action = f"🔴 강제 매도 (손절컷 {sat_stop_loss}% 도달)"
+                                elif drawdown > -5.0: # 고점 부근
+                                    action = "🟢 매수 (강한 모멘텀)"
+                                else:
+                                    action = "🟡 관망 (Hold)"
+                                    
+                            results.append({
+                                '종목명': s_name,
+                                '현재가': f"{c_price:,.0f} 원",
+                                '진단 기준': condition,
+                                '액션 플랜': action
+                            })
+                        
+                        res_df = pd.DataFrame(results)
+                        st.table(res_df)
+                        st.info("💡 **안내:** 야후 파이낸스의 실시간/지연 데이터를 바탕으로 설정하신 전략 룰(Rule)에 따라 기계적으로 판별된 결과입니다.")
+
 with tab2:
-    st.header("백테스트 시뮬레이션")
+    st.header("Simulation & Backtest")
     
-    st.markdown("설정된 금액과 전략(룰), 종목 풀을 바탕으로 시뮬레이션을 실행합니다.")
+    st.markdown("설정된 금액과 전략, 종목 풀을 바탕으로 과거 5개년 성과를 시뮬레이션 합니다.")
     target_year = st.selectbox("검증 연도 선택", [2021, 2022, 2023, 2024, 2025], index=2)
     
     if st.button("시뮬레이션 시작", type="primary", use_container_width=True):
@@ -189,7 +263,7 @@ with tab2:
         else:
             with st.spinner("로직 구동 중... (각 전략별 룰 적용 중)"):
                 
-                # 가상의 성과 데이터 (각 연도별 대형주/중소형주 룰 적용 결과값)
+                # 가상의 연도별 백테스트 기준치
                 base_returns = {
                     2021: {'Core': 28.4, 'Sat': 70.3},
                     2022: {'Core': -4.2, 'Sat': -21.8},
@@ -203,8 +277,6 @@ with tab2:
                 total_final = 0
                 
                 st.success(f"✅ {target_year}년도 시뮬레이션 결과")
-                
-                # 포트폴리오 개수에 맞춰 컬럼 동적 생성
                 cols = st.columns(len(st.session_state.portfolios))
                 
                 for idx, (p_name, p_data) in enumerate(st.session_state.portfolios.items()):
@@ -212,14 +284,10 @@ with tab2:
                     strat = p_data['strategy']
                     stock_count = len(p_data['stocks'])
                     
-                    # 태그(전략)에 따라 수익률 차등 적용 (종목이 없으면 0%)
-                    if strat == '대형주 (Core)':
-                        ret = res['Core'] if stock_count > 0 else 0
-                    else:
-                        ret = res['Sat'] if stock_count > 0 else 0
+                    if strat == '대형주 (Core)': ret = res['Core'] if stock_count > 0 else 0
+                    else: ret = res['Sat'] if stock_count > 0 else 0
                         
                     final_val = init_cash * (1 + ret / 100)
-                    
                     total_initial += init_cash
                     total_final += final_val
                     
