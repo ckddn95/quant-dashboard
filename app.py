@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가짜 골든크로스 차단(휩소 필터)**, **강세장 부스터**, **트레일링 스탑**이 결합된 고수익 추구형 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **200일선 장기 추세 필터**, **연속 손실 종목 쿨다운(60일 매수금지)**, **KOSPI 벤치마크 비교**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -576,7 +576,7 @@ with tab2:
                             common_index = common_index.intersection(stock_dfs[name].index)
                             
                         portfolio_history = []
-                        history_records = []  # 매일의 자산 현황을 기록할 리스트
+                        history_records = [] 
                         
                         trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0, 'realized_pnl': 0.0} for name in stock_dfs}
                         
@@ -686,6 +686,7 @@ with tab2:
                                                     avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
                                                 else:
                                                     avg_buy_price[name] = c_price
+                                                    peak_price_since_buy[name] = c_price
                                                 shares[name] += added_shares
                                                 trade_stats[name]['fee'] += fee
                                                 max_invested[name] = max(max_invested[name], shares[name] * c_price)
@@ -699,6 +700,7 @@ with tab2:
                                                         avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
                                                     else:
                                                         avg_buy_price[name] = c_price
+                                                        peak_price_since_buy[name] = c_price
                                                     shares[name] += added_shares
                                                     trade_stats[name]['fee'] += fee
                                                     max_invested[name] = max(max_invested[name], shares[name] * c_price)
@@ -755,7 +757,6 @@ with tab2:
                             final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
                             portfolio_history.append(max(cash + final_eval, 0))
                             
-                            # 매일의 현금 및 종목별 평가금액을 기록
                             record = {'Date': date_val, '현금(Cash)': max(cash, 0)}
                             for name in stock_dfs:
                                 record[name] = shares[name] * stock_dfs[name].loc[date_val, 'Close']
@@ -878,6 +879,6 @@ with tab2:
                         eom_weights = eom_weights.fillna(0)
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
-                        st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, %)")
-                        st.area_chart(eom_weights)
-                        st.info("💡 위 비중 추이는 과거 매일의 실제 자금 투입 내역을 기록한 것으로, 현금(Cash) 비중의 역동적인 조절(방어 및 부스터)을 시각적으로 확인할 수 있습니다.")
+                        st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, 누적 막대)")
+                        st.bar_chart(eom_weights)
+                        st.info("💡 위 누적 막대 차트는 종목과 현금이 겹치지 않고(Stacked) 매월 100% 비중 내에서 어떻게 분배되었는지 직관적으로 보여줍니다.")
