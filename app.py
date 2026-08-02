@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가짜 골든크로스 차단(휩소 필터)**, **강세장 부스터**, **트레일링 스탑**이 결합된 고수익 추구형 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **200일선 장기 추세 필터**, **연속 손실 종목 쿨다운(60일 매수금지)**, **KOSPI 벤치마크 비교**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -66,13 +66,13 @@ def fetch_market_data():
         return 20.0, False, True, 0.0
 
 # ==========================================
-# 실시간 주가 및 듀얼 모멘텀 지표 수집 함수
+# 실시간 주가 및 200일선 장기 추세 지표 수집 함수
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
     try:
         for suffix in ['.KS', '.KQ']:
-            df = yf.download(f"{ticker_code}{suffix}", period="1y", progress=False)
+            df = yf.download(f"{ticker_code}{suffix}", period="2y", progress=False)
             if not df.empty and len(df) > 0:
                 if isinstance(df.columns, pd.MultiIndex): 
                     df.columns = df.columns.get_level_values(0)
@@ -82,6 +82,7 @@ def fetch_stock_status(ticker_code):
                 if len(close_prices) == 0: continue
                 
                 current_price = float(close_prices.iloc[-1])
+                ma200 = float(close_prices.rolling(window=200).mean().iloc[-1]) if len(close_prices) >= 200 else current_price
                 ma60 = float(close_prices.rolling(window=60).mean().iloc[-1]) if len(close_prices) >= 60 else current_price
                 ma60_10d_ago = float(close_prices.rolling(window=60).mean().iloc[-11]) if len(close_prices) >= 70 else ma60
                 ma20 = float(close_prices.rolling(window=20).mean().iloc[-1]) if len(close_prices) >= 20 else current_price
@@ -95,13 +96,13 @@ def fetch_stock_status(ticker_code):
                 ret_60 = ((current_price / float(close_prices.iloc[-60])) - 1) * 100 if len(close_prices) >= 60 else 0.0
                 ret_20 = ((current_price / float(close_prices.iloc[-20])) - 1) * 100 if len(close_prices) >= 20 else 0.0
                 
-                # 60일선 우상향 기울기 (10일 전 대비)
                 ma60_slope_positive = (ma60 > ma60_10d_ago) 
+                is_above_ma200 = (current_price >= ma200) # 200일 장기 추세선 상회 여부
                 
-                return current_price, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive
+                return current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200
     except Exception:
         pass
-    return None, None, None, None, None, None, None, False
+    return None, None, None, None, None, None, None, None, False, False
 
 # ==========================================
 # 2. 데이터 저장소 초기화
@@ -174,16 +175,20 @@ if st.sidebar.button("포트폴리오 생성하기", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
 
-st.sidebar.markdown("**기본 리스크 관리 (Whipsaw 방어)**")
-whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5, help="20일선이 60일선을 이 수치만큼 확실히 뚫어야 가짜 반등이 아닌 진짜 추세로 인정합니다.")
+st.sidebar.markdown("**횡보/하락장 방어 필터**")
+use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True, help="주가가 200일선 위에 있는 대세 상승 종목만 매수합니다. (LG엔솔류 하락장 진입 차단)")
+cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=60, step=15, help="연속 2번 손실 발생 시 해당 종목을 지정일 동안 강제 매수 금지합니다. (삼성바이오류 휩소 차단)")
+
+st.sidebar.markdown("**기본 리스크 관리**")
+whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5)
 sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-15, step=1)
 max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=35, step=5)
 min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1)
 
-st.sidebar.markdown("**🔥 대세 추세장 셋업 (Let Winners Run)**")
-ts_target_pct = st.sidebar.slider("트레일링 스탑 가동 목표 수익률 (%)", min_value=10, max_value=100, value=30, step=5, help="수익이 이 수치에 도달해야만 고점 대비 하락 익절 룰이 켜집니다.")
-ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=-10, step=1, help="가동 후 최고점 대비 이만큼 빠지면 익절합니다.")
-bull_market_boost = st.sidebar.checkbox("🔥 강세장(KOSPI>60일선) 자금 풀 부스터", value=True, help="시장이 상승장일 경우, 남는 현금 없이 종목당 투입 한도를 1.5배 자동 상향합니다.")
+st.sidebar.markdown("**🔥 대세 추세장 셋업**")
+ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=30, step=5)
+ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=-10, step=1)
+bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
 # ==========================================
 # 4. 탭 구성
@@ -264,7 +269,7 @@ with tab1:
                 if edited_df.empty:
                     st.warning("진단할 종목이 없습니다.")
                 else:
-                    with st.spinner("거시 지표 및 개별 종목 휩소(Whipsaw) 방지 필터 분석 중..."):
+                    with st.spinner("거시 지표 및 200일 대장기 추세선 필터 분석 중..."):
                         vix_val, vix_contrarian, vix_safe, kospi_ret_60 = fetch_market_data()
                         
                         vix_text = f"VIX {vix_val:.1f}"
@@ -285,28 +290,30 @@ with tab1:
                             if pd.isna(quantity): quantity = 0
                             is_holding = (quantity > 0) and (buy_price > 0)
                             
-                            c_price, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive = fetch_stock_status(s_ticker)
+                            c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200 = fetch_stock_status(s_ticker)
                             if c_price is None: continue
                             
                             stock_data_cache[s_name] = {
-                                'price': c_price, 'ma60': ma60, 'ma20': ma20, 
+                                'price': c_price, 'ma200': ma200, 'ma60': ma60, 'ma20': ma20, 
                                 'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 'ret_20': ret_20,
-                                'ma60_slope': ma60_slope_positive, 'is_holding': is_holding
+                                'ma60_slope': ma60_slope_positive, 'is_above_ma200': is_above_ma200, 'is_holding': is_holding
                             }
                             
                             vol_strong = vol_ratio >= 150.0
                             rs_strong = ret_60 > kospi_ret_60
                             
-                            # 신규 매수 조건: MACD 버퍼 통과 + 20일 절대 모멘텀(수익률) 양수 + 60일선 우상향
+                            # 200일선 필터 조건 반영
+                            ma200_pass = (not use_ma200_filter) or is_above_ma200
+                            
                             if current_strategy == '대형주 (Core)':
-                                if not is_holding and (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian):
+                                if not is_holding and ma200_pass and (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian):
                                     score = 1.0
                                     if vol_strong: score += 0.5
                                     if rs_strong: score += 0.5
                                     if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
                             else:
-                                if not is_holding and ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and drawdown >= -15.0):
+                                if not is_holding and ma200_pass and ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and drawdown >= -15.0):
                                     score = 1.0
                                     if vol_strong: score += 0.5
                                     if rs_strong: score += 0.5
@@ -348,6 +355,7 @@ with tab1:
                                 
                             data = stock_data_cache[s_name]
                             c_price = data['price']
+                            ma200 = data['ma200']
                             ma60 = data['ma60']
                             ma20 = data['ma20']
                             drawdown = data['drawdown']
@@ -355,45 +363,49 @@ with tab1:
                             ret_60 = data['ret_60']
                             ret_20 = data['ret_20']
                             ma60_slope_positive = data['ma60_slope']
+                            is_above_ma200 = data['is_above_ma200']
                             
                             vol_strong = vol_ratio >= 150.0
                             rs_strong = ret_60 > kospi_ret_60
                             
                             vol_status = f"거래량 {vol_ratio:.0f}%(수급 급증)" if vol_strong else (f"거래량 {vol_ratio:.0f}%(수급 보통)" if vol_ratio >= 80 else f"거래량 {vol_ratio:.0f}%(수급 침체)")
-                            rs_status = f"상대강도 우위(시장 주도주)" if rs_strong else "상대강도 열위"
-                            slope_status = "60일선 우상향" if ma60_slope_positive else "60일선 횡보/우하향"
+                            rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
+                            ma200_status = "200일선 상회(대상승장)" if is_above_ma200 else "200일선 하회(장기하락/횡보)"
 
                             if current_strategy == '대형주 (Core)':
                                 diff_ma = ((ma20 / ma60) - 1) * 100
-                                tech_text = f"20/60선 이격도 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
+                                tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
                                 
                                 if is_holding: 
                                     if ma20 >= ma60 * (1 - buf/2): 
                                         action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중 (Let Winners Run)."
+                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중."
                                     else: 
                                         action = "🔴 전량 매도 (현금화)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 이탈 확정으로 즉각 현금화."
+                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
                                 else: 
-                                    if ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
+                                    if (use_ma200_filter and not is_above_ma200):
+                                        action = "🟡 진입 보류 (200일선 하회)"
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선(200일선) 아래에 위치하여 진입 금지(하락장 방어)."
+                                    elif ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                                         target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            reason = "V자 반등 바닥잡기" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 확실 돌파"
-                                            detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason} 검증 완료(알파 스코어: {buy_scores[s_name]:.1f})."
+                                            reason = "V자 반등 바닥잡기" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 및 200일선 통과"
+                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}] | [{vol_status}]\n➔ {reason} 검증 완료."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}] | [{slope_status}]\n➔ 조건은 우수하나 가용 현금 부족."
+                                            detail = f"[{tech_text}]\n➔ 가용 현금 부족."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}]\n➔ 가짜 반등(휩소) 가능성으로 관망."
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 가짜 반등(휩소) 구간으로 진입 보류."
                             else:
                                 if is_holding: 
                                     user_ret = ((c_price / buy_price) - 1) * 100
-                                    tech_text = f"수익률 {user_ret:+.2f}%, 20/60선 상태"
+                                    tech_text = f"수익률 {user_ret:+.2f}%"
                                     if user_ret <= sat_stop_loss: 
                                         action = "🔴 강제 손절 집행"
                                         detail = f"[{tech_text}]\n➔ 긴급 손절선 이탈."
@@ -402,40 +414,41 @@ with tab1:
                                         detail = f"[{tech_text}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
                                     else:
                                         action = "🔴 전량 매도"
-                                        detail = f"[{tech_text}]\n➔ 버퍼 이탈 데드크로스로 차익 실현/손절."
+                                        detail = f"[{tech_text}]\n➔ 데드크로스로 차익 실현/손절."
                                 else: 
                                     diff_ma = ((ma20 / ma60) - 1) * 100
-                                    tech_text = f"이격도 {diff_ma:+.2f}%, 모멘텀 {ret_20:+.2f}%"
-                                    if ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and drawdown >= -15.0): 
+                                    tech_text = f"이격도 {diff_ma:+.2f}%"
+                                    if (use_ma200_filter and not is_above_ma200):
+                                        action = "🟡 진입 보류 (200일선 하회)"
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
+                                    elif ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and drawdown >= -15.0): 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                                         target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            reason = "V자 바닥 포착" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 확실 돌파"
-                                            detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason} 기반 매수."
+                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 200일선 위 상승 모멘텀 진입."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}]\n➔ 가용 현금 부족."
+                                            detail = f"[{tech_text}]\n➔ 현금 부족."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}]\n➔ 가짜 반등(휩소) 가능성으로 관망."
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 진입 조건 미달."
                                     
                             results.append({
                                 '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
                                 '액션 플랜': action, '상세 AI 판단 근거': detail
                             })
                         
-                        boost_msg = f" (🔥강세장 부스터 작동 중: 한도 최대 {current_max_alloc_ratio*100:.0f}%)" if (bull_market_boost and kospi_ret_60 > 0) else ""
-                        st.info(f"📊 **[휩소 방지 및 스마트 배분 현황]**\n\n"
+                        st.info(f"📊 **[200일선 추세 필터 & 쿨다운 작동 중]**\n\n"
                                 f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
-                                f"• **운용 특징:** MACD 버퍼({whipsaw_buffer}%)와 20일 절대모멘텀 필터를 통과한 '진짜 상승 추세'만 엄선하여 매매를 최소화하고 승률을 높입니다.{boost_msg}")
+                                f"• **핵심 방어선:** 주가가 200일선 아래인 장기 하락 종목(LG엔솔 등)과 연속 2회 손실을 낸 박스권 횡보 종목(삼성바이오 등)을 자동 차단합니다.")
                         st.table(pd.DataFrame(results))
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("과거 주가 데이터를 바탕으로 **가짜 반등 필터(Whipsaw Buffer) + 강세장 부스터 + VIX 바닥잡기**가 결합된 초과 수익 추구 엔진을 검증합니다.")
+    st.markdown("과거 주가 데이터를 바탕으로 **200일선 추세 필터 + 연속 2회 손실 쿨다운(60일 매수금지) + 강세장 부스터**가 적용된 백테스트를 실행합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -457,8 +470,8 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("KOSPI 벤치마크, 개별 종목 휩소 필터 정밀 분석 구동 중..."):
-                    fetch_start = start_date - datetime.timedelta(days=200)
+                with st.spinner("200일선 대장기 추세선 및 연속 손실 쿨다운 룰 검증 구동 중..."):
+                    fetch_start = start_date - datetime.timedelta(days=300)
                     
                     market_df = pd.DataFrame()
                     kospi_ret_val = 0.0
@@ -512,11 +525,14 @@ with tab2:
                         df['Volume'] = df['Volume'].ffill()
                         df['Daily_Ret'] = df['Close'].pct_change()
                         
+                        df['MA200'] = df['Close'].rolling(200).mean() # 200일선
+                        df['Is_Above_MA200'] = df['Close'] >= df['MA200']
+                        
                         df['MA60'] = df['Close'].rolling(60).mean()
-                        df['MA60_Slope'] = df['MA60'] > df['MA60'].shift(10) # 10일 전 대비 확실한 추세 전환
+                        df['MA60_Slope'] = df['MA60'] > df['MA60'].shift(10)
                         df['MA20'] = df['Close'].rolling(20).mean()
                         df['Ret_60'] = df['Close'] / df['Close'].shift(60) - 1
-                        df['Ret_20'] = df['Close'] / df['Close'].shift(20) - 1 # 20일 절대 모멘텀 추가
+                        df['Ret_20'] = df['Close'] / df['Close'].shift(20) - 1
                         
                         df['Vol_5MA'] = df['Volume'].rolling(5).mean().shift(1)
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
@@ -528,16 +544,17 @@ with tab2:
                         df['Kospi_Ret_60'] = df['Kospi_Ret_60'].fillna(0.0)
                         df['Kospi_Bull'] = df['Kospi_Bull'].fillna(False)
                         
-                        # 핵심: 버퍼(buf)와 20일 절대모멘텀(>0)을 결합하여 가짜 휩소를 완벽 차단
+                        ma200_cond = df['Is_Above_MA200'] if use_ma200_filter else True
+                        
                         if strat == '대형주 (Core)':
-                            entry_cond = ((df['MA20'] >= df['MA60'] * (1 + buf)) & df['MA60_Slope'] & (df['Ret_20'] > 0) & df['VIX_Safe']) | df['VIX_Contrarian']
+                            entry_cond = (ma200_cond & (df['MA20'] >= df['MA60'] * (1 + buf)) & df['MA60_Slope'] & (df['Ret_20'] > 0) & df['VIX_Safe']) | df['VIX_Contrarian']
                             exit_cond = (df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian'])
                         else:
                             df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
                             stop_loss_pct = sat_stop_loss / 100.0
                             
-                            entry_cond = (((df['MA20'] >= df['MA60'] * (1 + buf)) & df['MA60_Slope'] & (df['Ret_20'] > 0) & df['VIX_Safe']) | df['VIX_Contrarian']) & (df['Drawdown'] >= -0.15)
+                            entry_cond = (ma200_cond & (df['MA20'] >= df['MA60'] * (1 + buf)) & df['MA60_Slope'] & (df['Ret_20'] > 0) & df['VIX_Safe'] | df['VIX_Contrarian']) & (df['Drawdown'] >= -0.15)
                             exit_cond = (df['Drawdown'] <= stop_loss_pct) | ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
                         
                         df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
@@ -567,6 +584,10 @@ with tab2:
                         hold_days = {name: 0 for name in stock_dfs}
                         max_invested = {name: 0.0 for name in stock_dfs}
                         peak_price_since_buy = {name: 0.0 for name in stock_dfs}
+                        
+                        # 연속 손실 카운트 및 쿨다운 만료일 추적 변수
+                        consecutive_losses = {name: 0 for name in stock_dfs}
+                        cooldown_until = {name: pd.Timestamp.min for name in stock_dfs}
                         
                         cash = init_cash
                         avg_buy_price = {name: 0.0 for name in stock_dfs}
@@ -601,6 +622,10 @@ with tab2:
                             for name, df in stock_dfs.items():
                                 sig = df.loc[date_val, 'Signal']
                                 c_price = df.loc[date_val, 'Close']
+                                
+                                # 쿨다운 기간 체크: 연속 손실로 쿨다운 중이면 진입 무조건 차단
+                                if shares[name] == 0 and date_val < cooldown_until[name]:
+                                    sig = 0.0
                                 
                                 trailing_stop_exit = False
                                 if shares[name] > 0 and avg_buy_price[name] > 0:
@@ -687,10 +712,19 @@ with tab2:
                                             shares[name] -= sold_shares
                                             trade_stats[name]['fee'] += fee
                                     else:
-                                        if shares[name] > 0: 
+                                        if shares[name] > 0: # 전량 청산 시 손익 판정 및 쿨다운 카운팅
                                             proceeds = shares[name] * c_price
                                             fee = proceeds * 0.0025
                                             pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
+                                            
+                                            # 손익 판정
+                                            if pnl < 0:
+                                                consecutive_losses[name] += 1
+                                                if consecutive_losses[name] >= 2 and cooldown_days > 0:
+                                                    cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
+                                            else:
+                                                consecutive_losses[name] = 0
+                                                
                                             realized_pnl[name] += pnl
                                             cash += (proceeds - fee)
                                             trade_stats[name]['fee'] += fee
@@ -704,6 +738,14 @@ with tab2:
                                         proceeds = shares[name] * c_price
                                         fee = proceeds * 0.0025
                                         pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
+                                        
+                                        if pnl < 0:
+                                            consecutive_losses[name] += 1
+                                            if consecutive_losses[name] >= 2 and cooldown_days > 0:
+                                                cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
+                                        else:
+                                            consecutive_losses[name] = 0
+                                            
                                         realized_pnl[name] += pnl
                                         cash += (proceeds - fee)
                                         trade_stats[name]['fee'] += fee
@@ -750,7 +792,7 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 가짜 반등 필터링 및 고수익 백테스트 완료!")
+                        st.success(f"✅ 200일선 추세 필터 및 손실 쿨다운 적용 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
@@ -761,10 +803,10 @@ with tab2:
                         
                         comparison_data = [
                             {
-                                '전략 구분': '🚀 AI 초과수익 전략 (Whipsaw Filter + Bull Booster)',
+                                '전략 구분': '🚀 AI 초과수익 전략 (200D Filter + Cooldown)',
                                 '최종 기말 자산': f"{final_asset:,.0f} 원",
                                 '총 수익률': f"{final_port_ret:+.2f}%",
-                                '운용 방식 및 특징': f'20일선이 60일선을 단순 교차하는 것을 넘어, 설정된 버퍼({whipsaw_buffer}%) 이상 확실히 돌파하고 최근 20일 모멘텀이 양수일 때만 진입하여 횡보장 휩소를 완벽 차단합니다.'
+                                '운용 방식 및 특징': f'200일선 아래 장기 하락 종목 매수 금지 및 연속 2회 손실 종목 {cooldown_days}일 매수 동결. 버퍼({whipsaw_buffer}%) 통과 상승 종목에 집중 배분하여 박스권 수수료 낭비 원천 차단.'
                             },
                             {
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
@@ -833,4 +875,4 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 각 주식의 보유 비중 추이 (%)")
                         st.area_chart(eom_weights)
-                        st.info("💡 위 비중 추이는 박스권 장세의 잦은 휩소를 효과적으로 방어하고 확실한 상승 모멘텀에서만 자금을 동적으로 투입한 결과입니다.")
+                        st.info("💡 위 비중 추이는 200일선 아래 하락 종목과 횡보 잔파도 종목을 격리시키고, 오르는 대형 주도주에만 자금을 집중한 결과입니다.")
