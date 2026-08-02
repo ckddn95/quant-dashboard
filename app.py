@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **200일선 장기 추세 필터**, **연속 손실 종목 쿨다운(60일 매수금지)**, **KOSPI 벤치마크 비교**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가짜 골든크로스 차단(휩소 필터)**, **강세장 부스터**, **트레일링 스탑**이 결합된 고수익 추구형 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -97,7 +97,7 @@ def fetch_stock_status(ticker_code):
                 ret_20 = ((current_price / float(close_prices.iloc[-20])) - 1) * 100 if len(close_prices) >= 20 else 0.0
                 
                 ma60_slope_positive = (ma60 > ma60_10d_ago) 
-                is_above_ma200 = (current_price >= ma200) # 200일 장기 추세선 상회 여부
+                is_above_ma200 = (current_price >= ma200) 
                 
                 return current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200
     except Exception:
@@ -176,8 +176,8 @@ st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
 
 st.sidebar.markdown("**횡보/하락장 방어 필터**")
-use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True, help="주가가 200일선 위에 있는 대세 상승 종목만 매수합니다. (LG엔솔류 하락장 진입 차단)")
-cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=60, step=15, help="연속 2번 손실 발생 시 해당 종목을 지정일 동안 강제 매수 금지합니다. (삼성바이오류 휩소 차단)")
+use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True)
+cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=60, step=15)
 
 st.sidebar.markdown("**기본 리스크 관리**")
 whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5)
@@ -302,7 +302,6 @@ with tab1:
                             vol_strong = vol_ratio >= 150.0
                             rs_strong = ret_60 > kospi_ret_60
                             
-                            # 200일선 필터 조건 반영
                             ma200_pass = (not use_ma200_filter) or is_above_ma200
                             
                             if current_strategy == '대형주 (Core)':
@@ -470,7 +469,7 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("200일선 대장기 추세선 및 연속 손실 쿨다운 룰 검증 구동 중..."):
+                with st.spinner("200일선 대장기 추세선 및 동적 비중 기록을 포함한 백테스트 구동 중..."):
                     fetch_start = start_date - datetime.timedelta(days=300)
                     
                     market_df = pd.DataFrame()
@@ -525,7 +524,7 @@ with tab2:
                         df['Volume'] = df['Volume'].ffill()
                         df['Daily_Ret'] = df['Close'].pct_change()
                         
-                        df['MA200'] = df['Close'].rolling(200).mean() # 200일선
+                        df['MA200'] = df['Close'].rolling(200).mean()
                         df['Is_Above_MA200'] = df['Close'] >= df['MA200']
                         
                         df['MA60'] = df['Close'].rolling(60).mean()
@@ -577,6 +576,8 @@ with tab2:
                             common_index = common_index.intersection(stock_dfs[name].index)
                             
                         portfolio_history = []
+                        history_records = []  # 매일의 자산 현황을 기록할 리스트
+                        
                         trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0, 'realized_pnl': 0.0} for name in stock_dfs}
                         
                         dates = common_index
@@ -585,7 +586,6 @@ with tab2:
                         max_invested = {name: 0.0 for name in stock_dfs}
                         peak_price_since_buy = {name: 0.0 for name in stock_dfs}
                         
-                        # 연속 손실 카운트 및 쿨다운 만료일 추적 변수
                         consecutive_losses = {name: 0 for name in stock_dfs}
                         cooldown_until = {name: pd.Timestamp.min for name in stock_dfs}
                         
@@ -600,6 +600,9 @@ with tab2:
                         for i, date_val in enumerate(dates):
                             if i == 0:
                                 portfolio_history.append(init_cash)
+                                record = {'Date': date_val, '현금(Cash)': init_cash}
+                                for name in stock_dfs: record[name] = 0.0
+                                history_records.append(record)
                                 continue
                                 
                             prev_date = dates[i-1]
@@ -623,7 +626,6 @@ with tab2:
                                 sig = df.loc[date_val, 'Signal']
                                 c_price = df.loc[date_val, 'Close']
                                 
-                                # 쿨다운 기간 체크: 연속 손실로 쿨다운 중이면 진입 무조건 차단
                                 if shares[name] == 0 and date_val < cooldown_until[name]:
                                     sig = 0.0
                                 
@@ -684,7 +686,6 @@ with tab2:
                                                     avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
                                                 else:
                                                     avg_buy_price[name] = c_price
-                                                    peak_price_since_buy[name] = c_price
                                                 shares[name] += added_shares
                                                 trade_stats[name]['fee'] += fee
                                                 max_invested[name] = max(max_invested[name], shares[name] * c_price)
@@ -698,7 +699,6 @@ with tab2:
                                                         avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
                                                     else:
                                                         avg_buy_price[name] = c_price
-                                                        peak_price_since_buy[name] = c_price
                                                     shares[name] += added_shares
                                                     trade_stats[name]['fee'] += fee
                                                     max_invested[name] = max(max_invested[name], shares[name] * c_price)
@@ -712,12 +712,11 @@ with tab2:
                                             shares[name] -= sold_shares
                                             trade_stats[name]['fee'] += fee
                                     else:
-                                        if shares[name] > 0: # 전량 청산 시 손익 판정 및 쿨다운 카운팅
+                                        if shares[name] > 0: 
                                             proceeds = shares[name] * c_price
                                             fee = proceeds * 0.0025
                                             pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
                                             
-                                            # 손익 판정
                                             if pnl < 0:
                                                 consecutive_losses[name] += 1
                                                 if consecutive_losses[name] >= 2 and cooldown_days > 0:
@@ -755,6 +754,12 @@ with tab2:
                                         
                             final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
                             portfolio_history.append(max(cash + final_eval, 0))
+                            
+                            # 매일의 현금 및 종목별 평가금액을 기록
+                            record = {'Date': date_val, '현금(Cash)': max(cash, 0)}
+                            for name in stock_dfs:
+                                record[name] = shares[name] * stock_dfs[name].loc[date_val, 'Close']
+                            history_records.append(record)
                             
                         ai_portfolio_series = pd.Series(portfolio_history, index=common_index)
                         
@@ -863,16 +868,16 @@ with tab2:
                         
                         st.markdown("---")
                         
-                        val_df_chart = pd.DataFrame({name: (stock_dfs[name]['Close'] * shares[name]) for name in stock_dfs})
+                        history_df = pd.DataFrame(history_records).set_index('Date')
                         try:
-                            eom_val_df = val_df_chart.resample('ME').last()
+                            eom_val_df = history_df.resample('ME').last()
                         except ValueError:
-                            eom_val_df = val_df_chart.resample('M').last()
+                            eom_val_df = history_df.resample('M').last()
                             
                         eom_weights = eom_val_df.div(eom_val_df.sum(axis=1), axis=0) * 100
                         eom_weights = eom_weights.fillna(0)
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
-                        st.subheader("📊 월말 기준 각 주식의 보유 비중 추이 (%)")
+                        st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, %)")
                         st.area_chart(eom_weights)
-                        st.info("💡 위 비중 추이는 200일선 아래 하락 종목과 횡보 잔파도 종목을 격리시키고, 오르는 대형 주도주에만 자금을 집중한 결과입니다.")
+                        st.info("💡 위 비중 추이는 과거 매일의 실제 자금 투입 내역을 기록한 것으로, 현금(Cash) 비중의 역동적인 조절(방어 및 부스터)을 시각적으로 확인할 수 있습니다.")
