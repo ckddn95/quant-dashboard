@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **추세 기울기 필터**, **트레일링 스탑 익절**, **KOSPI 벤치마크 비교**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **강세장 부스터(풀매수)**, **추세 추종(Let Winners Run)**, **VIX 역발상**이 결합된 고수익 추구형 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -54,9 +54,9 @@ def fetch_market_data():
         vix_contrarian = (vix_val >= 25.0) and (vix_val < vix_ma3)
         vix_safe = (vix_val < 30.0)
         
-        kospi_df = yf.download("^KS11", period="4mo", progress=False)
-        if isinstance(kospi_df.columns, pd.MultiIndex): kospi_df.columns = kospi_df.columns.get_level_values(0)
-        k_close = kospi_df['Close'].dropna()
+        # KOSPI는 데이터가 안정적인 fdr로 교체
+        kospi_df = fdr.DataReader('KS11')
+        k_close = kospi_df['Close'].tail(61)
         if len(k_close) >= 60:
             kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100
         else:
@@ -95,7 +95,7 @@ def fetch_stock_status(ticker_code):
                 
                 ret_60 = ((current_price / float(close_prices.iloc[-60])) - 1) * 100 if len(close_prices) >= 60 else 0.0
                 
-                ma60_slope_positive = (ma60 > ma60_5d_ago) # 60일선 우상향 기울기 여부
+                ma60_slope_positive = (ma60 > ma60_5d_ago) 
                 
                 return current_price, ma60, ma20, drawdown, vol_ratio, ret_60, ma60_slope_positive
     except Exception:
@@ -172,9 +172,16 @@ if st.sidebar.button("포트폴리오 생성하기", use_container_width=True):
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
+
+st.sidebar.markdown("**기본 리스크 관리**")
 sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-15, step=1)
-max_alloc_pct = st.sidebar.slider("종목당 최대 투입 비중 한도 (%)", min_value=10, max_value=60, value=35, step=5)
+max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=35, step=5)
 min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1)
+
+st.sidebar.markdown("**🔥 대세 추세장 셋업 (Let Winners Run)**")
+ts_target_pct = st.sidebar.slider("트레일링 스탑 가동 목표 수익률 (%)", min_value=10, max_value=100, value=30, step=5, help="수익이 이 수치에 도달해야만 고점 대비 하락 익절 룰이 켜집니다. (몸통을 길게 먹기 위함)")
+ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=-10, step=1, help="가동 후 최고점 대비 이만큼 빠지면 익절합니다.")
+bull_market_boost = st.sidebar.checkbox("🔥 강세장(KOSPI>60일선) 자금 풀 부스터", value=True, help="시장이 상승장일 경우, 남는 현금 없이 종목당 투입 한도를 1.5배 자동 상향합니다.")
 
 # ==========================================
 # 4. 탭 구성
@@ -287,7 +294,6 @@ with tab1:
                             vol_strong = vol_ratio >= 150.0
                             rs_strong = ret_60 > kospi_ret_60
                             
-                            # 신규 매수 조건: 60일선 우상향 기울기가 유효할 때만 골든크로스 인정
                             if current_strategy == '대형주 (Core)':
                                 if not is_holding and (((ma20 >= ma60 and ma60_slope_positive) and vix_safe) or vix_contrarian):
                                     score = 1.0
@@ -304,7 +310,11 @@ with tab1:
                                     buy_scores[s_name] = score
 
                         total_score = sum(buy_scores.values()) if buy_scores else 1.0
-                        max_alloc_ratio = max_alloc_pct / 100.0
+                        
+                        # (진단 화면용) 최근 코스피 강세 여부에 따라 현재 가용 max 비율 표시 보정 
+                        current_max_alloc_ratio = max_alloc_pct / 100.0
+                        if bull_market_boost and kospi_ret_60 > 0:
+                            current_max_alloc_ratio = min(current_max_alloc_ratio * 1.5, 1.0)
 
                         current_stock_eval = 0
                         for idx, row in edited_df.iterrows():
@@ -355,14 +365,14 @@ with tab1:
                                 if is_holding: 
                                     if ma20 >= ma60: 
                                         action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중."
+                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중 (Let Winners Run)."
                                     else: 
                                         action = "🔴 전량 매도 (현금화)"
                                         detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
                                 else: 
                                     if ((ma20 >= ma60 and ma60_slope_positive) and vix_safe) or vix_contrarian: 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
-                                        target_amt = min(total_cash * stock_weight, total_cash * max_alloc_ratio, current_cash)
+                                        target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
@@ -392,7 +402,7 @@ with tab1:
                                     tech_text = f"20/60일선 교차, 낙폭 {drawdown:+.2f}%"
                                     if (((ma20 >= ma60 and ma60_slope_positive) and vix_safe) or vix_contrarian) and drawdown >= -15.0: 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
-                                        target_amt = min(total_cash * stock_weight, total_cash * max_alloc_ratio, current_cash)
+                                        target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
@@ -411,14 +421,15 @@ with tab1:
                                 '액션 플랜': action, '상세 AI 판단 근거': detail
                             })
                         
+                        boost_msg = f" (🔥강세장 부스터 작동 중: 한도 최대 {current_max_alloc_ratio*100:.0f}%)" if (bull_market_boost and kospi_ret_60 > 0) else ""
                         st.info(f"📊 **[스마트 가중치 배분 및 현금 현황]**\n\n"
                                 f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
-                                f"• **운용 특징:** **60일선 우상향 기울기 검증**으로 횡보장 휩소를 차단하고, **트레일링 스탑 익절 룰**로 수익을 안전하게 확정 짓습니다.")
+                                f"• **운용 특징:** 추세가 확실할 때는 이익을 끝까지 발라먹으며(트레일링 컷 완화), 필요 시 부스터 모드를 통해 노는 현금을 최소화합니다.{boost_msg}")
                         st.table(pd.DataFrame(results))
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("과거 주가 데이터를 바탕으로 **기울기 필터 + 트레일링 스탑 + VIX 바닥잡기**가 결합된 고수익 추구 엔진을 검증합니다.")
+    st.markdown("과거 주가 데이터를 바탕으로 **강세장 부스터 + 트레일링 스탑 완화 + VIX 바닥잡기**가 결합된 초과 수익 추구 엔진을 검증합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -440,7 +451,7 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("KOSPI 벤치마크, VIX 및 종목별 기울기/트레일링 스탑 분석 구동 중..."):
+                with st.spinner("KOSPI 벤치마크(버그 수정 완료), VIX 및 종목별 분석 구동 중..."):
                     fetch_start = start_date - datetime.timedelta(days=200)
                     
                     market_df = pd.DataFrame()
@@ -448,11 +459,13 @@ with tab2:
                     final_kospi_asset = init_cash
                     
                     try:
-                        kospi_df = yf.download("^KS11", start=fetch_start, end=end_date, progress=False)
+                        # yfinance의 한국 지수 버그를 피해 fdr 사용
+                        kospi_df = fdr.DataReader('KS11', fetch_start, end_date)
                         if not kospi_df.empty:
-                            if isinstance(kospi_df.columns, pd.MultiIndex): kospi_df.columns = kospi_df.columns.get_level_values(0)
                             kospi_df['Kospi_Ret_60'] = kospi_df['Close'] / kospi_df['Close'].shift(60) - 1
+                            kospi_df['Kospi_MA60'] = kospi_df['Close'].rolling(60).mean()
                             market_df['Kospi_Ret_60'] = kospi_df['Kospi_Ret_60']
+                            market_df['Kospi_Bull'] = kospi_df['Close'] > kospi_df['Kospi_MA60'] # KOSPI가 60일선 위면 강세장
                             
                             sim_kospi = kospi_df.loc[start_date:end_date]['Close'].dropna()
                             if len(sim_kospi) > 1:
@@ -493,7 +506,7 @@ with tab2:
                         df['Daily_Ret'] = df['Close'].pct_change()
                         
                         df['MA60'] = df['Close'].rolling(60).mean()
-                        df['MA60_Slope'] = df['MA60'] > df['MA60'].shift(5) # 60일선 5일 전 대비 우상향 여부
+                        df['MA60_Slope'] = df['MA60'] > df['MA60'].shift(5)
                         df['MA20'] = df['Close'].rolling(20).mean()
                         df['Ret_60'] = df['Close'] / df['Close'].shift(60) - 1
                         
@@ -505,8 +518,8 @@ with tab2:
                         df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
                         df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
                         df['Kospi_Ret_60'] = df['Kospi_Ret_60'].fillna(0.0)
+                        df['Kospi_Bull'] = df['Kospi_Bull'].fillna(False)
                         
-                        # 60일선 우상향 기울기 조건 추가로 휩소 방지
                         if strat == '대형주 (Core)':
                             entry_cond = ((df['MA20'] >= df['MA60']) & df['MA60_Slope'] & df['VIX_Safe']) | df['VIX_Contrarian']
                             exit_cond = (df['MA20'] < df['MA60']) & (~df['VIX_Contrarian'])
@@ -544,15 +557,15 @@ with tab2:
                         shares = {name: 0.0 for name in stock_dfs}
                         hold_days = {name: 0 for name in stock_dfs}
                         max_invested = {name: 0.0 for name in stock_dfs}
-                        
-                        # 트레일링 스탑용 고점가 기록
                         peak_price_since_buy = {name: 0.0 for name in stock_dfs}
                         
                         cash = init_cash
                         avg_buy_price = {name: 0.0 for name in stock_dfs}
                         realized_pnl = {name: 0.0 for name in stock_dfs}
                         
-                        max_alloc_ratio = max_alloc_pct / 100.0
+                        base_alloc_ratio = max_alloc_pct / 100.0
+                        ts_target = ts_target_pct / 100.0
+                        ts_drop = ts_drop_pct / 100.0
                         
                         for i, date_val in enumerate(dates):
                             if i == 0:
@@ -560,6 +573,16 @@ with tab2:
                                 continue
                                 
                             prev_date = dates[i-1]
+                            
+                            # 날짜별 시장 강세 여부에 따라 투입 한도 부스터 설정
+                            current_max_alloc_ratio = base_alloc_ratio
+                            market_bull = False
+                            for df in stock_dfs.values():
+                                market_bull = df.loc[date_val, 'Kospi_Bull']
+                                break
+                            
+                            if bull_market_boost and market_bull:
+                                current_max_alloc_ratio = min(base_alloc_ratio * 1.5, 1.0)
                             
                             for name in stock_dfs:
                                 if shares[name] > 0: hold_days[name] += 1
@@ -571,21 +594,20 @@ with tab2:
                                 sig = df.loc[date_val, 'Signal']
                                 c_price = df.loc[date_val, 'Close']
                                 
-                                # 트레일링 스탑 익절 체크: 매수 후 수익률 +10% 이상 달성 후 최고점 대비 -5% 하락 시 익절 매도
                                 trailing_stop_exit = False
                                 if shares[name] > 0 and avg_buy_price[name] > 0:
                                     peak_price_since_buy[name] = max(peak_price_since_buy[name], c_price)
                                     curr_ret = (c_price / avg_buy_price[name]) - 1
                                     drop_from_peak = (c_price / peak_price_since_buy[name]) - 1
                                     
-                                    if curr_ret >= 0.10 and drop_from_peak <= -0.05:
+                                    # 트레일링 스탑: 설정된 목표 도달 이후, 고점 대비 설정된 허용폭 이상 하락 시
+                                    if curr_ret >= ts_target and drop_from_peak <= ts_drop:
                                         trailing_stop_exit = True
                                 
                                 force_exit = False
                                 if strat != '대형주 (Core)' and df.loc[date_val, 'Drawdown'] <= (sat_stop_loss / 100.0):
                                     force_exit = True
                                     
-                                # 트레일링 스탑이나 손절이 발생하면 즉시 청산
                                 if trailing_stop_exit or force_exit:
                                     sig = 0.0
                                 elif shares[name] > 0 and hold_days[name] < min_hold_days:
@@ -617,7 +639,7 @@ with tab2:
                                     
                                     if name in active_stocks:
                                         weight = scores.get(name, 1.0) / total_score
-                                        target_alloc = min(total_asset * weight, total_asset * max_alloc_ratio)
+                                        target_alloc = min(total_asset * weight, total_asset * current_max_alloc_ratio)
                                         diff_val = target_alloc - current_val
                                         
                                         if diff_val > 0: 
@@ -721,27 +743,27 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 고수익 모멘텀 퀀트 백테스트 완료!")
+                        st.success(f"✅ 강세장 부스터 장착 고수익 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
-                        col_r2.metric(f"고수익 AI 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
+                        col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
                         
                         st.markdown("---")
                         
-                        st.subheader("📊 [전략 비교] KOSPI 지수 vs 단순보유 vs 적립식 매수 vs AI 고수익 추구 전략")
+                        st.subheader("📊 [전략 비교] KOSPI 지수 vs 단순보유 vs 적립식 매수 vs AI 초과수익 추구 전략")
                         
                         comparison_data = [
                             {
-                                '전략 구분': '🚀 AI 고수익 모멘텀 (Dual-Momentum + RS + Trailing Stop)',
+                                '전략 구분': '🚀 AI 초과수익 전략 (Let Winners Run + Bull Booster)',
                                 '최종 기말 자산': f"{final_asset:,.0f} 원",
                                 '총 수익률': f"{final_port_ret:+.2f}%",
-                                '운용 방식 및 특징': '60일선 우상향 확인 후 20/60일선 골든크로스 진입. KOSPI 상회 주도주에 알파 가중치 실어주기. +10% 수익 도달 후 최고점 대비 -5% 이탈 시 트레일링 스탑 사전 익절로 수익 보존.'
+                                '운용 방식 및 특징': f'대세 상승장(KOSPI>60일선) 파악 시 잉여 현금을 없애고 투입 한도를 1.5배 부스팅하여 풀매수. 트레일링 스탑은 {ts_target_pct}% 이상 폭등했을 때만 켜서(+{ts_drop_pct}% 하락 시 익절) 상승장의 몸통을 끝까지 발라먹습니다.'
                             },
                             {
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
                                 '최종 기말 자산': f"{final_kospi_asset:,.0f} 원",
                                 '총 수익률': f"{kospi_ret_val:+.2f}%",
-                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (패시브 투자 기준)'
+                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (버그 수정 완료)'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
@@ -804,4 +826,4 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 각 주식의 보유 비중 추이 (%)")
                         st.area_chart(eom_weights)
-                        st.info("💡 위 비중 추이는 KOSPI 상회 종목 및 기울기가 살아있는 주도주에 자금이 역동적으로 배분되고 익절 룰이 작동한 결과입니다.")
+                        st.info("💡 위 비중 추이는 대세 상승장에서 현금 예비율을 자동으로 낮춰 투자 비중을 키운 '강세장 부스터'의 작동 결과입니다.")
