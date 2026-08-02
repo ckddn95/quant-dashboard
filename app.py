@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import FinanceDataReader as fdr
+import json
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -13,14 +14,13 @@ st.set_page_config(
     layout="wide"
 )
 
-# 제목만 영어로
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장의 **모든 상장 종목(KOSPI/KOSDAQ)**을 자유롭게 검색하여 나만의 포트폴리오를 구성하고, 실시간 매매 진단과 시뮬레이션을 실행하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장의 **모든 상장 종목(KOSPI/KOSDAQ)**을 자유롭게 검색하여 포트폴리오를 구성하고, **'신규 진입'과 '보유/손절'을 명확히 구분**하여 매매 액션 플랜을 진단하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 1. 한국 시장 전 종목 데이터베이스 로드 (FinanceDataReader)
 # ==========================================
-@st.cache_data(ttl=86400) # 하루 단위로 상장 종목 풀 캐싱
+@st.cache_data(ttl=86400)
 def load_krx_universe():
     try:
         df = fdr.StockListing('KRX')
@@ -31,7 +31,7 @@ def load_krx_universe():
         return pd.DataFrame(columns=['Code', 'Name', 'Market'])
 
 # ==========================================
-# 실시간 주가 데이터 수집 및 지표 계산 함수
+# 실시간 주가 데이터 수집 및 지표 계산 함수 (20일선 추가)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
@@ -47,26 +47,74 @@ def fetch_stock_status(ticker_code):
                 
                 current_price = float(close_prices.iloc[-1])
                 ma120 = float(close_prices.rolling(window=120).mean().iloc[-1]) if len(close_prices) >= 120 else current_price
+                ma20 = float(close_prices.rolling(window=20).mean().iloc[-1]) if len(close_prices) >= 20 else current_price
                 recent_high = float(close_prices.tail(120).max())
                 drawdown = ((current_price / recent_high) - 1) * 100 if recent_high > 0 else 0.0
                 
-                return current_price, ma120, drawdown
+                return current_price, ma120, ma20, drawdown
     except Exception:
         pass
-    return None, None, None
+    return None, None, None, None
 
 # ==========================================
-# 2. 데이터 저장소(Session State) 초기화 (완전 백지 상태)
+# 2. 데이터 저장 및 불러오기 로직 (JSON)
+# ==========================================
+def convert_state_to_json():
+    save_data = {}
+    for p_name, p_data in st.session_state.portfolios.items():
+        save_data[p_name] = {
+            'strategy': p_data['strategy'],
+            'cash': p_data['cash'],
+            'stocks': p_data['stocks'].to_dict(orient='records')
+        }
+    return json.dumps(save_data, ensure_ascii=False, indent=2)
+
+def load_json_to_state(json_file):
+    try:
+        loaded_data = json.load(json_file)
+        new_portfolios = {}
+        for p_name, p_data in loaded_data.items():
+             new_portfolios[p_name] = {
+                 'strategy': p_data['strategy'],
+                 'cash': p_data['cash'],
+                 'stocks': pd.DataFrame(p_data['stocks'])
+             }
+        st.session_state.portfolios = new_portfolios
+        st.success("데이터 불러오기 성공!")
+        st.rerun()
+    except Exception as e:
+        st.error(f"데이터 불러오기 실패: {e}")
+
+# ==========================================
+# 3. 데이터 저장소(Session State) 초기화
 # ==========================================
 if 'portfolios' not in st.session_state:
     st.session_state.portfolios = {}
 
 # ==========================================
-# 3. 사이드바: 포트폴리오 추가 및 설정
+# 4. 사이드바: 데이터 관리 및 포트폴리오 설정
 # ==========================================
+st.sidebar.header("💾 Data Management")
+
+# 저장 (다운로드 버튼)
+json_str = convert_state_to_json()
+st.sidebar.download_button(
+    label="⬇️ 현재 포트폴리오 백업 저장",
+    data=json_str,
+    file_name="quant_portfolio_backup.json",
+    mime="application/json",
+    use_container_width=True
+)
+
+# 불러오기 (파일 업로더)
+uploaded_file = st.sidebar.file_uploader("⬆️ 백업 데이터 불러오기 (JSON 파일)", type=['json'])
+if uploaded_file is not None:
+    if st.sidebar.button("📂 데이터 복구 실행", use_container_width=True):
+        load_json_to_state(uploaded_file)
+
+st.sidebar.markdown("---")
 st.sidebar.header("Portfolio Capital & Settings")
 
-# 기존 포트폴리오 금액 수정 및 삭제
 for p_name, p_data in list(st.session_state.portfolios.items()):
     strat = p_data['strategy']
     st.sidebar.markdown(f"**[{strat}] {p_name}**")
@@ -87,7 +135,6 @@ for p_name, p_data in list(st.session_state.portfolios.items()):
         st.rerun()
     st.sidebar.markdown("---")
 
-# 새 포트폴리오 추가 기능
 st.sidebar.subheader("➕ Add New Portfolio")
 new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (예: 단기 모멘텀)", key="new_p_name")
 new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"], key="new_p_strat")
@@ -99,7 +146,7 @@ if st.sidebar.button("포트폴리오 생성하기", use_container_width=True):
         st.session_state.portfolios[new_p_name] = {
             'strategy': new_p_strat,
             'cash': new_p_cash,
-            'stocks': pd.DataFrame(columns=['종목명', '티커'])
+            'stocks': pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
         }
         st.rerun()
     elif new_p_name in st.session_state.portfolios:
@@ -110,13 +157,13 @@ st.sidebar.header("Strategy Parameters")
 sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-15, step=1)
 
 # ==========================================
-# 4. 탭 구성
+# 5. 탭 구성
 # ==========================================
 tab1, tab2 = st.tabs(["Portfolio Configuration & Stock Pools", "Simulation & Backtest"])
 
 with tab1:
     st.header("포트폴리오 종목 구성 및 실시간 진단")
-    st.markdown("포트폴리오를 선택하여 전 종목(KOSPI/KOSDAQ) 중 원하는 종목을 추가한 뒤, **진단 버튼**을 눌러 매매 액션 플랜을 확인하세요.")
+    st.markdown("종목을 추가한 뒤, 실제 보유 중이라면 **'매수단가'**와 **'보유수량'**을 입력하세요. 진단 시 신규 진입 여부와 손절 여부를 명확히 구분해 줍니다.")
     
     if not st.session_state.portfolios:
         st.info("👈 좌측 사이드바에서 새로운 포트폴리오를 먼저 생성해주세요.")
@@ -129,7 +176,6 @@ with tab1:
             st.subheader(f"📂 {selected_port} (전략: {current_strategy})")
             st.markdown("---")
             
-            # 스마트 종목 검색 및 전략 교차 검증 로직
             st.subheader("🔍 개별 종목 검색 및 추가")
             search_kw = st.text_input("추가하고 싶은 종목명 입력 (예: 솔트룩스, KB금융)", key=f"search_{selected_port}")
             
@@ -140,19 +186,16 @@ with tab1:
                 if not filtered_stocks.empty:
                     col_search1, col_search2 = st.columns([3, 1])
                     with col_search1:
-                        # 검색 결과용 문자열 생성 (종목명 + 코드)
                         display_options = [f"{row['Name']} ({row['Code']})" for _, row in filtered_stocks.iterrows()]
                         selected_option = st.selectbox("검색 결과 (선택하세요)", display_options, key=f"sel_{selected_port}")
                     with col_search2:
                         st.markdown("<br>", unsafe_allow_html=True)
                         if st.button("➕ 종목 추가", key=f"add_btn_{selected_port}", use_container_width=True):
                             
-                            # 선택된 종목명과 코드 분리
                             sel_name = selected_option.split(" (")[0]
                             sel_code = selected_option.split(" (")[1].replace(")", "")
                             sel_market = filtered_stocks[filtered_stocks['Code'] == sel_code]['Market'].values[0]
                             
-                            # 야후 파이낸스로 시가총액 실시간 확인
                             suffix = ".KS" if sel_market in ["KOSPI", "KOSPI200"] else ".KQ"
                             yf_ticker = f"{sel_code}{suffix}"
                             
@@ -163,7 +206,6 @@ with tab1:
                                 except:
                                     mcap = 0
                                     
-                                # 시총 3조 원 기준 대형/중소형 분류
                                 LARGE_CAP_THRESHOLD = 3_000_000_000_000 
                                 
                                 if mcap > 0:
@@ -173,13 +215,12 @@ with tab1:
                                     stock_type = '대형주' if sel_market == 'KOSPI' else '중소형주'
                                     mcap_text = f"[{sel_market} 소속] "
                                     
-                                # [핵심 로직] 포트폴리오 전략과 종목 성격 교차 검증 및 차단 안내
                                 if '대형주' in current_strategy and stock_type == '중소형주':
                                     st.error(f"⚠️ **[{sel_name}]**은(는) {mcap_text}**{stock_type}**입니다. 성격에 맞는 **중소형주(Satellite) 포트폴리오**에 등록해주세요.")
                                 elif '중소형주' in current_strategy and stock_type == '대형주':
                                     st.error(f"⚠️ **[{sel_name}]**은(는) {mcap_text}**{stock_type}**입니다. 성격에 맞는 **대형주(Core) 포트폴리오**에 등록해주세요.")
                                 else:
-                                    new_row = pd.DataFrame({'종목명': [sel_name], '티커': [sel_code]})
+                                    new_row = pd.DataFrame({'종목명': [sel_name], '티커': [sel_code], '매수단가': [0], '보유수량': [0]})
                                     comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
                                     st.session_state.portfolios[selected_port]['stocks'] = comb
                                     st.rerun()
@@ -187,9 +228,8 @@ with tab1:
                     st.warning("일치하는 종목이 없습니다. 정확한 이름을 입력해보세요.")
 
             st.markdown("---")
-            st.markdown("**현재 포트폴리오 구성 종목**")
+            st.markdown("**현재 포트폴리오 구성 종목 (보유 중이라면 '매수단가'와 '보유수량'을 표에 직접 입력하세요)**")
             
-            # 종목 데이터 에디터 (표 직접 삭제 가능)
             edited_df = st.data_editor(
                 port_info['stocks'],
                 num_rows="dynamic",
@@ -200,7 +240,7 @@ with tab1:
 
             st.markdown("---")
             # ==========================================
-            # 실시간 포트폴리오 진단 기능 (매수/매도 추천)
+            # 실시간 포트폴리오 진단 (보유 / 신규 분리 로직)
             # ==========================================
             st.subheader("🩺 실시간 매매 액션 플랜 진단")
             
@@ -214,32 +254,49 @@ with tab1:
                             s_name = row['종목명']
                             s_ticker = row['티커']
                             
-                            c_price, ma120, drawdown = fetch_stock_status(s_ticker)
+                            buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
+                            quantity = pd.to_numeric(row.get('보유수량', 0), errors='coerce')
+                            if pd.isna(buy_price): buy_price = 0
+                            if pd.isna(quantity): quantity = 0
+                            
+                            is_holding = (quantity > 0) and (buy_price > 0)
+                            holding_status = "보유중" if is_holding else "신규/관심"
+                            
+                            c_price, ma120, ma20, drawdown = fetch_stock_status(s_ticker)
                             
                             if c_price is None:
-                                results.append({'종목명': s_name, '현재가': '데이터 없음', '진단 기준': '-', '액션 플랜': '⚠️ 확인 불가'})
+                                results.append({'종목명': s_name, '상태': holding_status, '현재가': '데이터 없음', '진단 기준': '-', '액션 플랜': '⚠️ 확인 불가'})
                                 continue
                             
-                            # 대형주 룰 적용 (120일선 추세)
                             if current_strategy == '대형주 (Core)':
                                 condition = f"120일선: {ma120:,.0f}원"
-                                if c_price >= ma120:
-                                    action = "🟢 매수 / 보유 (추세 양호)"
-                                else:
-                                    action = "🔴 매도 / 현금화 (추세 이탈)"
+                                if is_holding: 
+                                    if c_price >= ma120: action = "🟢 보유 유지 (추세 양호)"
+                                    else: action = "🔴 매도 / 현금화 (120일선 이탈)"
+                                else: 
+                                    if c_price >= ma120: action = "🟢 신규 진입 가능 (추세 양호)"
+                                    else: action = "🟡 진입 보류 / 관망 (하락 추세)"
                                     
-                            # 중소형주 룰 적용 (손절 컷 및 모멘텀)
                             else:
-                                condition = f"고점대비 낙폭: {drawdown:+.2f}%"
-                                if drawdown <= sat_stop_loss:
-                                    action = f"🔴 강제 매도 (손절컷 {sat_stop_loss}% 도달)"
-                                elif drawdown > -5.0: # 고점 부근
-                                    action = "🟢 매수 (강한 모멘텀)"
-                                else:
-                                    action = "🟡 관망 (Hold)"
+                                if is_holding: 
+                                    user_ret = ((c_price / buy_price) - 1) * 100
+                                    condition = f"내 수익률: {user_ret:+.2f}%"
+                                    if user_ret <= sat_stop_loss:
+                                        action = f"🔴 강제 매도 (설정 손절컷 {sat_stop_loss}% 도달)"
+                                    elif user_ret > 0:
+                                        action = "🟢 보유 유지 (수익권 순항)"
+                                    else:
+                                        action = "🟡 보유 유지 (손실권, 관망)"
+                                else: 
+                                    condition = f"20일선: {ma20:,.0f}원 / 낙폭: {drawdown:+.2f}%"
+                                    if c_price >= ma20 and drawdown >= -15.0:
+                                        action = "🟢 신규 진입 가능 (단기 모멘텀 양호)"
+                                    else:
+                                        action = "🟡 진입 보류 / 관망 (모멘텀 부족 또는 하락 추세)"
                                     
                             results.append({
                                 '종목명': s_name,
+                                '상태': holding_status,
                                 '현재가': f"{c_price:,.0f} 원",
                                 '진단 기준': condition,
                                 '액션 플랜': action
@@ -247,7 +304,7 @@ with tab1:
                         
                         res_df = pd.DataFrame(results)
                         st.table(res_df)
-                        st.info("💡 **안내:** 야후 파이낸스의 실시간/지연 데이터를 바탕으로 설정하신 전략 룰(Rule)에 따라 기계적으로 판별된 결과입니다.")
+                        st.info("💡 **안내:** 사이드바 상단의 **'현재 포트폴리오 백업 저장'**을 누르면 입력하신 종목과 평단가가 안전하게 PC에 저장됩니다.")
 
 with tab2:
     st.header("Simulation & Backtest")
@@ -261,7 +318,6 @@ with tab2:
         else:
             with st.spinner("로직 구동 중... (각 전략별 룰 적용 중)"):
                 
-                # 가상의 연도별 백테스트 기준치
                 base_returns = {
                     2021: {'Core': 28.4, 'Sat': 70.3},
                     2022: {'Core': -4.2, 'Sat': -21.8},
