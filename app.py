@@ -194,7 +194,7 @@ bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", v
 # ==========================================
 # 4. 탭 구성
 # ==========================================
-tab1, tab2 = st.tabs(["Portfolio Configuration & Stock Pools", "Simulation & Backtest"])
+tab1, tab2, tab3 = st.tabs(["Portfolio Configuration & Stock Pools", "Simulation & Backtest", "AI Strategy & Rules Report 📄"])
 
 with tab1:
     st.header("포트폴리오 종목 구성 및 실시간 진단")
@@ -880,25 +880,17 @@ with tab2:
                         eom_weights = eom_weights.fillna(0)
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
-                        # ----------------------------------------------------
-                        # [차트 시각화 업그레이드] Altair를 활용한 완벽한 누적 막대 차트
-                        # ----------------------------------------------------
-                        
-                        # 1. 정렬: 주식들은 가나다순, 현금은 맨 마지막(차트 가장 위로 쌓임)
                         stock_cols = sorted([c for c in eom_weights.columns if c != '현금(Cash)'])
-                        cols_ordered = stock_cols + ['현금(Cash)']
+                        cols_ordered = ['현금(Cash)'] + stock_cols 
                         eom_weights = eom_weights[cols_ordered]
                         
-                        # 2. Altair 차트용 데이터 변환 (Melt)
                         eom_weights_reset = eom_weights.reset_index().melt('Date', var_name='Asset', value_name='Weight')
                         
-                        # 3. 누적 순서 매핑 (현금이 차트 맨 위에 쌓이도록 설정)
                         order_map = {name: i for i, name in enumerate(cols_ordered)}
                         eom_weights_reset['Order'] = eom_weights_reset['Asset'].map(order_map)
                         
-                        # 4. 색상 설정: 주식들은 기본 10색상 순환 배정, 현금은 블랙(#000000)
                         base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-                        color_range = [base_colors[i % len(base_colors)] for i in range(len(stock_cols))] + ['#000000']
+                        color_range = ['#000000'] + [base_colors[i % len(base_colors)] for i in range(len(stock_cols))] 
                         
                         chart = alt.Chart(eom_weights_reset).mark_bar().encode(
                             x=alt.X('Date:O', title='', axis=alt.Axis(labelAngle=-45)),
@@ -910,4 +902,80 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, 누적 막대)")
                         st.altair_chart(chart, use_container_width=True)
-                        st.info("💡 위 누적 막대 차트는 종목별 지정석(색상 및 위치)을 항상 일정하게 고정하고, **검정색 현금(Cash)**이 최상단에 쌓이도록 하여 현재 **시장 노출도(총 주식 비중)와 리스크 방어 수준**을 직관적으로 파악할 수 있게 해줍니다.")
+                        st.info("💡 위 차트는 **현금(블랙)을 항상 최상단에 고정**하여 현재 시장에 노출된 총 주식 비중을 직관적으로 보여주며, 각 종목의 층(Layer)이 항상 일정하여 비중 증감을 쉽게 파악할 수 있습니다.")
+
+with tab3:
+    st.header("📄 AI 퀀트 투자 전략 및 운용 알고리즘 백서")
+    
+    st.markdown("""
+    본 대시보드에 탑재된 AI 퀀트 엔진은 단순한 기술적 지표의 조합을 넘어, **시장 거시 지표(Macro), 개별 종목 모멘텀(Micro), 그리고 강력한 리스크 관리(Risk Management)**가 통합된 기관급(Institutional-grade) 다이내믹 자산 배분 알고리즘을 사용합니다.
+    """)
+    
+    st.markdown("---")
+    
+    st.subheader("1. 핵심 운용 철학 (Core Philosophy)")
+    st.markdown("""
+    * **추세 추종과 손익 비대칭성 (Let Winners Run, Cut Losses Short):** 확실한 상승 추세에 올라타 이익을 길게 가져가고, 횡보 및 하락장에서는 휩소(잦은 매매)를 차단하여 수수료와 원금을 철저히 방어합니다.
+    * **동적 자금 배분 (Alpha-Tilt Allocation):** 시장보다 강한 종목(주도주)에 자금을 몰아주고, 시장이 강세일 때는 현금 예비율을 낮춰 풀매수(Booster)를 가동합니다.
+    * **공포 탐욕 지수 역발상 (Contrarian):** 대다수 투자자가 시장을 떠나는 극단적 공포(VIX 폭등 후 꺾임) 시점을 수리적으로 포착하여 V자 반등을 낚아챕니다.
+    """)
+
+    st.markdown("---")
+    
+    st.subheader("2. 실시간 데이터 수집 및 판단 지표 (Data Pipeline)")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info("**📈 거시 지표 (Macro Indicators)**")
+        st.markdown(f"""
+        * **KOSPI 시장 강도:** KOSPI 지수의 최근 60일 수익률을 계산하여 강세장 여부를 판별하고, 개별 종목의 상대강도(RS)를 비교하는 벤치마크로 사용합니다.
+        * **시장 공포지수 (VIX):** 
+            * `안정/경계 구간`: VIX < 30 (정상적인 매매 작동)
+            * `극단적 공포 (VIX Contrarian)`: VIX $\ge$ 25 이상 고점 도달 후 3일 이동평균선을 하향 이탈할 때 (공포 절정 후 반등 시그널)
+        """)
+    with col2:
+        st.success("**🔎 개별 종목 지표 (Micro Indicators)**")
+        st.markdown(f"""
+        * **20일/60일/200일 이동평균선:** 단기, 중기, 장기 추세를 정의합니다.
+        * **60일선 기울기 (Slope):** 10일 전의 60일선 값과 비교하여 추세가 위를 향하고 있는지 수치화합니다.
+        * **거래량 폭발 (Volume Surge):** 당일 거래량이 최근 5일 평균 거래량 대비 150% 이상 급증했는지 파악하여 세력(수급) 개입을 추적합니다.
+        """)
+
+    st.markdown("---")
+    
+    st.subheader("3. 진입 및 매수 알고리즘 (Entry Rules)")
+    st.markdown("다음 4단계의 엄격한 필터링을 **모두 통과한 종목**만 매수 대상으로 선정됩니다.")
+    
+    st.markdown(f"""
+    1. **대장기 하락장 차단 (200D Filter):** 주가가 200일 이동평균선 위에 위치해야 합니다. (하락 중인 주식의 데드캣 바운스 원천 차단) *(설정 적용 시)*
+    2. **가짜 반등 차단 (Whipsaw Buffer):** 단기 20일선이 중기 60일선을 단순히 교차하는 것이 아니라, 설정된 **버퍼({whipsaw_buffer}%) 이상 확실하게 돌파**해야 합니다.
+    3. **진짜 추세 검증 (Trend Verification):** 60일선이 10일 전 대비 **우상향(Slope > 0)** 해야 하며, 최근 20일 모멘텀(수익률)이 **양수(> 0)**여야 횡보장 속임수를 피할 수 있습니다.
+    4. **거시적 승인 (Macro Approval):** VIX가 30 미만이거나, 앞서 언급한 **VIX 역발상 바닥 시그널**이 발생해야 합니다.
+    """)
+    
+    st.markdown("---")
+    
+    st.subheader("4. 자산 배분 및 알파 가중치 (Dynamic Allocation & Bull Booster)")
+    st.markdown("매수 대상에 선정되더라도 무조건 1/N 배분하지 않습니다. 점수에 따라 차등 배분합니다.")
+    
+    st.markdown(f"""
+    * **기본 배분:** 한 종목에 배분할 수 있는 최대 자금은 총 자산의 **{max_alloc_pct}%** 로 제한되어 한 종목 리스크를 분산합니다.
+    * **강세장 부스터 (Bull Market Booster):** KOSPI 지수가 60일선 위에 있는 대세 상승장이라면 남는 현금을 없애기 위해 최대 투입 한도를 **1.5배(최대 100%)까지 상향**합니다.
+    * **알파 점수 부여 (Score-Tilt):**
+        * 거래량 150% 폭발 시 `+0.5점`
+        * 종목 60일 수익률 > KOSPI 60일 수익률 (시장 주도주) 시 `+0.5점`
+        * VIX 극단적 바닥잡기 시그널 발생 시 `+1.0점`
+    * ➔ 위 점수들을 합산하여 가장 강한 주도주에 더 많은 비중(Weight)을 동적으로 실어줍니다.
+    """)
+
+    st.markdown("---")
+    
+    st.subheader("5. 리스크 관리 및 청산 알고리즘 (Exit Rules)")
+    
+    st.warning("**🔻 매도 및 방어 규정**")
+    st.markdown(f"""
+    * **추세 이탈 (데드크로스):** 20일선이 60일선을 하향 이탈하되, 잦은 손절을 막기 위해 버퍼의 절반({whipsaw_buffer/2}%) 이상 뚫고 내려갈 때 전량 매도합니다.
+    * **트레일링 스탑 익절 (Trailing Stop):** 수익이 **{ts_target_pct}%** 에 도달한 이후부터 룰이 켜집니다. 이후 최고점 대비 **{abs(ts_drop_pct)}%** 이상 하락하면 더 기다리지 않고 즉시 수익을 확정 짓습니다. (승자 독식 보존)
+    * **연속 손실 쿨다운 (Cooldown):** 박스권에 갇혀 연속으로 2회 손실을 발생시킨 종목은 **{cooldown_days}일 동안 강제로 매수를 금지(격리)** 시켜 계좌가 녹는 것을 막습니다.
+    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다. (단, 트레일링 스탑이나 중소형주 강제 손절컷({sat_stop_loss}%) 발생 시에는 예외로 즉각 탈출합니다.)
+    """)
