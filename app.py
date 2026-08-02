@@ -276,21 +276,19 @@ with tab1:
                             
                             vol_strong = vol_ratio >= 150.0
                             
-                            # 신호 만족 여부 및 조건별 알파 스코어 부여 (조건이 좋을수록 점수 높음)
                             if current_strategy == '대형주 (Core)':
                                 if not is_holding and c_price >= ma120 and vix_safe:
                                     score = 1.0
-                                    if vol_strong: score += 0.5  # 수급 폭발 시 가산점
-                                    if c_price > ma120 * 1.05: score += 0.5 # 이격도 우수 시 가산점
+                                    if vol_strong: score += 0.5
+                                    if c_price > ma120 * 1.05: score += 0.5
                                     buy_scores[s_name] = score
                             else:
                                 if not is_holding and c_price >= ma20 and drawdown >= -15.0 and (vol_strong or vix_safe):
                                     score = 1.0
                                     if vol_strong: score += 0.5
-                                    if drawdown >= -5.0: score += 0.5 # 고점 근접 시 가산점
+                                    if drawdown >= -5.0: score += 0.5
                                     buy_scores[s_name] = score
 
-                        # 점수 기반 동적 가중치(비중) 계산
                         total_score = sum(buy_scores.values()) if buy_scores else 1.0
                         max_alloc_ratio = max_alloc_pct / 100.0
 
@@ -344,7 +342,6 @@ with tab1:
                                         detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 120일선 이탈로 리스크 관리."
                                 else: 
                                     if c_price >= ma120 and vix_safe: 
-                                        # 알파 점수 비중에 따른 차등 예산 배분 (단, 최대 한도 이내)
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                                         target_amt = min(total_cash * stock_weight, total_cash * max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
@@ -486,7 +483,6 @@ with tab2:
                             df['Signal'] = np.where((df['Close'] >= df['MA120']) & df['VIX_Safe'], 1, 
                                            np.where(df['Close'] < df['MA120'], 0, np.nan))
                             df['Signal'] = df['Signal'].ffill().fillna(0)
-                            # 모멘텀 스코어 컬럼 생성
                             df['Score'] = np.where((df['Close'] >= df['MA120']) & df['VIX_Safe'], 1.0 + np.where(df['Vol_Strong'], 0.5, 0.0), 0.0)
                         else:
                             df['MA20'] = df['Close'].rolling(20).mean()
@@ -555,12 +551,11 @@ with tab2:
                                     current_val = shares[name] * c_price
                                     
                                     if name in active_stocks:
-                                        # 알파 점수 비중에 따른 차등 목표 배분액 산정
                                         weight = scores.get(name, 1.0) / total_score
                                         target_alloc = min(total_asset * weight, total_asset * max_alloc_ratio)
                                         diff_val = target_alloc - current_val
                                         
-                                        if diff_val > 0: # 매수
+                                        if diff_val > 0: 
                                             cost = diff_val
                                             fee = cost * 0.0025
                                             if cash >= (cost + fee):
@@ -584,7 +579,7 @@ with tab2:
                                                         avg_buy_price[name] = c_price
                                                     shares[name] += added_shares
                                                     trade_stats[name]['fee'] += fee
-                                        elif diff_val < 0: # 일부 매도
+                                        elif diff_val < 0: 
                                             proceeds = abs(diff_val)
                                             fee = proceeds * 0.0025
                                             sold_shares = proceeds / c_price
@@ -594,7 +589,7 @@ with tab2:
                                             shares[name] -= sold_shares
                                             trade_stats[name]['fee'] += fee
                                     else:
-                                        if shares[name] > 0: # 전량 매도
+                                        if shares[name] > 0: 
                                             proceeds = shares[name] * c_price
                                             fee = proceeds * 0.0025
                                             pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
@@ -658,35 +653,37 @@ with tab2:
                         st.success(f"✅ 스마트 가중치 및 벤치마크 비교 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
-                        col_r2.metric(f"AI 동적배분 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
+                        col_r2.metric(f"AI 스마트 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
                         
                         st.markdown("---")
                         
                         st.subheader("📊 [전략 비교] KOSPI 지수 vs 단순보유 vs 적립식 매수 vs AI 스마트 가중치 전략")
+                        
+                        # 모든 딕셔너리 키를 '운용 방식 및 특징'으로 통일하여 이중 컬럼 버그 해결
                         comparison_data = [
                             {
                                 '전략 구분': '🤖 AI 스마트 가중치 전략 (Alpha-Tilt Rule)',
                                 '최종 기말 자산': f"{final_asset:,.0f} 원",
                                 '총 수익률': f"{final_port_ret:+.2f}%",
-                                '운용 방식 및 특징': '수급 및 모멘텀 조건이 우수한 종목에 비중을 차등 집중 배분, 신호 소멸 시 100% 현금 방어'
+                                '운용 방식 및 특징': '시장 공포지수(VIX < 30) 안정 여부 확인 후, 이평선(대형주 120일선 / 중소형주 20일선) 및 거래량 수급(5일 평균 대비 150% 이상) 조건을 충족하는 매수 신호 종목에 모멘텀 알파 점수를 부여하여 차등 집중 배분(Overweight). 조건 불만족 또는 신호 소멸 시 100% 현금 방어 및 계좌 내 현금 예비율 상시 유지.'
                             },
                             {
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
                                 '최종 기말 자산': f"{final_kospi_asset:,.0f} 원",
                                 '총 수익률': f"{kospi_ret:+.2f}%",
-                                '운용 방식': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (패시브 투자 기준)'
+                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (패시브 투자 기준)'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
                                 '최종 기말 자산': f"{final_bh_asset:,.0f} 원",
                                 '총 수익률': f"{final_bh_ret:+.2f}%",
-                                '운용 방식': '동일 종목 풀 초기 전액 동일 비중 매수 후 홀딩'
+                                '운용 방식 및 특징': '동일 종목 풀 초기 전액 동일 비중 매수 후 매도 없이 홀딩 (변동성 그대로 노출)'
                             },
                             {
                                 '전략 구분': '💰 적립식 매수 (DCA)',
                                 '최종 기말 자산': f"{final_dca_asset:,.0f} 원",
                                 '총 수익률': f"{final_dca_ret:+.2f}%",
-                                '운용 방식': '동일 종목 풀 시드 분할 후 매월 정기 추가 투입'
+                                '운용 방식 및 특징': '동일 종목 풀 시드 분할 후 매월 정기 추가 투입으로 매입단가 분산'
                             }
                         ]
                         st.table(pd.DataFrame(comparison_data))
