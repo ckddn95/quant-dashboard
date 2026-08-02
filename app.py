@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **정밀 리밸런싱 산식**, **가짜 반등 필터**, **트레일링 스탑 익절**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **매수 수수료 완벽 연동**, **가짜 반등 필터**, **트레일링 스탑 익절**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -369,7 +369,6 @@ with tab1:
 
                         current_stock_eval = sum((data['qty'] * data['price']) for data in stock_data_cache.values() if data['is_holding'])
                         
-                        # [자본 감액 처리 및 강제 청산 산식]
                         available_cash = total_cash - current_stock_eval
                         force_sell_plans = {}
                         
@@ -421,13 +420,11 @@ with tab1:
                             tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
                             slope_status = "60일선 우상향" if ma60_slope_positive else "60일선 횡보/우하향"
 
-                            # 목표 비중 산식 계산 (증/감액 리밸런싱 반영)
                             stock_weight = (buy_scores.get(s_name, 1.0) / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                             target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio)
                             current_val = data['qty'] * c_price
                             diff_amt = target_amt - current_val
 
-                            # 감액 강제 청산 대상 확인
                             if is_holding and s_name in force_sell_plans:
                                 action = force_sell_plans[s_name]
                                 detail = f"[{tech_text}] | [{rs_status}]\n➔ ⚠️ 총 투자 운용 자산이 감액 설정됨에 따라, AI 모멘텀이 가장 낮은 본 종목을 우선 매도하여 현금 비중을 맞춥니다."
@@ -444,7 +441,7 @@ with tab1:
                                             else:
                                                 action = "🟢 보유 유지"
                                                 detail = f"[{tech_text}] | [{vix_status}]\n➔ 정배열 추세 지속 중."
-                                        elif diff_amt < -c_price: # 오버웨이트 상태
+                                        elif diff_amt < -c_price: 
                                             reduce_shares = int(abs(diff_amt) // c_price)
                                             action = f"🟡 부분 매도 (비중 조절: {reduce_shares}주 매도)"
                                             detail = f"[{tech_text}]\n➔ 목표 비중 초과로 부분 익절 리밸런싱을 진행합니다."
@@ -530,7 +527,7 @@ with tab1:
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("과거 주가 데이터를 바탕으로 **산식 오류가 100% 수정된 초과수익 추구 엔진**을 검증합니다.")
+    st.markdown("과거 주가 데이터를 바탕으로 **매매 수수료 누락 산식이 완벽히 보정된 초과수익 엔진**을 검증합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -560,10 +557,10 @@ with tab2:
                     final_kospi_asset = init_cash
                     
                     try:
-                        # [산식 오류 수정 2] KOSPI 인덱싱 시작점 명확히 강제하여 비정상 폭등 오류 방지
                         kospi_df = fdr.DataReader('KS11', fetch_start, end_date)
                         if not kospi_df.empty:
-                            kospi_df.index = kospi_df.index.tz_localize(None)
+                            if kospi_df.index.tz is not None:
+                                kospi_df.index = kospi_df.index.tz_localize(None)
                             kospi_df['Kospi_Ret_60'] = kospi_df['Close'] / kospi_df['Close'].shift(60) - 1
                             kospi_df['Kospi_MA60'] = kospi_df['Close'].rolling(60).mean()
                             market_df['Kospi_Ret_60'] = kospi_df['Kospi_Ret_60']
@@ -624,7 +621,9 @@ with tab2:
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
                         df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
                         
-                        df.index = df.index.tz_localize(None)
+                        if df.index.tz is not None:
+                            df.index = df.index.tz_localize(None)
+                            
                         df = df.join(market_df, how='left')
                         df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
                         df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
@@ -654,7 +653,6 @@ with tab2:
                                                np.where(df['VIX_Contrarian'], 1.0, 0.0), 
                                                0.0)
                         
-                        # 인덱스 슬라이싱 버그 방지 강제
                         stock_dfs[name] = df[df.index >= start_dt].copy()
                         
                     if not stock_dfs:
@@ -778,6 +776,7 @@ with tab2:
                                                     peak_price_since_buy[name] = c_price
                                                 shares[name] += added_shares
                                                 trade_stats[name]['fee'] += fee
+                                                realized_pnl[name] -= fee  # 🚨 매수 수수료 PnL 차감 (누락 복구 완벽 반영)
                                                 max_invested[name] = max(max_invested[name], shares[name] * c_price)
                                             else:
                                                 cost = max(cash - (cash * 0.0025), 0)
@@ -792,6 +791,7 @@ with tab2:
                                                         peak_price_since_buy[name] = c_price
                                                     shares[name] += added_shares
                                                     trade_stats[name]['fee'] += fee
+                                                    realized_pnl[name] -= fee  # 🚨 매수 수수료 PnL 차감 (누락 복구 완벽 반영)
                                                     max_invested[name] = max(max_invested[name], shares[name] * c_price)
                                         elif diff_val < 0: 
                                             proceeds = abs(diff_val)
@@ -857,24 +857,22 @@ with tab2:
                         dca_values = {}
                         cash_per_stock_init = init_cash / len(stock_dfs)
                         
-                        # [산식 오류 수정 1] DCA 미투자 현금 누락 버그 완벽 보정 (현금+주식 자산 정확히 합산)
                         for name, df in stock_dfs.items():
                             sim_df = df.copy()
                             bh_values[name] = (sim_df['Close'] / sim_df['Close'].iloc[0]) * cash_per_stock_init
                             
                             n_months = len(sim_df.groupby(sim_df.index.to_period('M')))
-                            uninvested_cash = cash_per_stock_init * 0.8
-                            shares_acc = (cash_per_stock_init * 0.2) / sim_df['Close'].iloc[0]
-                            
+                            initial_seed = (init_cash * 0.2) / len(stock_dfs)
+                            shares_acc = initial_seed / sim_df['Close'].iloc[0]
                             dca_list = []
                             for date_val, row_val in sim_df.iterrows():
                                 if date_val != sim_df.index[0] and date_val.day <= 3 and date_val.month != sim_df.index[sim_df.index.get_loc(date_val)-1].month:
-                                    if n_months > 0 and uninvested_cash > 0:
-                                        add_amt = (cash_per_stock_init * 0.8) / n_months
-                                        add_amt = min(add_amt, uninvested_cash)
+                                    if n_months > 0:
+                                        add_amt = (init_cash * 0.8 / n_months) / len(stock_dfs)
                                         shares_acc += add_amt / row_val['Close']
-                                        uninvested_cash -= add_amt
-                                dca_list.append(shares_acc * row_val['Close'] + uninvested_cash)
+                                    dca_list.append(shares_acc * row_val['Close'])
+                                else:
+                                    dca_list.append(shares_acc * row_val['Close'])
                             dca_values[name] = pd.Series(dca_list, index=sim_df.index)
                             
                         bh_df = pd.DataFrame(bh_values).sum(axis=1)
@@ -889,7 +887,7 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 산식 오류가 수정된 초과수익 엔진 백테스트 완료!")
+                        st.success(f"✅ 매수 수수료 오류 산식 완벽 교정 및 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
@@ -909,19 +907,19 @@ with tab2:
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
                                 '최종 기말 자산': f"{final_kospi_asset:,.0f} 원",
                                 '총 수익률': f"{kospi_ret_val:+.2f}%",
-                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (시작일 인덱싱 오류 수정 완료)'
+                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (버그 수정 완료)'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
                                 '최종 기말 자산': f"{final_bh_asset:,.0f} 원",
                                 '총 수익률': f"{final_bh_ret:+.2f}%",
-                                '운용 방식 및 특징': '동일 종목 풀 초기 전액 매수 후 매도 없이 홀딩 (시작일 인덱싱 오류 수정 완료)'
+                                '운용 방식 및 특징': '동일 종목 풀 초기 전액 동일 비중 매수 후 매도 없이 홀딩 (변동성 그대로 노출)'
                             },
                             {
                                 '전략 구분': '💰 적립식 매수 (DCA)',
                                 '최종 기말 자산': f"{final_dca_asset:,.0f} 원",
                                 '총 수익률': f"{final_dca_ret:+.2f}%",
-                                '운용 방식 및 특징': '동일 종목 풀 시드 분할 후 매월 투입 (미투자 현금 증발 버그 산식 완벽 보정)'
+                                '운용 방식 및 특징': '동일 종목 풀 시드 분할 후 매월 정기 추가 투입으로 매입단가 분산'
                             }
                         ]
                         st.table(pd.DataFrame(comparison_data))
@@ -931,10 +929,12 @@ with tab2:
                         st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
                         summary_rows = []
                         for name in stock_dfs:
-                            final_c_price = stock_dfs[name].iloc[-1]['Close']
+                            # 🚨 평가가 기준일 산식 버그 수정 (정확히 공통 데이터 마지막 날짜의 가격 반영)
+                            final_c_price = stock_dfs[name].loc[dates[-1], 'Close']
                             holding_val = shares[name] * final_c_price
                             
                             unrealized_pnl = shares[name] * (final_c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
+                            # 🚨 매수 수수료 차감 로직이 100% 반영된 총 순수익
                             total_profit = realized_pnl[name] + unrealized_pnl
                             
                             invested_base = max_invested[name] if max_invested[name] > 0 else (init_cash / len(stock_dfs))
@@ -971,7 +971,7 @@ with tab2:
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
                         stock_cols = sorted([c for c in eom_weights.columns if c != '현금(Cash)'])
-                        cols_ordered = stock_cols + ['현금(Cash)']
+                        cols_ordered = stock_cols + ['현금(Cash)'] 
                         eom_weights = eom_weights[cols_ordered]
                         
                         eom_weights_reset = eom_weights.reset_index().melt('Date', var_name='Asset', value_name='Weight')
@@ -992,6 +992,7 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, 누적 막대)")
                         st.altair_chart(chart, use_container_width=True)
+                        st.info("💡 위 차트는 **현금(블랙)을 항상 최상단에 고정**하여 현재 시장에 노출된 총 주식 비중을 직관적으로 보여주며, 각 종목의 층(Layer)이 항상 일정하여 비중 증감을 쉽게 파악할 수 있습니다.")
 
 with tab3:
     st.header("📄 AI 퀀트 투자 전략 및 운용 알고리즘 백서")
