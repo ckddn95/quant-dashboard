@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **현금 예비율 관리**, **모든 AI 판단 근거(VIX·수급·기술적지표)**, **시장 벤치마크(KOSPI) 비교 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **현금 예비율 관리**, **모든 AI 판단 근거(VIX·수급·기술적지표)**, **정확하게 보정된 백테스트 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅 (PC 내 지정 장소)
@@ -388,7 +388,6 @@ with tab2:
                 with st.spinner("과거 데이터 및 KOSPI 지수 수집 및 백테스트 산출 중..."):
                     fetch_start = start_date - datetime.timedelta(days=200)
                     
-                    # 1. KOSPI 벤치마크 (^KS11) 수집
                     kospi_ret = 0.0
                     final_kospi_asset = init_cash
                     try:
@@ -475,11 +474,15 @@ with tab2:
                             common_index = common_index.intersection(stock_dfs[name].index)
                             
                         portfolio_history = []
-                        trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0} for name in stock_dfs}
+                        trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0, 'realized_pnl': 0.0} for name in stock_dfs}
                         
                         dates = common_index
                         shares = {name: 0.0 for name in stock_dfs}
                         cash = init_cash
+                        
+                        # 종목별 매수평균단가 및 누적 실현손익 추적용 변수
+                        avg_buy_price = {name: 0.0 for name in stock_dfs}
+                        realized_pnl = {name: 0.0 for name in stock_dfs}
                         
                         max_alloc_ratio = max_alloc_pct / 100.0
                         
@@ -516,42 +519,61 @@ with tab2:
                                     diff_val = target_alloc_per_stock - current_val
                                     
                                     if name in active_stocks:
-                                        if diff_val > 0: 
+                                        if diff_val > 0: # 매수
                                             cost = diff_val
                                             fee = cost * 0.0025
                                             if cash >= (cost + fee):
                                                 cash -= (cost + fee)
-                                                shares[name] += cost / c_price
+                                                added_shares = cost / c_price
+                                                if shares[name] > 0:
+                                                    avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
+                                                else:
+                                                    avg_buy_price[name] = c_price
+                                                shares[name] += added_shares
                                                 trade_stats[name]['fee'] += fee
                                             else:
                                                 cost = max(cash - (cash * 0.0025), 0)
                                                 if cost > 0:
                                                     fee = cost * 0.0025
                                                     cash -= (cost + fee)
-                                                    shares[name] += cost / c_price
+                                                    added_shares = cost / c_price
+                                                    if shares[name] > 0:
+                                                        avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
+                                                    else:
+                                                        avg_buy_price[name] = c_price
+                                                    shares[name] += added_shares
                                                     trade_stats[name]['fee'] += fee
-                                        elif diff_val < 0: 
+                                        elif diff_val < 0: # 일부 매도
                                             proceeds = abs(diff_val)
                                             fee = proceeds * 0.0025
+                                            sold_shares = proceeds / c_price
+                                            pnl = sold_shares * (c_price - avg_buy_price[name]) - fee
+                                            realized_pnl[name] += pnl
                                             cash += (proceeds - fee)
-                                            shares[name] -= proceeds / c_price
+                                            shares[name] -= sold_shares
                                             trade_stats[name]['fee'] += fee
                                     else:
-                                        if shares[name] > 0: 
+                                        if shares[name] > 0: # 전량 매도
                                             proceeds = shares[name] * c_price
                                             fee = proceeds * 0.0025
+                                            pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
+                                            realized_pnl[name] += pnl
                                             cash += (proceeds - fee)
-                                            shares[name] = 0.0
                                             trade_stats[name]['fee'] += fee
+                                            shares[name] = 0.0
+                                            avg_buy_price[name] = 0.0
                             else:
                                 for name in stock_dfs:
                                     if shares[name] > 0:
                                         c_price = stock_dfs[name].loc[date_val, 'Close']
                                         proceeds = shares[name] * c_price
                                         fee = proceeds * 0.0025
+                                        pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
+                                        realized_pnl[name] += pnl
                                         cash += (proceeds - fee)
-                                        shares[name] = 0.0
                                         trade_stats[name]['fee'] += fee
+                                        shares[name] = 0.0
+                                        avg_buy_price[name] = 0.0
                                         
                             final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
                             portfolio_history.append(max(cash + final_eval, 0))
@@ -634,11 +656,15 @@ with tab2:
                         summary_rows = []
                         for name in stock_dfs:
                             final_c_price = stock_dfs[name].iloc[-1]['Close']
-                            final_val = shares[name] * final_c_price
+                            holding_val = shares[name] * final_c_price
+                            
+                            # 평가손익(보유 중인 주식) + 실현손익(이미 매도해서 확정된 수익) 합산
+                            unrealized_pnl = shares[name] * (final_c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
+                            total_profit = realized_pnl[name] + unrealized_pnl
+                            
                             init_val = init_cash / len(stock_dfs)
-                            profit = final_val - init_val
-                            ret = (profit / init_val) * 100 if init_val > 0 else 0
-                            weight = (final_val / final_asset) * 100 if final_asset > 0 else 0
+                            ret = (total_profit / init_val) * 100 if init_val > 0 else 0.0
+                            weight = (holding_val / final_asset) * 100 if final_asset > 0 else 0.0
                             
                             b_cnt = trade_stats[name]['buy']
                             s_cnt = trade_stats[name]['sell']
@@ -647,8 +673,8 @@ with tab2:
                             summary_rows.append({
                                 '종목명': name,
                                 '최종 보유 주수': f"{shares[name]:.2f} 주",
-                                '기말 평가금': f"{final_val:,.0f} 원",
-                                '순수익 (원)': f"{profit:+,.0f} 원",
+                                '기말 평가금': f"{holding_val:,.0f} 원",
+                                '총 순수익 (원)': f"{total_profit:+,.0f} 원",
                                 '수익률 (%)': f"{ret:+.2f}%",
                                 '매매 횟수': f"매수 {b_cnt}회 / 매도 {s_cnt}회",
                                 '총 발생 수수료': f"{fee:,.0f} 원",
