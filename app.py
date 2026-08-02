@@ -79,6 +79,8 @@ if 'auto_diagnose' not in st.session_state:
 # ==========================================
 st.sidebar.header("📂 내 PC 포트폴리오 불러오기")
 saved_files = glob.glob(f"{SAVE_DIR}/*.json")
+
+# 파일이 있을 때만 선택창과 버튼을 보여주고, 없을 때는 깔끔하게 여백 유지
 if saved_files:
     file_names = [os.path.basename(f) for f in saved_files]
     selected_file = st.sidebar.selectbox("저장된 포트폴리오 선택", file_names)
@@ -99,8 +101,6 @@ if saved_files:
                 st.rerun()
         except Exception as e:
             st.sidebar.error(f"불러오기 실패: {e}")
-else:
-    st.sidebar.info(f"[{SAVE_DIR}] 폴더에 저장된 파일이 없습니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("Portfolio Capital & Settings")
@@ -364,8 +364,8 @@ with tab2:
                     if not all_values:
                         st.warning("유효한 데이터가 없습니다.")
                     else:
-                        # 일별 전체 가상 자산 데이터프레임 병합
-                        val_df = pd.DataFrame(all_values).fillna(method='ffill')
+                        # 일별 전체 가상 자산 데이터프레임 병합 (에러 수정된 부분: ffill() 사용)
+                        val_df = pd.DataFrame(all_values).ffill()
                         val_df['Total_Asset'] = val_df.sum(axis=1)
                         
                         final_asset = val_df['Total_Asset'].iloc[-1]
@@ -379,7 +379,6 @@ with tab2:
                         st.markdown("---")
                         
                         # 월말 기준 데이터 추출 (Month-End Resampling)
-                        # Pandas 2.2+ 호환을 위해 resample('ME') 또는 groupby 사용
                         eom_val_df = val_df.drop(columns=['Total_Asset']).groupby(pd.Grouper(freq='M')).last()
                         
                         # 각 종목별 비중(%) 계산
