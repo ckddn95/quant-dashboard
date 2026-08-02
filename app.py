@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **매매 전후 자산/현금 현황 비교**, **실시간 AI 진단**, **동적 자산배분 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **매매 전후 자산/현금 현황 비교**, **실시간 AI 진단**, **정상화된 동적 자산배분 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅 (PC 내 지정 장소)
@@ -250,7 +250,6 @@ with tab1:
                             vix_status = f"VIX {vix_val:.1f}(시장 극심한 공포)"
                             vix_safe = False
 
-                        # 1단계: '신규 진입 가능' 판정 종목 수 파악
                         pre_check = []
                         stock_prices = {}
                         
@@ -285,7 +284,6 @@ with tab1:
                         n_buy_targets = max(sum(pre_check), 1)
                         target_budget_per_stock = total_cash / n_buy_targets
 
-                        # 매매 전 현재 주식 평가액 및 현금 잔고 계산
                         current_stock_eval = 0
                         holding_details = []
                         for idx, row in edited_df.iterrows():
@@ -316,7 +314,6 @@ with tab1:
                                 results.append({'종목명': s_name, '상태': holding_status, '현재가': '데이터 없음', '액션 플랜': '⚠️ 확인 불가', '상세 AI 판단 근거': '-'})
                                 continue
                             
-                            # 액션 판정 및 매매 전후 현황 산출
                             _, ma120, ma20, drawdown, vol_ratio = fetch_stock_status(s_ticker)
                             vol_strong = vol_ratio >= 150.0
                             
@@ -366,10 +363,9 @@ with tab1:
                                 '액션 플랜': action, '상세 AI 판단 근거': detail
                             })
                         
-                        # 💡 매매 전후 자산 현황 요약 패널 출력
-                        st.info(f"📊 **[매매 전후 계좌 현황 비교]**\n\n"
-                                f"• **매매 전 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
-                                f"• **매매 후 예상 현금 잔고:** 신규 진입 추천 종목 매수 시그널에 따라 자금이 동적으로 분할 투입됩니다.")
+                        st.info(f"📊 **[매매 전 계좌 현황]**\n\n"
+                                f"• **현금 잔고:** `{current_cash:,.0f} 원` | **보유 주식 평가액:** `{current_stock_eval:,.0f} 원`\n"
+                                f"• **총 자산 풀:** `{total_cash:,.0f} 원`")
                         st.table(pd.DataFrame(results))
 
 with tab2:
@@ -468,7 +464,7 @@ with tab2:
                         for name in stock_dfs:
                             common_index = common_index.intersection(stock_dfs[name].index)
                             
-                        # 안정적인 자산 백테스트 엔진 구동
+                        # 버그 없는 완전한 자산 백테스트 엔진 구동 (현금 차감 명확화)
                         portfolio_history = []
                         trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0} for name in stock_dfs}
                         
@@ -505,31 +501,46 @@ with tab2:
                                 target_alloc_per_stock = total_asset / n_active
                                 for name in stock_dfs:
                                     c_price = stock_dfs[name].loc[date_val, 'Close']
+                                    current_val = shares[name] * c_price
+                                    diff_val = target_alloc_per_stock - current_val
+                                    
                                     if name in active_stocks:
-                                        target_shares = target_alloc_per_stock / c_price
-                                        diff_shares = target_shares - shares[name]
-                                        if abs(diff_shares) > 0.0001:
-                                            trade_amt = abs(diff_shares) * c_price
-                                            fee = trade_amt * 0.0025
-                                            cash -= fee
+                                        if diff_val > 0: # 매수 필요
+                                            cost = diff_val
+                                            fee = cost * 0.0025
+                                            if cash >= (cost + fee):
+                                                cash -= (cost + fee)
+                                                shares[name] += cost / c_price
+                                                trade_stats[name]['fee'] += fee
+                                            else:
+                                                cost = max(cash - (cash * 0.0025), 0)
+                                                if cost > 0:
+                                                    fee = cost * 0.0025
+                                                    cash -= (cost + fee)
+                                                    shares[name] += cost / c_price
+                                                    trade_stats[name]['fee'] += fee
+                                        elif diff_val < 0: # 일부 매도 필요
+                                            proceeds = abs(diff_val)
+                                            fee = proceeds * 0.0025
+                                            cash += (proceeds - fee)
+                                            shares[name] -= proceeds / c_price
                                             trade_stats[name]['fee'] += fee
-                                            shares[name] = target_shares
                                     else:
-                                        if shares[name] > 0:
-                                            sell_amt = shares[name] * c_price
-                                            fee = sell_amt * 0.0025
-                                            cash += (sell_amt - fee)
-                                            trade_stats[name]['fee'] += fee
+                                        if shares[name] > 0: # 전량 매도
+                                            proceeds = shares[name] * c_price
+                                            fee = proceeds * 0.0025
+                                            cash += (proceeds - fee)
                                             shares[name] = 0.0
+                                            trade_stats[name]['fee'] += fee
                             else:
                                 for name in stock_dfs:
                                     if shares[name] > 0:
                                         c_price = stock_dfs[name].loc[date_val, 'Close']
-                                        sell_amt = shares[name] * c_price
-                                        fee = sell_amt * 0.0025
-                                        cash += (sell_amt - fee)
-                                        trade_stats[name]['fee'] += fee
+                                        proceeds = shares[name] * c_price
+                                        fee = proceeds * 0.0025
+                                        cash += (proceeds - fee)
                                         shares[name] = 0.0
+                                        trade_stats[name]['fee'] += fee
                                         
                             final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
                             portfolio_history.append(max(cash + final_eval, 0))
