@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **퀵 세이브(1초 덮어쓰기)**, **감액 시 자동 우선청산 룰**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가짜 반등 필터**, **트레일링 스탑 익절**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -106,7 +106,7 @@ def fetch_stock_status(ticker_code):
     return None, None, None, None, None, None, None, None, False, False
 
 # ==========================================
-# 2. 데이터 저장소 초기화 및 현재 작업 파일 트래킹
+# 2. 데이터 저장소 초기화 및 트래킹
 # ==========================================
 if 'portfolios' not in st.session_state:
     st.session_state.portfolios = {}
@@ -137,7 +137,7 @@ if saved_files:
                         'stocks': pd.DataFrame(p_data['stocks'])
                     }
                 st.session_state.portfolios = new_portfolios
-                st.session_state.current_loaded_file = selected_file # 작업 중인 파일명 트래킹
+                st.session_state.current_loaded_file = selected_file
                 st.session_state.auto_diagnose = True
                 st.rerun()
         except Exception as e:
@@ -159,7 +159,7 @@ if st.session_state.current_loaded_file:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
         st.sidebar.success("✅ 파일 덮어쓰기 완료!")
 else:
-    st.sidebar.caption("포트폴리오를 불러오거나 생성하면 덮어쓰기 버튼이 활성화됩니다.")
+    st.sidebar.caption("포트폴리오를 불러오거나 생성하면 활성화됩니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("Portfolio Capital & Settings")
@@ -168,21 +168,19 @@ for p_name, p_data in list(st.session_state.portfolios.items()):
     strat = p_data['strategy']
     st.sidebar.markdown(f"**[{strat}] {p_name}**")
     
-    # 투자금 증/감액 실시간 반영 입력창
     new_cash = st.sidebar.number_input(
         f"{p_name} 총 투자 운용 자산 (증/감액)", 
         value=int(p_data['cash']), 
         step=1_000_000, 
         format="%d", 
-        key=f"cash_input_{p_name}",
-        help="투자금이 감액되어 보유 주식 평가액보다 낮아지면 우선 청산 룰이 발동합니다."
+        key=f"cash_input_{p_name}"
     )
     st.session_state.portfolios[p_name]['cash'] = new_cash
     st.sidebar.caption(f"💰 설정 금액: **{new_cash:,.0f} 원**")
     
     if st.sidebar.button(f"🗑️ {p_name} 삭제", key=f"del_{p_name}"):
         del st.session_state.portfolios[p_name]
-        st.session_state.current_loaded_file = None # 파일명 초기화
+        st.session_state.current_loaded_file = None
         st.rerun()
     st.sidebar.markdown("---")
 
@@ -197,7 +195,7 @@ if st.sidebar.button("포트폴리오 생성하기", use_container_width=True):
             'strategy': new_p_strat, 'cash': new_p_cash,
             'stocks': pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
         }
-        st.session_state.current_loaded_file = f"{new_p_name}.json" # 새 파일 생성 시 트래킹
+        st.session_state.current_loaded_file = f"{new_p_name}.json"
         st.rerun()
     elif new_p_name in st.session_state.portfolios:
         st.sidebar.warning("이미 존재합니다.")
@@ -299,7 +297,7 @@ with tab1:
                     file_path = os.path.join(SAVE_DIR, f"{save_filename}.json")
                     with open(file_path, "w", encoding="utf-8") as f:
                         json.dump(save_data, f, ensure_ascii=False, indent=2)
-                    st.session_state.current_loaded_file = f"{save_filename}.json" # 저장 후 작업파일 변경
+                    st.session_state.current_loaded_file = f"{save_filename}.json"
                     st.success(f"✅ {file_path} 경로에 새롭게 저장 완료!")
 
             st.markdown("---")
@@ -371,7 +369,7 @@ with tab1:
 
                         current_stock_eval = sum((data['qty'] * data['price']) for data in stock_data_cache.values() if data['is_holding'])
                         
-                        # [자본 감액 처리 로직 (Deficit Handling)]
+                        # [자본 감액 처리 로직]
                         available_cash = total_cash - current_stock_eval
                         force_sell_plans = {}
                         
@@ -381,7 +379,6 @@ with tab1:
                                 {'name': k, 'eval_amt': v['qty'] * v['price'], 'price': v['price'], 'score': buy_scores.get(k, 0.0), 'ret_20': v['ret_20']}
                                 for k, v in stock_data_cache.items() if v['is_holding']
                             ]
-                            # 스코어 최하위 -> 단기 모멘텀 최하위 순으로 우선 청산 대상 선정
                             held_stocks_info.sort(key=lambda x: (x['score'], x['ret_20']))
                             
                             for stock in held_stocks_info:
@@ -935,8 +932,11 @@ with tab2:
                         eom_weights = eom_weights.fillna(0)
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
+                        # ----------------------------------------------------
+                        # [차트 시각화 수정] 현금이 차트의 맨 위(가장 마지막에 쌓임)로 오도록 수정
+                        # ----------------------------------------------------
                         stock_cols = sorted([c for c in eom_weights.columns if c != '현금(Cash)'])
-                        cols_ordered = ['현금(Cash)'] + stock_cols 
+                        cols_ordered = stock_cols + ['현금(Cash)']
                         eom_weights = eom_weights[cols_ordered]
                         
                         eom_weights_reset = eom_weights.reset_index().melt('Date', var_name='Asset', value_name='Weight')
@@ -945,7 +945,7 @@ with tab2:
                         eom_weights_reset['Order'] = eom_weights_reset['Asset'].map(order_map)
                         
                         base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-                        color_range = ['#000000'] + [base_colors[i % len(base_colors)] for i in range(len(stock_cols))] 
+                        color_range = [base_colors[i % len(base_colors)] for i in range(len(stock_cols))] + ['#000000']
                         
                         chart = alt.Chart(eom_weights_reset).mark_bar().encode(
                             x=alt.X('Date:O', title='', axis=alt.Axis(labelAngle=-45)),
