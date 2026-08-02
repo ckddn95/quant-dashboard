@@ -5,6 +5,7 @@ import yfinance as yf
 import FinanceDataReader as fdr
 import json
 import warnings
+import datetime
 warnings.filterwarnings('ignore')
 
 # 페이지 설정
@@ -15,7 +16,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장의 **모든 상장 종목(KOSPI/KOSDAQ)**을 자유롭게 검색하여 포트폴리오를 구성하고, **'신규 진입'과 '보유/손절'을 명확히 구분**하여 매매 액션 플랜을 진단하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장의 **모든 상장 종목(KOSPI/KOSDAQ)**을 검색하여 포트폴리오를 구성하고, **'신규 진입'과 '보유/손절' 진단** 및 **실제 과거 데이터 기반의 가상 매매 시뮬레이션**을 실행하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 1. 한국 시장 전 종목 데이터베이스 로드 (FinanceDataReader)
@@ -31,7 +32,7 @@ def load_krx_universe():
         return pd.DataFrame(columns=['Code', 'Name', 'Market'])
 
 # ==========================================
-# 실시간 주가 데이터 수집 및 지표 계산 함수 (20일선 추가)
+# 실시간 주가 데이터 수집 및 지표 계산 함수
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
@@ -96,7 +97,6 @@ if 'portfolios' not in st.session_state:
 # ==========================================
 st.sidebar.header("💾 Data Management")
 
-# 저장 (다운로드 버튼)
 json_str = convert_state_to_json()
 st.sidebar.download_button(
     label="⬇️ 현재 포트폴리오 백업 저장",
@@ -106,7 +106,6 @@ st.sidebar.download_button(
     use_container_width=True
 )
 
-# 불러오기 (파일 업로더)
 uploaded_file = st.sidebar.file_uploader("⬆️ 백업 데이터 불러오기 (JSON 파일)", type=['json'])
 if uploaded_file is not None:
     if st.sidebar.button("📂 데이터 복구 실행", use_container_width=True):
@@ -168,7 +167,7 @@ with tab1:
     if not st.session_state.portfolios:
         st.info("👈 좌측 사이드바에서 새로운 포트폴리오를 먼저 생성해주세요.")
     else:
-        selected_port = st.selectbox("관리할 포트폴리오 선택", options=list(st.session_state.portfolios.keys()))
+        selected_port = st.selectbox("관리할 포트폴리오 선택", options=list(st.session_state.portfolios.keys()), key="tab1_port")
         
         if selected_port:
             port_info = st.session_state.portfolios[selected_port]
@@ -239,9 +238,6 @@ with tab1:
             st.session_state.portfolios[selected_port]['stocks'] = edited_df
 
             st.markdown("---")
-            # ==========================================
-            # 실시간 포트폴리오 진단 (보유 / 신규 분리 로직)
-            # ==========================================
             st.subheader("🩺 실시간 매매 액션 플랜 진단")
             
             if st.button("현재 포트폴리오 진단 실행", type="primary"):
@@ -276,23 +272,17 @@ with tab1:
                                 else: 
                                     if c_price >= ma120: action = "🟢 신규 진입 가능 (추세 양호)"
                                     else: action = "🟡 진입 보류 / 관망 (하락 추세)"
-                                    
                             else:
                                 if is_holding: 
                                     user_ret = ((c_price / buy_price) - 1) * 100
                                     condition = f"내 수익률: {user_ret:+.2f}%"
-                                    if user_ret <= sat_stop_loss:
-                                        action = f"🔴 강제 매도 (설정 손절컷 {sat_stop_loss}% 도달)"
-                                    elif user_ret > 0:
-                                        action = "🟢 보유 유지 (수익권 순항)"
-                                    else:
-                                        action = "🟡 보유 유지 (손실권, 관망)"
+                                    if user_ret <= sat_stop_loss: action = f"🔴 강제 매도 (설정 손절컷 {sat_stop_loss}% 도달)"
+                                    elif user_ret > 0: action = "🟢 보유 유지 (수익권 순항)"
+                                    else: action = "🟡 보유 유지 (손실권, 관망)"
                                 else: 
                                     condition = f"20일선: {ma20:,.0f}원 / 낙폭: {drawdown:+.2f}%"
-                                    if c_price >= ma20 and drawdown >= -15.0:
-                                        action = "🟢 신규 진입 가능 (단기 모멘텀 양호)"
-                                    else:
-                                        action = "🟡 진입 보류 / 관망 (모멘텀 부족 또는 하락 추세)"
+                                    if c_price >= ma20 and drawdown >= -15.0: action = "🟢 신규 진입 가능 (단기 모멘텀 양호)"
+                                    else: action = "🟡 진입 보류 / 관망 (모멘텀 부족 또는 하락 추세)"
                                     
                             results.append({
                                 '종목명': s_name,
@@ -302,55 +292,119 @@ with tab1:
                                 '액션 플랜': action
                             })
                         
-                        res_df = pd.DataFrame(results)
-                        st.table(res_df)
-                        st.info("💡 **안내:** 사이드바 상단의 **'현재 포트폴리오 백업 저장'**을 누르면 입력하신 종목과 평단가가 안전하게 PC에 저장됩니다.")
+                        st.table(pd.DataFrame(results))
+                        st.info("💡 **안내:** 사이드바 상단의 **'현재 포트폴리오 백업 저장'**을 누르면 세팅이 PC에 저장됩니다.")
+
 
 with tab2:
     st.header("Simulation & Backtest")
-    
-    st.markdown("설정된 금액과 전략, 종목 풀을 바탕으로 과거 5개년 성과를 시뮬레이션 합니다.")
-    target_year = st.selectbox("검증 연도 선택", [2021, 2022, 2023, 2024, 2025], index=2)
-    
-    if st.button("시뮬레이션 시작", type="primary", use_container_width=True):
-        if not st.session_state.portfolios:
-            st.warning("포트폴리오가 없습니다.")
-        else:
-            with st.spinner("로직 구동 중... (각 전략별 룰 적용 중)"):
-                
-                base_returns = {
-                    2021: {'Core': 28.4, 'Sat': 70.3},
-                    2022: {'Core': -4.2, 'Sat': -21.8},
-                    2023: {'Core': 48.6, 'Sat': 163.7},
-                    2024: {'Core': 24.1, 'Sat': -26.6},
-                    2025: {'Core': 56.8, 'Sat': 108.3}
-                }
-                
-                res = base_returns[target_year]
-                total_initial = 0
-                total_final = 0
-                
-                st.success(f"✅ {target_year}년도 시뮬레이션 결과")
-                cols = st.columns(len(st.session_state.portfolios))
-                
-                for idx, (p_name, p_data) in enumerate(st.session_state.portfolios.items()):
-                    init_cash = p_data['cash']
-                    strat = p_data['strategy']
-                    stock_count = len(p_data['stocks'])
+    st.markdown("선택한 포트폴리오와 기간에 대해 **실제 과거 주가 데이터**를 바탕으로 가상 매매 시뮬레이션을 진행하고 상세한 근거를 확인합니다.")
+
+    if not st.session_state.portfolios:
+        st.warning("포트폴리오가 없습니다. 먼저 포트폴리오와 종목을 추가해주세요.")
+    else:
+        col_sim1, col_sim2, col_sim3 = st.columns(3)
+        with col_sim1:
+            sim_port = st.selectbox("시뮬레이션 할 포트폴리오 선택", list(st.session_state.portfolios.keys()), key="sim_port")
+        with col_sim2:
+            start_date = st.date_input("시작일", datetime.date(2023, 1, 1))
+        with col_sim3:
+            end_date = st.date_input("종료일", datetime.date.today())
+
+        if st.button("가상 매매 시뮬레이션 시작", type="primary", use_container_width=True):
+            port_data = st.session_state.portfolios[sim_port]
+            stocks = port_data['stocks']
+            strat = port_data['strategy']
+            init_cash = port_data['cash']
+
+            if stocks.empty:
+                st.error("해당 포트폴리오에 등록된 종목이 없습니다. 종목을 먼저 추가해주세요.")
+            else:
+                with st.spinner("야후 파이낸스에서 과거 주가 데이터를 수집하고 가상 매매 룰을 적용 중입니다..."):
+                    fetch_start = start_date - datetime.timedelta(days=200) # 120일선 계산을 위한 여유 기간 확보
+                    all_rets = []
+                    trade_logs = []
                     
-                    if strat == '대형주 (Core)': ret = res['Core'] if stock_count > 0 else 0
-                    else: ret = res['Sat'] if stock_count > 0 else 0
+                    for idx, row in stocks.iterrows():
+                        ticker = row['티커']
+                        name = row['종목명']
                         
-                    final_val = init_cash * (1 + ret / 100)
-                    total_initial += init_cash
-                    total_final += final_val
-                    
-                    cols[idx].metric(
-                        f"{p_name} ({stock_count}종목)",
-                        f"{ret:+.2f}%",
-                        f"기말 자산: {final_val:,.0f}원"
-                    )
-                
-                st.markdown("---")
-                total_ret = ((total_final / total_initial) - 1) * 100 if total_initial > 0 else 0
-                st.info(f"**총 통합 초기 자산:** {total_initial:,.0f}원 ➡️ **최종 기말 자산:** {total_final:,.0f}원 (총 수익률: **{total_ret:+.2f}%**)")
+                        df = None
+                        for suf in ['.KS', '.KQ']:
+                            temp_df = yf.download(f"{ticker}{suf}", start=fetch_start, end=end_date, progress=False)
+                            if not temp_df.empty:
+                                if isinstance(temp_df.columns, pd.MultiIndex):
+                                    temp_df.columns = temp_df.columns.get_level_values(0)
+                                df = temp_df
+                                break
+                        
+                        if df is None or df.empty:
+                            trade_logs.append({'종목명': name, '가상 누적 수익률': 'N/A', '매매 횟수': '-', '상세 근거 (적용 룰)': '데이터 수집 불가'})
+                            continue
+                            
+                        df['Close'] = df['Close'].ffill()
+                        df['Daily_Ret'] = df['Close'].pct_change()
+                        
+                        # 룰(Rule)에 따른 기계적 매매 시그널 계산
+                        if strat == '대형주 (Core)':
+                            df['MA120'] = df['Close'].rolling(120).mean()
+                            df['Signal'] = np.where(df['Close'] > df['MA120'], 1, 0) # 120일선 위면 매수/보유, 아래면 현금화
+                            rationale = "120일 이동평균선 상회 시 보유, 하회 시 전량 현금화"
+                        else:
+                            df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
+                            df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
+                            stop_loss_pct = sat_stop_loss / 100.0
+                            df['Signal'] = np.where(df['Drawdown'] > stop_loss_pct, 1, 0) # 손절컷 도달 시 매도(0), 아닐시 보유(1)
+                            rationale = f"120일 내 고점 대비 {sat_stop_loss}% 하락 시 즉시 현금화 (강제 손절)"
+
+                        # 익일 시초가 기준 매매 가정 (Shift 1)
+                        df['Strat_Ret'] = df['Signal'].shift(1) * df['Daily_Ret']
+                        
+                        sim_df = df.loc[start_date:end_date].copy()
+                        if sim_df.empty: continue
+                            
+                        # 개별 종목 누적 수익률
+                        sim_df['Cum_Ret'] = (1 + sim_df['Strat_Ret'].fillna(0)).cumprod()
+                        final_ret = (sim_df['Cum_Ret'].iloc[-1] - 1) * 100
+                        
+                        # 시그널 변동을 추적하여 매수/매도 횟수 카운팅
+                        signal_diff = sim_df['Signal'].diff().fillna(0)
+                        buy_count = (signal_diff == 1).sum()
+                        sell_count = (signal_diff == -1).sum()
+                        
+                        all_rets.append(sim_df['Strat_Ret'].rename(name))
+                        
+                        trade_logs.append({
+                            '종목명': name,
+                            '가상 누적 수익률': f"{final_ret:+.2f}%",
+                            '매매 횟수': f"진입(매수) {buy_count}회 / 청산(매도) {sell_count}회",
+                            '상세 근거 (적용 룰)': rationale
+                        })
+                        
+                    if not all_rets:
+                        st.warning("선택하신 기간의 유효한 주가 데이터가 없습니다.")
+                    else:
+                        # 포트폴리오 통합 성과 (동일비중 가정)
+                        port_ret_df = pd.concat(all_rets, axis=1).fillna(0)
+                        port_ret_df['Portfolio_Ret'] = port_ret_df.mean(axis=1)
+                        port_ret_df['Cum_Portfolio'] = (1 + port_ret_df['Portfolio_Ret']).cumprod()
+                        
+                        final_port_ret = (port_ret_df['Cum_Portfolio'].iloc[-1] - 1) * 100
+                        final_asset = init_cash * (1 + final_port_ret / 100)
+                        
+                        st.success(f"✅ {start_date} ~ {end_date} 기간 시뮬레이션 완료!")
+                        
+                        col_r1, col_r2 = st.columns(2)
+                        col_r1.metric(f"총 통합 초기 자산", f"{init_cash:,.0f} 원")
+                        col_r2.metric(f"최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
+                        
+                        st.markdown("---")
+                        st.subheader("📈 포트폴리오 자산 추이 차트 (단위: 원)")
+                        chart_data = port_ret_df[['Cum_Portfolio']] * init_cash
+                        chart_data.columns = [f"{sim_port} 자산 흐름"]
+                        st.line_chart(chart_data)
+                        
+                        st.markdown("---")
+                        st.subheader("📋 종목별 가상 매매 결과 및 상세 근거")
+                        st.table(pd.DataFrame(trade_logs))
+                        st.info("💡 위 매매 횟수는 지정된 기간 동안 설정된 전략(Rule)에 의해 시스템이 기계적으로 매수와 매도를 반복한 횟수를 의미합니다.")
