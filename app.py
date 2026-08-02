@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import FinanceDataReader as fdr
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -14,50 +15,20 @@ st.set_page_config(
 
 # 제목만 영어로
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("나만의 포트폴리오를 직접 생성하고, 실시간 데이터를 바탕으로 **종목별 매수/매도 진단**과 시뮬레이션을 실행하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장의 **모든 상장 종목(KOSPI/KOSDAQ)**을 자유롭게 검색하여 나만의 포트폴리오를 구성하고, 실시간 매매 진단과 시뮬레이션을 실행하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
-# 1. 마스터 종목 풀 (검색 및 속성 검증용 DB)
+# 1. 한국 시장 전 종목 데이터베이스 로드 (FinanceDataReader)
 # ==========================================
-MASTER_STOCKS = {
-    # 대형주
-    '삼성전자': {'ticker': '005930', 'type': '대형주'},
-    'LG에너지솔루션': {'ticker': '373220', 'type': '대형주'},
-    'SK하이닉스': {'ticker': '000660', 'type': '대형주'},
-    '삼성바이오로직스': {'ticker': '207940', 'type': '대형주'},
-    '현대차': {'ticker': '005380', 'type': '대형주'},
-    '기아': {'ticker': '000270', 'type': '대형주'},
-    '셀트리온': {'ticker': '068270', 'type': '대형주'},
-    'POSCO홀딩스': {'ticker': '005490', 'type': '대형주'},
-    'NAVER': {'ticker': '035420', 'type': '대형주'},
-    'LG화학': {'ticker': '051910', 'type': '대형주'},
-    'KB금융': {'ticker': '105560', 'type': '대형주'},
-    '신한지주': {'ticker': '055550', 'type': '대형주'},
-    '카카오': {'ticker': '035720', 'type': '대형주'},
-    '삼성SDI': {'ticker': '006400', 'type': '대형주'},
-    
-    # 중소형주
-    '에코프로비엠': {'ticker': '247540', 'type': '중소형주'},
-    '에코프로': {'ticker': '086520', 'type': '중소형주'},
-    'HLB': {'ticker': '028300', 'type': '중소형주'},
-    '알테오젠': {'ticker': '196170', 'type': '중소형주'},
-    '엔켐': {'ticker': '348370', 'type': '중소형주'},
-    'HPSP': {'ticker': '403870', 'type': '중소형주'},
-    '셀트리온제약': {'ticker': '068760', 'type': '중소형주'},
-    '리노공업': {'ticker': '058470', 'type': '중소형주'},
-    '레인보우로보틱스': {'ticker': '277810', 'type': '중소형주'},
-    '클래시스': {'ticker': '214150', 'type': '중소형주'},
-    '솔브레인': {'ticker': '365550', 'type': '중소형주'},
-    '에스티팜': {'ticker': '237690', 'type': '중소형주'},
-    '파마리서치': {'ticker': '214450', 'type': '중소형주'},
-    '삼천당제약': {'ticker': '000250', 'type': '중소형주'},
-    '실리콘투': {'ticker': '257720', 'type': '중소형주'},
-    '엘앤에프': {'ticker': '066970', 'type': '중소형주'},
-    '브이티': {'ticker': '018290', 'type': '중소형주'},
-    'ISC': {'ticker': '095340', 'type': '중소형주'},
-    '원익IPS': {'ticker': '240810', 'type': '중소형주'},
-    '에이비엘바이오': {'ticker': '298380', 'type': '중소형주'}
-}
+@st.cache_data(ttl=86400) # 하루 단위로 상장 종목 풀 캐싱
+def load_krx_universe():
+    try:
+        df = fdr.StockListing('KRX')
+        df = df.dropna(subset=['Code', 'Name'])
+        return df
+    except Exception as e:
+        st.error("종목 데이터를 불러오는데 실패했습니다.")
+        return pd.DataFrame(columns=['Code', 'Name', 'Market'])
 
 # ==========================================
 # 실시간 주가 데이터 수집 및 지표 계산 함수
@@ -145,10 +116,10 @@ tab1, tab2 = st.tabs(["Portfolio Configuration & Stock Pools", "Simulation & Bac
 
 with tab1:
     st.header("포트폴리오 종목 구성 및 실시간 진단")
-    st.markdown("포트폴리오를 선택하여 종목을 추가한 뒤, **진단 버튼**을 눌러 매매 액션 플랜을 확인하세요.")
+    st.markdown("포트폴리오를 선택하여 전 종목(KOSPI/KOSDAQ) 중 원하는 종목을 추가한 뒤, **진단 버튼**을 눌러 매매 액션 플랜을 확인하세요.")
     
     if not st.session_state.portfolios:
-        st.info("👈 좌측 사이드바에서 새로운 포트폴리오를 먼저 추가해주세요.")
+        st.info("👈 좌측 사이드바에서 새로운 포트폴리오를 먼저 생성해주세요.")
     else:
         selected_port = st.selectbox("관리할 포트폴리오 선택", options=list(st.session_state.portfolios.keys()))
         
@@ -160,32 +131,58 @@ with tab1:
             
             # 스마트 종목 검색 및 전략 교차 검증 로직
             st.subheader("🔍 개별 종목 검색 및 추가")
-            search_kw = st.text_input("추가하고 싶은 종목명 입력 (예: 삼성, 에코프로)", key=f"search_{selected_port}")
+            search_kw = st.text_input("추가하고 싶은 종목명 입력 (예: 솔트룩스, KB금융)", key=f"search_{selected_port}")
             
             if search_kw:
-                filtered_stocks = [name for name in MASTER_STOCKS.keys() if search_kw in name]
-                if filtered_stocks:
+                krx_df = load_krx_universe()
+                filtered_stocks = krx_df[krx_df['Name'].str.contains(search_kw, case=False, na=False)]
+                
+                if not filtered_stocks.empty:
                     col_search1, col_search2 = st.columns([3, 1])
                     with col_search1:
-                        selected_stock = st.selectbox("검색 결과 (선택하세요)", filtered_stocks, key=f"sel_{selected_port}")
+                        # 검색 결과용 문자열 생성 (종목명 + 코드)
+                        display_options = [f"{row['Name']} ({row['Code']})" for _, row in filtered_stocks.iterrows()]
+                        selected_option = st.selectbox("검색 결과 (선택하세요)", display_options, key=f"sel_{selected_port}")
                     with col_search2:
                         st.markdown("<br>", unsafe_allow_html=True)
                         if st.button("➕ 종목 추가", key=f"add_btn_{selected_port}", use_container_width=True):
                             
-                            stock_data = MASTER_STOCKS[selected_stock]
-                            stock_ticker = stock_data['ticker']
-                            stock_type = stock_data['type']
+                            # 선택된 종목명과 코드 분리
+                            sel_name = selected_option.split(" (")[0]
+                            sel_code = selected_option.split(" (")[1].replace(")", "")
+                            sel_market = filtered_stocks[filtered_stocks['Code'] == sel_code]['Market'].values[0]
                             
-                            # [핵심 로직] 포트폴리오 전략과 종목 성격 교차 검증
-                            if '대형주' in current_strategy and stock_type == '중소형주':
-                                st.error(f"⚠️ [{selected_stock}]은(는) 중소형주입니다. 중소형주(Satellite) 포트폴리오에 등록해주세요.")
-                            elif '중소형주' in current_strategy and stock_type == '대형주':
-                                st.error(f"⚠️ [{selected_stock}]은(는) 대형주입니다. 대형주(Core) 포트폴리오에 등록해주세요.")
-                            else:
-                                new_row = pd.DataFrame({'종목명': [selected_stock], '티커': [stock_ticker]})
-                                comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
-                                st.session_state.portfolios[selected_port]['stocks'] = comb
-                                st.rerun()
+                            # 야후 파이낸스로 시가총액 실시간 확인
+                            suffix = ".KS" if sel_market in ["KOSPI", "KOSPI200"] else ".KQ"
+                            yf_ticker = f"{sel_code}{suffix}"
+                            
+                            with st.spinner(f"'{sel_name}'의 시가총액 규모를 실시간으로 분석 중입니다..."):
+                                try:
+                                    t = yf.Ticker(yf_ticker)
+                                    mcap = t.fast_info.get('market_cap', 0)
+                                except:
+                                    mcap = 0
+                                    
+                                # 시총 3조 원 기준 대형/중소형 분류
+                                LARGE_CAP_THRESHOLD = 3_000_000_000_000 
+                                
+                                if mcap > 0:
+                                    stock_type = '대형주' if mcap >= LARGE_CAP_THRESHOLD else '중소형주'
+                                    mcap_text = f"시가총액 약 {mcap / 1_000_000_000_000:.1f}조 원의 "
+                                else:
+                                    stock_type = '대형주' if sel_market == 'KOSPI' else '중소형주'
+                                    mcap_text = f"[{sel_market} 소속] "
+                                    
+                                # [핵심 로직] 포트폴리오 전략과 종목 성격 교차 검증 및 차단 안내
+                                if '대형주' in current_strategy and stock_type == '중소형주':
+                                    st.error(f"⚠️ **[{sel_name}]**은(는) {mcap_text}**{stock_type}**입니다. 성격에 맞는 **중소형주(Satellite) 포트폴리오**에 등록해주세요.")
+                                elif '중소형주' in current_strategy and stock_type == '대형주':
+                                    st.error(f"⚠️ **[{sel_name}]**은(는) {mcap_text}**{stock_type}**입니다. 성격에 맞는 **대형주(Core) 포트폴리오**에 등록해주세요.")
+                                else:
+                                    new_row = pd.DataFrame({'종목명': [sel_name], '티커': [sel_code]})
+                                    comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
+                                    st.session_state.portfolios[selected_port]['stocks'] = comb
+                                    st.rerun()
                 else:
                     st.warning("일치하는 종목이 없습니다. 정확한 이름을 입력해보세요.")
 
