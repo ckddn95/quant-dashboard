@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **시장 공포지수(VIX) 및 수급 모멘텀 기반 상세 AI 진단**과 **전략별 비교 분석(단순보유·적립식·AI설정값) 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **시장 공포지수(VIX) 및 수급 모멘텀 기반 상세 AI 진단**과 **동적 현금 배분 룰이 적용된 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅 (PC 내 지정 장소)
@@ -331,7 +331,7 @@ with tab1:
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("진단(Tab 1)과 **100% 동일한 다지표 조건(VIX, 수급, 이평선)**을 과거 데이터에 적용하여 실전 가상 매매를 실행하고, 종목별 상세 통계 및 전략별 비교를 제공합니다.")
+    st.markdown("중앙 현금 풀을 기반으로 **매수 신호가 켜진 종목에만 자금이 동적으로 분할 배분**되는 실전형 자산배분 백테스트를 실행합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -344,7 +344,7 @@ with tab2:
         with col_sim3:
             end_date = st.date_input("종료일", datetime.date.today())
 
-        if st.button("동기화된 시뮬레이션 및 전략 비교 생성", type="primary", use_container_width=True):
+        if st.button("동적 자산배분 시뮬레이션 및 전략 비교 생성", type="primary", use_container_width=True):
             port_data = st.session_state.portfolios[sim_port]
             stocks = port_data['stocks']
             strat = port_data['strategy']
@@ -353,7 +353,7 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("과거 데이터 수집 및 3대 전략 비교 백테스트 산출 중..."):
+                with st.spinner("과거 데이터 수집 및 동적 현금 배분 백테스트 산출 중..."):
                     fetch_start = start_date - datetime.timedelta(days=200)
                     
                     vix_hist = None
@@ -367,13 +367,8 @@ with tab2:
                     except:
                         pass
                     
-                    all_values = {}
-                    bh_values = {}
-                    dca_values = {}
-                    trade_stats = {}
-                    stock_count = len(stocks)
-                    cash_per_stock = init_cash / stock_count
-                    
+                    # 1. 개별 종목별 가격, 수익률, 시그널 데이터프레임 수집
+                    stock_dfs = {}
                     for idx, row in stocks.iterrows():
                         ticker = row['티커']
                         name = row['종목명']
@@ -405,7 +400,7 @@ with tab2:
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
                         df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
                         
-                        # 1. AI 설정값 전략 (Core-Satellite Rule)
+                        # AI 룰(Signal) 생성
                         if strat == '대형주 (Core)':
                             df['MA120'] = df['Close'].rolling(120).mean()
                             df['Signal'] = np.where((df['Close'] >= df['MA120']) & df['VIX_Safe'], 1, 
@@ -422,129 +417,164 @@ with tab2:
                             
                             df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
                             df['Signal'] = df['Signal'].ffill().fillna(0)
-
-                        # 매매 횟수(진입/청산) 카운팅
-                        sim_subset = df.loc[start_date:end_date]
-                        buy_cnt = int((sim_subset['Signal'].diff() == 1).sum())
-                        sell_cnt = int((sim_subset['Signal'].diff() == -1).sum())
-                        
-                        df['Strat_Ret'] = df['Signal'].shift(1) * df['Daily_Ret']
-                        sim_df = df.loc[start_date:end_date].copy()
-                        if sim_df.empty: continue
                             
-                        # AI 전략 자산 가치
-                        sim_df['Cum_Ret'] = (1 + sim_df['Strat_Ret'].fillna(0)).cumprod()
-                        sim_df['Asset_Value'] = sim_df['Cum_Ret'] * cash_per_stock
-                        all_values[name] = sim_df['Asset_Value']
+                        stock_dfs[name] = df.loc[start_date:end_date].copy()
                         
-                        # 2. 단순보유 (Buy & Hold) 전략 성과 계산
-                        sim_df['BH_Cum_Ret'] = (1 + sim_df['Daily_Ret'].fillna(0)).cumprod()
-                        bh_values[name] = sim_df['BH_Cum_Ret'] * cash_per_stock
-
-                        # 3. 적립식 매수 (DCA) 전략 성과 계산 (매월 초 일정 금액 분할 적립 가정)
-                        # 기간 내 월별 인덱스 추출 후 매월 균등 적립 모사
-                        sim_df['Month'] = sim_df.index.to_period('M')
-                        monthly_groups = sim_df.groupby('Month')
-                        dca_asset_series = pd.Series(index=sim_df.index, dtype=float)
-                        
-                        # 초기 자금의 20%를 첫 달에 넣고, 나머지를 남은 달 동안 매월 균등 분할 투입
-                        n_months = len(monthly_groups)
-                        monthly_injection = (init_cash * 0.8) / max(n_months, 1) if n_months > 0 else 0
-                        initial_dca_seed = (init_cash * 0.2) / stock_count
-                        
-                        running_shares = initial_dca_seed / sim_df['Close'].iloc[0]
-                        current_cash_pool = 0
-                        
-                        for m_idx, (m_val, m_data) in enumerate(monthly_groups):
-                            # 매월 첫 거래일에 현금 주입 후 주식 매수
-                            first_idx = m_data.index[0]
-                            if m_idx > 0:
-                                cash_addition = monthly_injection / stock_count
-                                add_shares = cash_addition / m_data.loc[first_idx, 'Close']
-                                running_shares += add_shares
-                        
-                        # 일별 DCA 평가금액 = 보유 주식 수 누적 * 일별 종가
-                        # 정교하게 일별 누적 주식 수를 반영하기 위해 월별 매수분을 누적 계산
-                        shares_accumulated = initial_dca_seed / sim_df['Close'].iloc[0]
-                        dca_values_list = []
-                        current_injected_cash = initial_dca_seed
-                        
-                        for date_val, row_val in sim_df.iterrows():
-                            # 월이 바뀔 때 추가 매수 가정
-                            if date_val == sim_df.index[0]:
-                                pass
-                            elif date_val.day <= 3 and date_val.month != sim_df.index[sim_df.index.get_loc(date_val)-1].month:
-                                if n_months > 0:
-                                    add_amt = (init_cash * 0.8 / n_months) / stock_count
-                                    shares_accumulated += add_amt / row_val['Close']
-                                    current_injected_cash += add_amt
-                            dca_values_list.append(shares_accumulated * row_val['Close'])
-                            
-                        dca_values[name] = pd.Series(dca_values_list, index=sim_df.index)
-
-                        # 추정 수수료
-                        traded_days = sim_df[sim_df['Signal'].diff() != 0]
-                        est_fee = float(traded_days['Asset_Value'].sum() * 0.0025)
-                        
-                        trade_stats[name] = {
-                            'buy': buy_cnt,
-                            'sell': sell_cnt,
-                            'fee': est_fee
-                        }
-                        
-                    if not all_values:
+                    if not stock_dfs:
                         st.warning("유효한 데이터가 없습니다.")
                     else:
-                        val_df = pd.DataFrame(all_values).ffill()
-                        val_df['Total_Asset'] = val_df.sum(axis=1)
+                        # 공통 날짜 인덱스 정렬
+                        common_index = list(stock_dfs.values())[0].index
+                        for name in stock_dfs:
+                            common_index = common_index.intersection(stock_dfs[name].index)
+                            
+                        # 2. 동적 자산 배분 엔진 가동 (Dynamic Cash Allocation Engine)
+                        # 매일 신호가 켜진 종목 개수를 세어 자금을 균등 배분 (신호가 없으면 현금 보유)
+                        portfolio_value = pd.Series(index=common_index, dtype=float)
+                        current_capital = init_cash
                         
-                        bh_df = pd.DataFrame(bh_values).ffill()
-                        bh_df['Total_Asset'] = bh_df.sum(axis=1)
-
-                        dca_df = pd.DataFrame(dca_values).ffill()
-                        dca_df['Total_Asset'] = dca_df.sum(axis=1)
-
-                        final_asset = val_df['Total_Asset'].iloc[-1]
+                        # 각 종목별 보유 수량 추적
+                        shares = {name: 0.0 for name in stock_dfs}
+                        cash = init_cash
+                        
+                        portfolio_history = []
+                        trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0} for name in stock_dfs}
+                        
+                        # 날짜별 시뮬레이션 루프
+                        dates = common_index
+                        for i, date_val in enumerate(dates):
+                            if i == 0:
+                                portfolio_history.append(init_cash)
+                                continue
+                                
+                            prev_date = dates[i-1]
+                            
+                            # 당일 시그널 확인 및 매수 대상 선정
+                            active_stocks = []
+                            for name, df in stock_dfs.items():
+                                sig = df.loc[date_val, 'Signal']
+                                if sig == 1:
+                                    active_stocks.append(name)
+                                    
+                            # 전일 대비 시그널 변동 카운팅 (매매 횟수)
+                            for name, df in stock_dfs.items():
+                                curr_sig = df.loc[date_val, 'Signal']
+                                prev_sig = df.loc[prev_date, 'Signal']
+                                if curr_sig == 1 and prev_sig == 0:
+                                    trade_stats[name]['buy'] += 1
+                                elif curr_sig == 0 and prev_sig == 1:
+                                    trade_stats[name]['sell'] += 1
+                                    
+                            # 총 평가금액 계산 (현금 + 보유 주식 평가액)
+                            stock_eval_total = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
+                            total_asset = cash + stock_eval_total
+                            
+                            # 리밸런싱: 매일 장 마감 기준, 신호가 켜진 종목들에게 자금 균등 재배분 (Dynamic Reweighting)
+                            n_active = len(active_stocks)
+                            if n_active > 0:
+                                target_alloc_per_stock = total_asset / n_active
+                                
+                                for name in stock_dfs:
+                                    c_price = stock_dfs[name].loc[date_val, 'Close']
+                                    if name in active_stocks:
+                                        target_shares = target_alloc_per_stock / c_price
+                                        # 매매 발생 시 수수료 차감 (약 0.25%)
+                                        diff_shares = target_shares - shares[name]
+                                        if abs(diff_shares) > 0.001:
+                                            trade_amount = abs(diff_shares) * c_price
+                                            fee = trade_amount * 0.0025
+                                            cash -= fee
+                                            trade_stats[name]['fee'] += fee
+                                            shares[name] = target_shares
+                                    else:
+                                        # 신호 꺼짐 -> 전량 매도하여 현금화
+                                        if shares[name] > 0:
+                                            sell_amount = shares[name] * c_price
+                                            fee = sell_amount * 0.0025
+                                            cash += (sell_amount - fee)
+                                            trade_stats[name]['fee'] += fee
+                                            shares[name] = 0.0
+                            else:
+                                # 모든 종목 신호 꺼짐 -> 100% 현금화
+                                for name in stock_dfs:
+                                    if shares[name] > 0:
+                                        c_price = stock_dfs[name].loc[date_val, 'Close']
+                                        sell_amount = shares[name] * c_price
+                                        fee = sell_amount * 0.0025
+                                        cash += (sell_amount - fee)
+                                        trade_stats[name]['fee'] += fee
+                                        shares[name] = 0.0
+                                        
+                            # 최종 당일 총 자산 기록
+                            final_stock_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
+                            portfolio_history.append(cash + final_stock_eval)
+                            
+                        ai_portfolio_series = pd.Series(portfolio_history, index=common_index)
+                        
+                        # 3. 단순보유 (Buy & Hold) 및 적립식 (DCA) 비교군 생성
+                        bh_values = {}
+                        dca_values = {}
+                        cash_per_stock_init = init_cash / len(stock_dfs)
+                        
+                        for name, df in stock_dfs.items():
+                            sim_df = df.copy()
+                            # B&H
+                            bh_values[name] = (sim_df['Close'] / sim_df['Close'].iloc[0]) * cash_per_stock_init
+                            
+                            # DCA
+                            n_months = len(sim_df.groupby(sim_df.index.to_period('M')))
+                            initial_seed = (init_cash * 0.2) / len(stock_dfs)
+                            shares_acc = initial_seed / sim_df['Close'].iloc[0]
+                            dca_list = []
+                            for date_val, row_val in sim_df.iterrows():
+                                if date_val != sim_df.index[0] and date_val.day <= 3 and date_val.month != sim_df.index[sim_df.index.get_loc(date_val)-1].month:
+                                    if n_months > 0:
+                                        add_amt = (init_cash * 0.8 / n_months) / len(stock_dfs)
+                                        shares_acc += add_amt / row_val['Close']
+                                    dca_list.append(shares_acc * row_val['Close'])
+                                else:
+                                    dca_list.append(shares_acc * row_val['Close'])
+                            dca_values[name] = pd.Series(dca_list, index=sim_df.index)
+                            
+                        bh_df = pd.DataFrame(bh_values).sum(axis=1)
+                        dca_df = pd.DataFrame(dca_values).sum(axis=1)
+                        
+                        final_asset = ai_portfolio_series.iloc[-1]
                         final_port_ret = ((final_asset / init_cash) - 1) * 100
-
-                        final_bh_asset = bh_df['Total_Asset'].iloc[-1]
+                        
+                        final_bh_asset = bh_df.iloc[-1]
                         final_bh_ret = ((final_bh_asset / init_cash) - 1) * 100
-
-                        final_dca_asset = dca_df['Total_Asset'].iloc[-1]
-                        # DCA는 원금 분할 투입이므로 실질 투입 원금 기준 수익률 산출
+                        
+                        final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 백테스트 및 전략 비교 산출 완료!")
+                        st.success(f"✅ 동적 자산배분 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
-                        col_r2.metric(f"AI 설정값 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
+                        col_r2.metric(f"AI 동적배분 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
                         
                         st.markdown("---")
                         
-                        # ==========================================
-                        # 💡 3대 전략 비교 분석 표 (별도 출력)
-                        # ==========================================
-                        st.subheader("📊 [전략 비교] 단순보유 vs 적립식 매수 vs AI 설정값")
-                        st.markdown("동일한 기간 동안 각 투자 방식에 따른 최종 성과 비교 테이블입니다.")
-                        
+                        # 3대 전략 비교 표
+                        st.subheader("📊 [전략 비교] 단순보유 vs 적립식 매수 vs AI 동적배분 설정값")
                         comparison_data = [
                             {
-                                '전략 구분': '🤖 AI 설정값 전략 (Core-Satellite Rule)',
+                                '전략 구분': '🤖 AI 동적배분 전략 (Core-Satellite Rule)',
                                 '최종 기말 자산': f"{final_asset:,.0f} 원",
                                 '총 수익률': f"{final_port_ret:+.2f}%",
-                                '운용 방식 및 특징': '시장 공포지수(VIX), 수급, 이동평균선 조건에 따라 기계적 매수/현금화(리스크 관리형)'
+                                '운용 방식 및 특징': '매수 신호 종목에만 자금 동적 배분, 신호 소멸 시 100% 현금 방어 (현금 풀 관리형)'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
                                 '최종 기말 자산': f"{final_bh_asset:,.0f} 원",
                                 '총 수익률': f"{final_bh_ret:+.2f}%",
-                                '운용 방식 및 특징': '초기 전액 매수 후 기간 동안 매도 없이 끝까지 홀딩 (변동성 노출형)'
+                                '운용 방식 및 특징': '초기 전액 매수 후 매도 없이 홀딩 (변동성 그대로 노출)'
                             },
                             {
-                                '전략 구분': '💰 적립식 매수 (DCA - Dollar Cost Averaging)',
+                                '전략 구분': '💰 적립식 매수 (DCA)',
                                 '최종 기말 자산': f"{final_dca_asset:,.0f} 원",
                                 '총 수익률': f"{final_dca_ret:+.2f}%",
-                                '운용 방식 및 특징': '초기 시드 분할 후 매월 정기적으로 일정한 금액을 추가 투입하여 매입단가 분산'
+                                '운용 방식 및 특징': '시드 분할 후 매월 정기 추가 투입으로 매입단가 분산'
                             }
                         ]
                         st.table(pd.DataFrame(comparison_data))
@@ -552,11 +582,13 @@ with tab2:
                         st.markdown("---")
                         
                         # 종목별 상세 통계 표 생성
-                        st.subheader("📋 종목별 상세 매매 통계 및 성과 분석 (AI 설정값 기준)")
+                        st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
                         summary_rows = []
-                        for name in all_values.keys():
-                            init_val = cash_per_stock
-                            final_val = all_values[name].iloc[-1]
+                        for name in stock_dfs:
+                            # 기말 최종 주가 기준 평가금 산출
+                            final_c_price = stock_dfs[name].iloc[-1]['Close']
+                            final_val = shares[name] * final_c_price
+                            init_val = init_cash / len(stock_dfs) # 명목상 초기 기준 비교금
                             profit = final_val - init_val
                             ret = (profit / init_val) * 100
                             weight = (final_val / final_asset) * 100 if final_asset > 0 else 0
@@ -567,26 +599,29 @@ with tab2:
                             
                             summary_rows.append({
                                 '종목명': name,
-                                '초기 배분금': f"{init_val:,.0f} 원",
+                                '최종 보유 주수': f"{shares[name]:.2f} 주",
                                 '기말 평가금': f"{final_val:,.0f} 원",
                                 '순수익 (원)': f"{profit:+,.0f} 원",
                                 '수익률 (%)': f"{ret:+.2f}%",
                                 '매매 횟수': f"매수 {b_cnt}회 / 매도 {s_cnt}회",
-                                '추정 수수료': f"{fee:,.0f} 원",
-                                '기말 비중': f"{weight:.2f}%"
+                                '총 발생 수수료': f"{fee:,.0f} 원",
+                                '기말 포트폴리오 비중': f"{weight:.2f}%"
                             })
                         st.table(pd.DataFrame(summary_rows))
                         
                         st.markdown("---")
                         
+                        # 월말 비중 차트용 일별 자산 데이터프레임 구성
+                        val_df_chart = pd.DataFrame({name: (stock_dfs[name]['Close'] * shares[name]) for name in stock_dfs})
                         try:
-                            eom_val_df = val_df.drop(columns=['Total_Asset']).resample('ME').last()
+                            eom_val_df = val_df_chart.resample('ME').last()
                         except ValueError:
-                            eom_val_df = val_df.drop(columns=['Total_Asset']).resample('M').last()
-                        
+                            eom_val_df = val_df_chart.resample('M').last()
+                            
                         eom_weights = eom_val_df.div(eom_val_df.sum(axis=1), axis=0) * 100
+                        eom_weights = eom_weights.fillna(0)
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
                         st.subheader("📊 월말 기준 각 주식의 보유 비중 추이 (%)")
                         st.area_chart(eom_weights)
-                        st.info("💡 위 통계는 진단 탭의 AI 판단 룰(VIX, 수급, 이평선)과 완전히 동일한 조건으로 백테스트 기간 동안 발생한 실제 매매 내역을 집계한 결과입니다.")
+                        st.info("💡 위 비중 추이는 AI 진단 룰에 따라 자금이 동적으로 재배분되어 현금과 종목 간에 비중이 조절된 결과입니다.")
