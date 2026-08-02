@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import FinanceDataReader as fdr
+import altair as alt
 import json
 import os
 import glob
@@ -18,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **200일선 장기 추세 필터**, **연속 손실 종목 쿨다운(60일 매수금지)**, **KOSPI 벤치마크 비교**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가짜 반등 필터**, **트레일링 스탑 익절**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -879,6 +880,34 @@ with tab2:
                         eom_weights = eom_weights.fillna(0)
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
+                        # ----------------------------------------------------
+                        # [차트 시각화 업그레이드] Altair를 활용한 완벽한 누적 막대 차트
+                        # ----------------------------------------------------
+                        
+                        # 1. 정렬: 주식들은 가나다순, 현금은 맨 마지막(차트 가장 위로 쌓임)
+                        stock_cols = sorted([c for c in eom_weights.columns if c != '현금(Cash)'])
+                        cols_ordered = stock_cols + ['현금(Cash)']
+                        eom_weights = eom_weights[cols_ordered]
+                        
+                        # 2. Altair 차트용 데이터 변환 (Melt)
+                        eom_weights_reset = eom_weights.reset_index().melt('Date', var_name='Asset', value_name='Weight')
+                        
+                        # 3. 누적 순서 매핑 (현금이 차트 맨 위에 쌓이도록 설정)
+                        order_map = {name: i for i, name in enumerate(cols_ordered)}
+                        eom_weights_reset['Order'] = eom_weights_reset['Asset'].map(order_map)
+                        
+                        # 4. 색상 설정: 주식들은 기본 10색상 순환 배정, 현금은 블랙(#000000)
+                        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+                        color_range = [base_colors[i % len(base_colors)] for i in range(len(stock_cols))] + ['#000000']
+                        
+                        chart = alt.Chart(eom_weights_reset).mark_bar().encode(
+                            x=alt.X('Date:O', title='', axis=alt.Axis(labelAngle=-45)),
+                            y=alt.Y('Weight:Q', title='비중 (%)', stack='zero'),
+                            color=alt.Color('Asset:N', scale=alt.Scale(domain=cols_ordered, range=color_range), title='자산 구분'),
+                            order=alt.Order('Order:Q', sort='ascending'),
+                            tooltip=['Date', 'Asset', alt.Tooltip('Weight:Q', format='.2f', title='비중(%)')]
+                        ).properties(height=450)
+                        
                         st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, 누적 막대)")
-                        st.bar_chart(eom_weights)
-                        st.info("💡 위 누적 막대 차트는 종목과 현금이 겹치지 않고(Stacked) 매월 100% 비중 내에서 어떻게 분배되었는지 직관적으로 보여줍니다.")
+                        st.altair_chart(chart, use_container_width=True)
+                        st.info("💡 위 누적 막대 차트는 종목별 지정석(색상 및 위치)을 항상 일정하게 고정하고, **검정색 현금(Cash)**이 최상단에 쌓이도록 하여 현재 **시장 노출도(총 주식 비중)와 리스크 방어 수준**을 직관적으로 파악할 수 있게 해줍니다.")
