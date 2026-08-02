@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가짜 반등 필터**, **트레일링 스탑 익절**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **정밀 리밸런싱 산식**, **가짜 반등 필터**, **트레일링 스탑 익절**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -301,7 +301,7 @@ with tab1:
                     st.success(f"✅ {file_path} 경로에 새롭게 저장 완료!")
 
             st.markdown("---")
-            st.subheader("🩺 실시간 매매 액션 플랜 및 증/감액 맞춤 진단")
+            st.subheader("🩺 실시간 매매 액션 플랜 및 증/감액 동적 리밸런싱 진단")
             
             run_btn = st.button("수동으로 진단 실행", type="primary")
             
@@ -347,14 +347,14 @@ with tab1:
                             ma200_pass = (not use_ma200_filter) or is_above_ma200
                             
                             if current_strategy == '대형주 (Core)':
-                                if not is_holding and ma200_pass and (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian):
+                                if ma200_pass and (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian):
                                     score = 1.0
                                     if vol_strong: score += 0.5
                                     if rs_strong: score += 0.5
                                     if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
                             else:
-                                if not is_holding and ma200_pass and ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and drawdown >= -15.0):
+                                if ma200_pass and ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and drawdown >= -15.0):
                                     score = 1.0
                                     if vol_strong: score += 0.5
                                     if rs_strong: score += 0.5
@@ -369,7 +369,7 @@ with tab1:
 
                         current_stock_eval = sum((data['qty'] * data['price']) for data in stock_data_cache.values() if data['is_holding'])
                         
-                        # [자본 감액 처리 로직]
+                        # [자본 감액 처리 및 강제 청산 산식]
                         available_cash = total_cash - current_stock_eval
                         force_sell_plans = {}
                         
@@ -392,7 +392,7 @@ with tab1:
                                     deficit -= eval_amt
                                 else:
                                     sell_qty = int(np.ceil(deficit / price))
-                                    force_sell_plans[s_name] = f"🔴 부분 매도 (설정 투자금 감액 맞춤: {sell_qty}주 매도)"
+                                    force_sell_plans[s_name] = f"🟡 부분 매도 (설정 투자금 감액 맞춤: {sell_qty}주 매도)"
                                     deficit = 0
 
                         current_cash = max(available_cash, 0)
@@ -414,13 +414,20 @@ with tab1:
                             rs_strong = data['ret_60'] > kospi_ret_60
                             vol_status = f"거래량 {data['vol_ratio']:.0f}%(수급 급증)" if vol_strong else (f"거래량 {data['vol_ratio']:.0f}%(수급 보통)" if data['vol_ratio'] >= 80 else f"거래량 {data['vol_ratio']:.0f}%(수급 침체)")
                             rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
-                            ma200_status = "200일선 상회(대상승장)" if data['is_above_ma200'] else "200일선 하회(장기하락/횡보)"
+                            ma200_status = "200일선 상회" if data['is_above_ma200'] else "200일선 하회"
 
                             ma20, ma60, ret_20, ma60_slope_positive = data['ma20'], data['ma60'], data['ret_20'], data['ma60_slope']
                             diff_ma = ((ma20 / ma60) - 1) * 100
                             tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
                             slope_status = "60일선 우상향" if ma60_slope_positive else "60일선 횡보/우하향"
 
+                            # 목표 비중 산식 계산 (증/감액 리밸런싱 반영)
+                            stock_weight = (buy_scores.get(s_name, 1.0) / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
+                            target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio)
+                            current_val = data['qty'] * c_price
+                            diff_amt = target_amt - current_val
+
+                            # 감액 강제 청산 대상 확인
                             if is_holding and s_name in force_sell_plans:
                                 action = force_sell_plans[s_name]
                                 detail = f"[{tech_text}] | [{rs_status}]\n➔ ⚠️ 총 투자 운용 자산이 감액 설정됨에 따라, AI 모멘텀이 가장 낮은 본 종목을 우선 매도하여 현금 비중을 맞춥니다."
@@ -428,8 +435,22 @@ with tab1:
                             elif current_strategy == '대형주 (Core)':
                                 if is_holding: 
                                     if ma20 >= ma60 * (1 - buf/2): 
-                                        action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중."
+                                        add_cond = ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian
+                                        if diff_amt > 0 and current_cash >= c_price and add_cond:
+                                            add_shares = int(min(diff_amt, current_cash) // c_price)
+                                            if add_shares > 0:
+                                                action = f"🟢 추가 매수 (비중 확대: {add_shares}주 추가)"
+                                                detail = f"[{tech_text}] | [{rs_status}]\n➔ 자본 증액 또는 모멘텀 우위로 비중을 리밸런싱(확대)합니다."
+                                            else:
+                                                action = "🟢 보유 유지"
+                                                detail = f"[{tech_text}] | [{vix_status}]\n➔ 정배열 추세 지속 중."
+                                        elif diff_amt < -c_price: # 오버웨이트 상태
+                                            reduce_shares = int(abs(diff_amt) // c_price)
+                                            action = f"🟡 부분 매도 (비중 조절: {reduce_shares}주 매도)"
+                                            detail = f"[{tech_text}]\n➔ 목표 비중 초과로 부분 익절 리밸런싱을 진행합니다."
+                                        else:
+                                            action = "🟢 보유 유지"
+                                            detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중."
                                     else: 
                                         action = "🔴 전량 매도 (현금화)"
                                         detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
@@ -438,10 +459,7 @@ with tab1:
                                         action = "🟡 진입 보류 (200일선 하회)"
                                         detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선(200일선) 아래에 위치하여 진입 금지(하락장 방어)."
                                     elif ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
-                                        stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
-                                        target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio, current_cash)
-                                        rec_shares = int(target_amt // c_price) if c_price > 0 else 0
-                                        
+                                        rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
                                             reason = "V자 반등 바닥잡기" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 및 200일선 통과"
@@ -461,8 +479,22 @@ with tab1:
                                         action = "🔴 강제 손절 집행"
                                         detail = f"[{tech_text_sat}]\n➔ 긴급 손절선 이탈."
                                     elif ma20 >= ma60 * (1 - buf/2):
-                                        action = "🟢 보유 유지"
-                                        detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
+                                        add_cond = (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and data['drawdown'] >= -15.0
+                                        if diff_amt > 0 and current_cash >= c_price and add_cond:
+                                            add_shares = int(min(diff_amt, current_cash) // c_price)
+                                            if add_shares > 0:
+                                                action = f"🟢 추가 매수 (비중 확대: {add_shares}주 추가)"
+                                                detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 자본 증액 반영 추가 매수."
+                                            else:
+                                                action = "🟢 보유 유지"
+                                                detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩."
+                                        elif diff_amt < -c_price:
+                                            reduce_shares = int(abs(diff_amt) // c_price)
+                                            action = f"🟡 부분 매도 (비중 조절: {reduce_shares}주 매도)"
+                                            detail = f"[{tech_text_sat}]\n➔ 목표 비중 조절."
+                                        else:
+                                            action = "🟢 보유 유지"
+                                            detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
                                     else:
                                         action = "🔴 전량 매도"
                                         detail = f"[{tech_text_sat}]\n➔ 데드크로스로 차익 실현/손절."
@@ -471,10 +503,7 @@ with tab1:
                                         action = "🟡 진입 보류 (200일선 하회)"
                                         detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
                                     elif ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and data['drawdown'] >= -15.0): 
-                                        stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
-                                        target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio, current_cash)
-                                        rec_shares = int(target_amt // c_price) if c_price > 0 else 0
-                                        
+                                        rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
                                             detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 200일선 위 상승 모멘텀 진입."
@@ -492,15 +521,16 @@ with tab1:
                         
                         warning_msg = "⚠️ **[투자금 감액 감지]** 감액된 투자금에 맞춰 최약체 종목 우선 청산 액션 플랜이 발동되었습니다." if available_cash < 0 else ""
                         boost_msg = f" (🔥강세장 부스터 작동 중: 한도 최대 {current_max_alloc_ratio*100:.0f}%)" if (bull_market_boost and kospi_ret_60 > 0) else ""
-                        st.info(f"📊 **[스마트 자금 배분 및 현금 현황]**\n\n"
+                        st.info(f"📊 **[스마트 자금 리밸런싱 및 현금 현황]**\n\n"
                                 f"• **총 운용 설정 자산:** `{total_cash:,.0f} 원`\n"
                                 f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
+                                f"• **운용 특징:** 투자금을 증액하면 추가 매수를 지시하고, 감액 시 최약체부터 우선 청산하는 산식이 100% 반영되었습니다.\n"
                                 f"{warning_msg}{boost_msg}")
                         st.table(pd.DataFrame(results))
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("과거 주가 데이터를 바탕으로 **200일선 추세 필터 + 연속 2회 손실 쿨다운(60일 매수금지) + 강세장 부스터**가 적용된 백테스트를 실행합니다.")
+    st.markdown("과거 주가 데이터를 바탕으로 **산식 오류가 100% 수정된 초과수익 추구 엔진**을 검증합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -522,7 +552,7 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("200일선 대장기 추세선 및 동적 비중 기록을 포함한 백테스트 구동 중..."):
+                with st.spinner("산식 보정된 KOSPI 벤치마크 및 동적 백테스트 구동 중..."):
                     fetch_start = start_date - datetime.timedelta(days=300)
                     
                     market_df = pd.DataFrame()
@@ -530,14 +560,17 @@ with tab2:
                     final_kospi_asset = init_cash
                     
                     try:
+                        # [산식 오류 수정 2] KOSPI 인덱싱 시작점 명확히 강제하여 비정상 폭등 오류 방지
                         kospi_df = fdr.DataReader('KS11', fetch_start, end_date)
                         if not kospi_df.empty:
+                            kospi_df.index = kospi_df.index.tz_localize(None)
                             kospi_df['Kospi_Ret_60'] = kospi_df['Close'] / kospi_df['Close'].shift(60) - 1
                             kospi_df['Kospi_MA60'] = kospi_df['Close'].rolling(60).mean()
                             market_df['Kospi_Ret_60'] = kospi_df['Kospi_Ret_60']
                             market_df['Kospi_Bull'] = kospi_df['Close'] > kospi_df['Kospi_MA60']
                             
-                            sim_kospi = kospi_df.loc[start_date:end_date]['Close'].dropna()
+                            start_dt = pd.to_datetime(start_date)
+                            sim_kospi = kospi_df[kospi_df.index >= start_dt]['Close'].dropna()
                             if len(sim_kospi) > 1:
                                 k_start = float(sim_kospi.iloc[0])
                                 k_end = float(sim_kospi.iloc[-1])
@@ -558,6 +591,7 @@ with tab2:
                     
                     stock_dfs = {}
                     buf = whipsaw_buffer / 100.0
+                    start_dt = pd.to_datetime(start_date)
                     
                     for idx, row in stocks.iterrows():
                         ticker = row['티커']
@@ -590,6 +624,7 @@ with tab2:
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
                         df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
                         
+                        df.index = df.index.tz_localize(None)
                         df = df.join(market_df, how='left')
                         df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
                         df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
@@ -618,8 +653,9 @@ with tab2:
                                                np.where(rs_condition, 0.5, 0.0) + 
                                                np.where(df['VIX_Contrarian'], 1.0, 0.0), 
                                                0.0)
-                            
-                        stock_dfs[name] = df.loc[start_date:end_date].copy()
+                        
+                        # 인덱스 슬라이싱 버그 방지 강제
+                        stock_dfs[name] = df[df.index >= start_dt].copy()
                         
                     if not stock_dfs:
                         st.warning("유효한 데이터가 없습니다.")
@@ -821,22 +857,24 @@ with tab2:
                         dca_values = {}
                         cash_per_stock_init = init_cash / len(stock_dfs)
                         
+                        # [산식 오류 수정 1] DCA 미투자 현금 누락 버그 완벽 보정 (현금+주식 자산 정확히 합산)
                         for name, df in stock_dfs.items():
                             sim_df = df.copy()
                             bh_values[name] = (sim_df['Close'] / sim_df['Close'].iloc[0]) * cash_per_stock_init
                             
                             n_months = len(sim_df.groupby(sim_df.index.to_period('M')))
-                            initial_seed = (init_cash * 0.2) / len(stock_dfs)
-                            shares_acc = initial_seed / sim_df['Close'].iloc[0]
+                            uninvested_cash = cash_per_stock_init * 0.8
+                            shares_acc = (cash_per_stock_init * 0.2) / sim_df['Close'].iloc[0]
+                            
                             dca_list = []
                             for date_val, row_val in sim_df.iterrows():
                                 if date_val != sim_df.index[0] and date_val.day <= 3 and date_val.month != sim_df.index[sim_df.index.get_loc(date_val)-1].month:
-                                    if n_months > 0:
-                                        add_amt = (init_cash * 0.8 / n_months) / len(stock_dfs)
+                                    if n_months > 0 and uninvested_cash > 0:
+                                        add_amt = (cash_per_stock_init * 0.8) / n_months
+                                        add_amt = min(add_amt, uninvested_cash)
                                         shares_acc += add_amt / row_val['Close']
-                                    dca_list.append(shares_acc * row_val['Close'])
-                                else:
-                                    dca_list.append(shares_acc * row_val['Close'])
+                                        uninvested_cash -= add_amt
+                                dca_list.append(shares_acc * row_val['Close'] + uninvested_cash)
                             dca_values[name] = pd.Series(dca_list, index=sim_df.index)
                             
                         bh_df = pd.DataFrame(bh_values).sum(axis=1)
@@ -851,7 +889,7 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 200일선 추세 필터 및 손실 쿨다운 적용 백테스트 완료!")
+                        st.success(f"✅ 산식 오류가 수정된 초과수익 엔진 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
@@ -871,19 +909,19 @@ with tab2:
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
                                 '최종 기말 자산': f"{final_kospi_asset:,.0f} 원",
                                 '총 수익률': f"{kospi_ret_val:+.2f}%",
-                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (버그 수정 완료)'
+                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (시작일 인덱싱 오류 수정 완료)'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
                                 '최종 기말 자산': f"{final_bh_asset:,.0f} 원",
                                 '총 수익률': f"{final_bh_ret:+.2f}%",
-                                '운용 방식 및 특징': '동일 종목 풀 초기 전액 동일 비중 매수 후 매도 없이 홀딩 (변동성 그대로 노출)'
+                                '운용 방식 및 특징': '동일 종목 풀 초기 전액 매수 후 매도 없이 홀딩 (시작일 인덱싱 오류 수정 완료)'
                             },
                             {
                                 '전략 구분': '💰 적립식 매수 (DCA)',
                                 '최종 기말 자산': f"{final_dca_asset:,.0f} 원",
                                 '총 수익률': f"{final_dca_ret:+.2f}%",
-                                '운용 방식 및 특징': '동일 종목 풀 시드 분할 후 매월 정기 추가 투입으로 매입단가 분산'
+                                '운용 방식 및 특징': '동일 종목 풀 시드 분할 후 매월 투입 (미투자 현금 증발 버그 산식 완벽 보정)'
                             }
                         ]
                         st.table(pd.DataFrame(comparison_data))
@@ -932,9 +970,6 @@ with tab2:
                         eom_weights = eom_weights.fillna(0)
                         eom_weights.index = eom_weights.index.strftime('%Y-%m')
                         
-                        # ----------------------------------------------------
-                        # [차트 시각화 수정] 현금이 차트의 맨 위(가장 마지막에 쌓임)로 오도록 수정
-                        # ----------------------------------------------------
                         stock_cols = sorted([c for c in eom_weights.columns if c != '현금(Cash)'])
                         cols_ordered = stock_cols + ['현금(Cash)']
                         eom_weights = eom_weights[cols_ordered]
@@ -957,7 +992,6 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, 누적 막대)")
                         st.altair_chart(chart, use_container_width=True)
-                        st.info("💡 위 차트는 **현금(블랙)을 항상 최상단에 고정**하여 현재 시장에 노출된 총 주식 비중을 직관적으로 보여주며, 각 종목의 층(Layer)이 항상 일정하여 비중 증감을 쉽게 파악할 수 있습니다.")
 
 with tab3:
     st.header("📄 AI 퀀트 투자 전략 및 운용 알고리즘 백서")
@@ -971,7 +1005,7 @@ with tab3:
     st.subheader("1. 핵심 운용 철학 (Core Philosophy)")
     st.markdown("""
     * **추세 추종과 손익 비대칭성 (Let Winners Run, Cut Losses Short):** 확실한 상승 추세에 올라타 이익을 길게 가져가고, 횡보 및 하락장에서는 휩소(잦은 매매)를 차단하여 수수료와 원금을 철저히 방어합니다.
-    * **동적 자본 관리 (Dynamic Capital Allocation):** 투자금의 증액/감액을 실시간으로 반영하며, 감액 시 포트폴리오 내 최약체(모멘텀 하위) 종목부터 기계적으로 청산하여 건강한 계좌를 유지합니다.
+    * **동적 자본 관리 (Dynamic Capital Allocation):** 투자금의 증액/감액을 실시간으로 반영하며, 증액 시 즉시 비중 추가 확대 매수를 지시하고, 감액 시 최약체(모멘텀 하위) 종목부터 기계적으로 청산합니다.
     * **공포 탐욕 지수 역발상 (Contrarian):** 대다수 투자자가 시장을 떠나는 극단적 공포(VIX 폭등 후 꺾임) 시점을 수리적으로 포착하여 V자 반등을 낚아챕니다.
     """)
 
@@ -1015,6 +1049,7 @@ with tab3:
     st.markdown(f"""
     * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 **{max_alloc_pct}%** 로 제한되나, KOSPI 지수가 60일선 위에 있는 대세 상승장에서는 남는 현금을 없애기 위해 최대 투입 한도를 **1.5배** 강제로 상향합니다.
     * **알파 점수 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
+    * **자본 증액 리밸런싱 (Capital Inflow):** 사이드바의 설정 운용 자금이 늘어나면, **이미 보유 중인 주도주라도 새로 늘어난 한도(Target Weight)만큼 정확히 계산하여 추가 매수를 지시**합니다.
     * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
     """)
 
