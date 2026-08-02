@@ -13,12 +13,12 @@ warnings.filterwarnings('ignore')
 # 페이지 설정
 st.set_page_config(
     page_title="Core-Satellite Quant System",
-    page_icon="📈",
+    page_icon="🚀",
     layout="wide"
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **수수료 폭탄 방지(버퍼/최소보유)**, **스마트 차등 가중치 배분**, **시장 벤치마크(KOSPI) 비교 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **듀얼 모멘텀·상대강도(RS)·VIX 역발상 바닥잡기**가 결합된 고수익 추구형 퀀트 시뮬레이션을 제공하는 실전 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -41,23 +41,36 @@ def load_krx_universe():
         return pd.DataFrame(columns=['Code', 'Name', 'Market'])
 
 # ==========================================
-# 시장 공포지수 (VIX) 수집 함수
+# 거시 지표(VIX 및 KOSPI 상대강도) 수집 함수
 # ==========================================
 @st.cache_data(ttl=1800)
-def fetch_market_vix():
+def fetch_market_data():
     try:
-        vix_df = yf.download("^VIX", period="5d", progress=False)
-        if not vix_df.empty:
-            if isinstance(vix_df.columns, pd.MultiIndex):
-                vix_df.columns = vix_df.columns.get_level_values(0)
-            vix_val = float(vix_df['Close'].dropna().iloc[-1])
-            return vix_val
+        # VIX 공포지수 처리
+        vix_df = yf.download("^VIX", period="3mo", progress=False)
+        if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
+        vix_close = vix_df['Close'].dropna()
+        vix_val = float(vix_close.iloc[-1])
+        vix_ma3 = float(vix_close.rolling(3).mean().iloc[-1])
+        # VIX 역발상: 25 이상 고점에서 꺾이기 시작할 때 (V자 반등 시그널)
+        vix_contrarian = (vix_val >= 25.0) and (vix_val < vix_ma3)
+        vix_safe = (vix_val < 30.0)
+        
+        # KOSPI 최근 60일 수익률 (상대강도 비교용)
+        kospi_df = yf.download("^KS11", period="4mo", progress=False)
+        if isinstance(kospi_df.columns, pd.MultiIndex): kospi_df.columns = kospi_df.columns.get_level_values(0)
+        k_close = kospi_df['Close'].dropna()
+        if len(k_close) >= 60:
+            kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100
+        else:
+            kospi_ret_60 = 0.0
+            
+        return vix_val, vix_contrarian, vix_safe, kospi_ret_60
     except:
-        pass
-    return 20.0
+        return 20.0, False, True, 0.0
 
 # ==========================================
-# 실시간 주가 및 수급/거래량 지표 수집 함수
+# 실시간 주가 및 듀얼 모멘텀 지표 수집 함수
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
@@ -73,7 +86,7 @@ def fetch_stock_status(ticker_code):
                 if len(close_prices) == 0: continue
                 
                 current_price = float(close_prices.iloc[-1])
-                ma120 = float(close_prices.rolling(window=120).mean().iloc[-1]) if len(close_prices) >= 120 else current_price
+                ma60 = float(close_prices.rolling(window=60).mean().iloc[-1]) if len(close_prices) >= 60 else current_price
                 ma20 = float(close_prices.rolling(window=20).mean().iloc[-1]) if len(close_prices) >= 20 else current_price
                 recent_high = float(close_prices.tail(120).max())
                 drawdown = ((current_price / recent_high) - 1) * 100 if recent_high > 0 else 0.0
@@ -82,13 +95,15 @@ def fetch_stock_status(ticker_code):
                 curr_vol = float(volumes.iloc[-1])
                 vol_ratio = (curr_vol / vol_5ma * 100) if vol_5ma > 0 else 100.0
                 
-                return current_price, ma120, ma20, drawdown, vol_ratio
+                ret_60 = ((current_price / float(close_prices.iloc[-60])) - 1) * 100 if len(close_prices) >= 60 else 0.0
+                
+                return current_price, ma60, ma20, drawdown, vol_ratio, ret_60
     except Exception:
         pass
-    return None, None, None, None, None
+    return None, None, None, None, None, None
 
 # ==========================================
-# 2. 데이터 저장소(Session State) 초기화
+# 2. 데이터 저장소 초기화
 # ==========================================
 if 'portfolios' not in st.session_state:
     st.session_state.portfolios = {}
@@ -158,9 +173,8 @@ if st.sidebar.button("포트폴리오 생성하기", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
 sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-15, step=1)
-max_alloc_pct = st.sidebar.slider("종목당 최대 투입 비중 한도 (%)", min_value=10, max_value=60, value=35, step=5, help="자금 집중 방지 및 현금 예비율 유지")
-whipsaw_buffer = st.sidebar.slider("휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=2.0, step=0.5, help="잦은 매매 수수료 낭비를 막기 위해 이평선을 이 수치만큼 확실히 이탈해야 매매합니다.")
-min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1, help="신규 매수 후 최소 지정 기간 동안은 매도하지 않고 추세를 지켜봅니다. (단, 손절컷 예외)")
+max_alloc_pct = st.sidebar.slider("종목당 최대 투입 비중 한도 (%)", min_value=10, max_value=60, value=35, step=5)
+min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1)
 
 # ==========================================
 # 4. 탭 구성
@@ -181,7 +195,7 @@ with tab1:
             total_cash = port_info['cash']
             st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
             
-            search_kw = st.text_input("추가할 종목명 검색 (예: 솔트룩스)", key=f"search_{selected_port}")
+            search_kw = st.text_input("추가할 종목명 검색 (예: 삼성전자)", key=f"search_{selected_port}")
             if search_kw:
                 krx_df = load_krx_universe()
                 filtered_stocks = krx_df[krx_df['Name'].str.contains(search_kw, case=False, na=False)]
@@ -212,7 +226,6 @@ with tab1:
 
             st.markdown("---")
             st.subheader("💾 현재 상태 PC에 저장하기")
-            st.markdown(f"작업하신 내용을 내 PC의 특정 장소(`{SAVE_DIR}`)에 안전하게 저장합니다.")
             
             col_save1, col_save2 = st.columns([3, 1])
             with col_save1:
@@ -242,22 +255,16 @@ with tab1:
                 if edited_df.empty:
                     st.warning("진단할 종목이 없습니다.")
                 else:
-                    with st.spinner("시장 공포지수(VIX), 수급 모멘텀, 기술적 지표 및 스마트 가중치 산출 중..."):
-                        vix_val = fetch_market_vix()
+                    with st.spinner("거시 지표(VIX/KOSPI) 및 개별 종목 모멘텀 스코어 산출 중..."):
+                        vix_val, vix_contrarian, vix_safe, kospi_ret_60 = fetch_market_data()
                         
-                        if vix_val < 20.0:
-                            vix_status = f"VIX {vix_val:.1f}(시장 안정)"
-                            vix_safe = True
-                        elif vix_val < 30.0:
-                            vix_status = f"VIX {vix_val:.1f}(시장 경계/공포)"
-                            vix_safe = False
-                        else:
-                            vix_status = f"VIX {vix_val:.1f}(시장 극심한 공포)"
-                            vix_safe = False
+                        vix_text = f"VIX {vix_val:.1f}"
+                        if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 시그널 포착)"
+                        elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
+                        else: vix_status = f"{vix_text}(시장 경계/공포)"
 
                         stock_data_cache = {}
                         buy_scores = {}
-                        buf = whipsaw_buffer / 100.0 # 버퍼 설정
                         
                         for idx, row in edited_df.iterrows():
                             s_ticker = row['티커']
@@ -268,27 +275,30 @@ with tab1:
                             if pd.isna(quantity): quantity = 0
                             is_holding = (quantity > 0) and (buy_price > 0)
                             
-                            c_price, ma120, ma20, drawdown, vol_ratio = fetch_stock_status(s_ticker)
+                            c_price, ma60, ma20, drawdown, vol_ratio, ret_60 = fetch_stock_status(s_ticker)
                             if c_price is None: continue
                             
                             stock_data_cache[s_name] = {
-                                'price': c_price, 'ma120': ma120, 'ma20': ma20, 
-                                'drawdown': drawdown, 'vol_ratio': vol_ratio, 'is_holding': is_holding
+                                'price': c_price, 'ma60': ma60, 'ma20': ma20, 
+                                'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 'is_holding': is_holding
                             }
                             
                             vol_strong = vol_ratio >= 150.0
+                            rs_strong = ret_60 > kospi_ret_60 # 시장(KOSPI) 상회 여부
                             
                             if current_strategy == '대형주 (Core)':
-                                if not is_holding and c_price >= ma120 * (1 + buf) and vix_safe:
+                                if not is_holding and ((ma20 >= ma60 and vix_safe) or vix_contrarian):
                                     score = 1.0
                                     if vol_strong: score += 0.5
-                                    if c_price > ma120 * (1 + buf + 0.05): score += 0.5
+                                    if rs_strong: score += 0.5
+                                    if vix_contrarian: score += 1.0 # VIX 바닥잡기 강력 가중치
                                     buy_scores[s_name] = score
                             else:
-                                if not is_holding and c_price >= ma20 * (1 + buf) and drawdown >= -15.0 and (vol_strong or vix_safe):
+                                if not is_holding and (((ma20 >= ma60 and vix_safe) or vix_contrarian) and drawdown >= -15.0):
                                     score = 1.0
                                     if vol_strong: score += 0.5
-                                    if drawdown >= -5.0: score += 0.5
+                                    if rs_strong: score += 0.5
+                                    if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
 
                         total_score = sum(buy_scores.values()) if buy_scores else 1.0
@@ -323,69 +333,74 @@ with tab1:
                                 
                             data = stock_data_cache[s_name]
                             c_price = data['price']
-                            ma120 = data['ma120']
+                            ma60 = data['ma60']
                             ma20 = data['ma20']
                             drawdown = data['drawdown']
                             vol_ratio = data['vol_ratio']
+                            ret_60 = data['ret_60']
+                            
                             vol_strong = vol_ratio >= 150.0
+                            rs_strong = ret_60 > kospi_ret_60
                             
                             vol_status = f"거래량 {vol_ratio:.0f}%(수급 급증)" if vol_strong else (f"거래량 {vol_ratio:.0f}%(수급 보통)" if vol_ratio >= 80 else f"거래량 {vol_ratio:.0f}%(수급 침체)")
+                            rs_status = f"상대강도 우위(시장 주도주)" if rs_strong else "상대강도 열위"
 
                             if current_strategy == '대형주 (Core)':
-                                diff_120 = ((c_price / ma120) - 1) * 100
-                                tech_text = f"120일선({ma120:,.0f}원) 이격도 {diff_120:+.2f}%"
+                                tech_text = f"20일선({ma20:,.0f}원) vs 60일선({ma60:,.0f}원)"
                                 
                                 if is_holding: 
-                                    if c_price >= ma120 * (1 - buf): 
+                                    if ma20 >= ma60: 
                                         action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 버퍼({whipsaw_buffer}%) 내 추세 우상향 방어 중."
+                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열(골든크로스) 상승 추세 유지."
                                     else: 
                                         action = "🔴 전량 매도 (현금화)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 하단 버퍼({whipsaw_buffer}%) 완전 이탈로 리스크 관리."
+                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
                                 else: 
-                                    if c_price >= ma120 * (1 + buf) and vix_safe: 
+                                    if (ma20 >= ma60 and vix_safe) or vix_contrarian: 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                                         target_amt = min(total_cash * stock_weight, total_cash * max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 상단 버퍼 돌파 확인. 조건 우수(알파 가중치 반영)."
+                                            reason = "V자 반등 바닥잡기(VIX Contrarian)" if vix_contrarian else "골든크로스 돌파"
+                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason}에 따른 강력 매수(알파 스코어: {buy_scores[s_name]:.1f})."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 조건은 좋으나 가용 현금 부족."
+                                            detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 조건은 우수하나 가용 현금 부족."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 버퍼 미돌파 또는 시장 공포."
+                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 역배열 또는 시장 공포 구간."
                             else:
                                 if is_holding: 
                                     user_ret = ((c_price / buy_price) - 1) * 100
-                                    tech_text = f"수익률 {user_ret:+.2f}%"
+                                    tech_text = f"수익률 {user_ret:+.2f}%, 20/60선 상태"
                                     if user_ret <= sat_stop_loss: 
                                         action = "🔴 강제 손절 집행"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 긴급 손절선 이탈."
-                                    elif c_price >= ma20 * (1 - buf):
+                                        detail = f"[{tech_text}]\n➔ 긴급 손절선 이탈."
+                                    elif ma20 >= ma60:
                                         action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 단기 모멘텀 버퍼 방어 중."
+                                        detail = f"[{tech_text}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
                                     else:
                                         action = "🔴 전량 매도"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 20일선 하단 버퍼 이탈로 차익 실현/손절."
+                                        detail = f"[{tech_text}]\n➔ 데드크로스 발생으로 차익 실현/손절."
                                 else: 
-                                    tech_text = f"20일선({ma20:,.0f}원), 낙폭 {drawdown:+.2f}%"
-                                    if c_price >= ma20 * (1 + buf) and drawdown >= -15.0 and (vol_strong or vix_safe): 
+                                    tech_text = f"20/60일선 교차, 낙폭 {drawdown:+.2f}%"
+                                    if ((ma20 >= ma60 and vix_safe) or vix_contrarian) and drawdown >= -15.0: 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                                         target_amt = min(total_cash * stock_weight, total_cash * max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 모멘텀 돌파 확인(알파 가중치 반영)."
+                                            reason = "V자 바닥 포착" if vix_contrarian else "모멘텀 돌파"
+                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason} 및 수급/상대강도 점수({buy_scores[s_name]:.1f}) 기반 매수."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 조건은 좋으나 현금 부족."
+                                            detail = f"[{tech_text}]\n➔ 가용 현금 부족."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 모멘텀 부진."
+                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 모멘텀 부진 및 조건 미달."
                                     
                             results.append({
                                 '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
@@ -394,12 +409,12 @@ with tab1:
                         
                         st.info(f"📊 **[스마트 가중치 배분 및 현금 현황]**\n\n"
                                 f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
-                                f"• **운용 특징:** 매수 조건이 뛰어난 종목(수급 폭발 등)에 **알파 가중치**를 차등 부여하며, 버퍼({whipsaw_buffer}%)로 잦은 매매를 차단합니다.")
+                                f"• **운용 특징:** **KOSPI 시장을 이기는 주도주(상대강도 우위)**와 **VIX 극단 공포 시점의 V자 반등**에 강력한 가중치를 부여하여 폭발적인 수익을 추구합니다.")
                         st.table(pd.DataFrame(results))
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("과거 실제 주가 데이터를 기반으로 **스마트 가중치 배분 룰 및 시장 벤치마크(KOSPI)** 비교 백테스트를 실행합니다.")
+    st.markdown("과거 주가 데이터를 바탕으로 **듀얼 모멘텀 + VIX 바닥잡기 + 상대강도(RS)**가 결합된 고수익 추구 엔진을 검증합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -412,7 +427,7 @@ with tab2:
         with col_sim3:
             end_date = st.date_input("종료일", datetime.date.today())
 
-        if st.button("스마트 가중치 시뮬레이션 및 벤치마크 비교 생성", type="primary", use_container_width=True):
+        if st.button("고수익 모멘텀 시뮬레이션 및 벤치마크 비교 생성", type="primary", use_container_width=True):
             port_data = st.session_state.portfolios[sim_port]
             stocks = port_data['stocks']
             strat = port_data['strategy']
@@ -421,39 +436,43 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("과거 데이터 수집 및 스마트 백테스트 산출 중..."):
+                with st.spinner("KOSPI 벤치마크, VIX 및 종목별 모멘텀 분석 엔진 구동 중..."):
                     fetch_start = start_date - datetime.timedelta(days=200)
                     
-                    kospi_ret = 0.0
+                    # 시장 데이터프레임 조립 (KOSPI & VIX)
+                    market_df = pd.DataFrame()
+                    kospi_ret_val = 0.0
                     final_kospi_asset = init_cash
+                    
                     try:
-                        kospi_df = yf.download("^KS11", start=start_date, end=end_date, progress=False)
+                        kospi_df = yf.download("^KS11", start=fetch_start, end=end_date, progress=False)
                         if not kospi_df.empty:
-                            if isinstance(kospi_df.columns, pd.MultiIndex):
-                                kospi_df.columns = kospi_df.columns.get_level_values(0)
-                            kospi_close = kospi_df['Close'].dropna()
-                            if len(kospi_close) > 1:
-                                k_start = float(kospi_close.iloc[0])
-                                k_end = float(kospi_close.iloc[-1])
-                                kospi_ret = ((k_end / k_start) - 1) * 100
-                                final_kospi_asset = init_cash * (1 + kospi_ret / 100)
-                    except:
-                        pass
+                            if isinstance(kospi_df.columns, pd.MultiIndex): kospi_df.columns = kospi_df.columns.get_level_values(0)
+                            kospi_df['Kospi_Ret_60'] = kospi_df['Close'] / kospi_df['Close'].shift(60) - 1
+                            market_df['Kospi_Ret_60'] = kospi_df['Kospi_Ret_60']
+                            
+                            # 성과 평가용
+                            sim_kospi = kospi_df.loc[start_date:end_date]['Close'].dropna()
+                            if len(sim_kospi) > 1:
+                                k_start = float(sim_kospi.iloc[0])
+                                k_end = float(sim_kospi.iloc[-1])
+                                kospi_ret_val = ((k_end / k_start) - 1) * 100
+                                final_kospi_asset = init_cash * (1 + kospi_ret_val / 100)
+                    except: pass
 
-                    vix_hist = None
                     try:
                         vix_df = yf.download("^VIX", start=fetch_start, end=end_date, progress=False)
                         if not vix_df.empty:
-                            if isinstance(vix_df.columns, pd.MultiIndex):
-                                vix_df.columns = vix_df.columns.get_level_values(0)
-                            vix_hist = vix_df[['Close']].copy()
-                            vix_hist.rename(columns={'Close': 'VIX'}, inplace=True)
-                    except:
-                        pass
+                            if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
+                            vix_df['VIX_MA3'] = vix_df['Close'].rolling(3).mean()
+                            # VIX 역발상 로직: 25이상 고점 후 단기 MA 하향 돌파 시점
+                            market_df['VIX_Contrarian'] = (vix_df['Close'] >= 25.0) & (vix_df['Close'] < vix_df['VIX_MA3'])
+                            market_df['VIX_Safe'] = vix_df['Close'] < 30.0
+                    except: pass
+                    
+                    market_df = market_df.ffill().fillna(0) # 결측치 처리
                     
                     stock_dfs = {}
-                    buf = whipsaw_buffer / 100.0
-                    
                     for idx, row in stocks.iterrows():
                         ticker = row['티커']
                         name = row['종목명']
@@ -462,8 +481,7 @@ with tab2:
                         for suf in ['.KS', '.KQ']:
                             temp_df = yf.download(f"{ticker}{suf}", start=fetch_start, end=end_date, progress=False)
                             if not temp_df.empty:
-                                if isinstance(temp_df.columns, pd.MultiIndex):
-                                    temp_df.columns = temp_df.columns.get_level_values(0)
+                                if isinstance(temp_df.columns, pd.MultiIndex): temp_df.columns = temp_df.columns.get_level_values(0)
                                 df = temp_df
                                 break
                         
@@ -473,38 +491,43 @@ with tab2:
                         df['Volume'] = df['Volume'].ffill()
                         df['Daily_Ret'] = df['Close'].pct_change()
                         
-                        if vix_hist is not None:
-                            df = df.join(vix_hist, how='left')
-                            df['VIX'] = df['VIX'].ffill().fillna(20.0)
-                        else:
-                            df['VIX'] = 20.0
-                            
-                        df['VIX_Safe'] = df['VIX'] < 30.0
+                        # 종목 지표 계산
+                        df['MA60'] = df['Close'].rolling(60).mean()
+                        df['MA20'] = df['Close'].rolling(20).mean()
+                        df['Ret_60'] = df['Close'] / df['Close'].shift(60) - 1
+                        
                         df['Vol_5MA'] = df['Volume'].rolling(5).mean().shift(1)
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
                         df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
                         
-                        # 버퍼가 적용된 시그널 룰 생성
+                        # 시장 지표 병합
+                        df = df.join(market_df, how='left')
+                        df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
+                        df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
+                        df['Kospi_Ret_60'] = df['Kospi_Ret_60'].fillna(0.0)
+                        
+                        # 전략별 매수/매도 시그널 및 알파 스코어 부여
                         if strat == '대형주 (Core)':
-                            df['MA120'] = df['Close'].rolling(120).mean()
-                            entry_cond = (df['Close'] >= df['MA120'] * (1 + buf)) & df['VIX_Safe']
-                            exit_cond = (df['Close'] < df['MA120'] * (1 - buf))
-                            
-                            df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
-                            df['Signal'] = df['Signal'].ffill().fillna(0)
-                            df['Score'] = np.where(entry_cond, 1.0 + np.where(df['Vol_Strong'], 0.5, 0.0), 0.0)
+                            entry_cond = ((df['MA20'] >= df['MA60']) & df['VIX_Safe']) | df['VIX_Contrarian']
+                            exit_cond = (df['MA20'] < df['MA60']) & (~df['VIX_Contrarian'])
                         else:
-                            df['MA20'] = df['Close'].rolling(20).mean()
                             df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
                             stop_loss_pct = sat_stop_loss / 100.0
                             
-                            entry_cond = (df['Close'] >= df['MA20'] * (1 + buf)) & (df['Drawdown'] >= -0.15) & (df['Vol_Strong'] | df['VIX_Safe'])
-                            exit_cond = (df['Drawdown'] <= stop_loss_pct) | (df['Close'] < df['MA20'] * (1 - buf))
-                            
-                            df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
-                            df['Signal'] = df['Signal'].ffill().fillna(0)
-                            df['Score'] = np.where(entry_cond, 1.0 + np.where(df['Vol_Strong'], 0.5, 0.0), 0.0)
+                            entry_cond = (((df['MA20'] >= df['MA60']) & df['VIX_Safe']) | df['VIX_Contrarian']) & (df['Drawdown'] >= -0.15)
+                            exit_cond = (df['Drawdown'] <= stop_loss_pct) | ((df['MA20'] < df['MA60']) & (~df['VIX_Contrarian']))
+                        
+                        df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
+                        df['Signal'] = df['Signal'].ffill().fillna(0)
+                        
+                        # 알파 스코어 (조건이 완벽할수록 높은 점수)
+                        rs_condition = df['Ret_60'] > df['Kospi_Ret_60']
+                        df['Score'] = np.where(entry_cond, 
+                                               1.0 + np.where(df['Vol_Strong'], 0.5, 0.0) + 
+                                               np.where(rs_condition, 0.5, 0.0) + 
+                                               np.where(df['VIX_Contrarian'], 1.0, 0.0), 
+                                               0.0)
                             
                         stock_dfs[name] = df.loc[start_date:end_date].copy()
                         
@@ -535,7 +558,6 @@ with tab2:
                                 
                             prev_date = dates[i-1]
                             
-                            # 보유 일수 업데이트
                             for name in stock_dfs:
                                 if shares[name] > 0: hold_days[name] += 1
                                 else: hold_days[name] = 0
@@ -544,15 +566,12 @@ with tab2:
                             scores = {}
                             for name, df in stock_dfs.items():
                                 sig = df.loc[date_val, 'Signal']
-                                
-                                # 강제 손절 예외 처리
                                 force_exit = False
                                 if strat != '대형주 (Core)' and df.loc[date_val, 'Drawdown'] <= (sat_stop_loss / 100.0):
                                     force_exit = True
                                     
-                                # 최소 보유 기간 룰 적용 (손절이 아니면 매도 시그널 무시하고 강제 홀딩)
                                 if shares[name] > 0 and hold_days[name] < min_hold_days and not force_exit:
-                                    sig = 1.0
+                                    sig = 1.0 # 최소 보유 기간 보장
                                     
                                 if sig == 1:
                                     active_stocks.append(name)
@@ -678,26 +697,26 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 수수료 최적화 및 스마트 가중치 백테스트 완료!")
+                        st.success(f"✅ 고수익 모멘텀 퀀트 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
-                        col_r2.metric(f"AI 스마트 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
+                        col_r2.metric(f"고수익 AI 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
                         
                         st.markdown("---")
                         
-                        st.subheader("📊 [전략 비교] KOSPI 지수 vs 단순보유 vs 적립식 매수 vs AI 스마트 가중치 전략")
+                        st.subheader("📊 [전략 비교] KOSPI 지수 vs 단순보유 vs 적립식 매수 vs AI 고수익 추구 전략")
                         
                         comparison_data = [
                             {
-                                '전략 구분': '🤖 AI 스마트 가중치 전략 (Alpha-Tilt Rule)',
+                                '전략 구분': '🚀 AI 고수익 모멘텀 (Dual-Momentum + RS + VIX)',
                                 '최종 기말 자산': f"{final_asset:,.0f} 원",
                                 '총 수익률': f"{final_port_ret:+.2f}%",
-                                '운용 방식 및 특징': f'VIX(<30) 안정 시, 이평선을 버퍼({whipsaw_buffer}%) 이상 상향 돌파하고 수급(150%↑)이 터진 종목에 알파 가중치를 부여하여 집중 배분. 신규 매수 시 {min_hold_days}일 최소 보유 룰로 잦은 휩소를 방어하며 신호 소멸 시 현금 방어.'
+                                '운용 방식 및 특징': f'20일/60일선 골든크로스 상승 추세 파악. KOSPI 대비 60일 상대강도(RS)가 우수하고 수급이 좋은 주도주에 알파 가중치 배분. 공포지수(VIX) 폭등 후 꺾이는 V자 바닥 시점에서 적극 매수.'
                             },
                             {
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
                                 '최종 기말 자산': f"{final_kospi_asset:,.0f} 원",
-                                '총 수익률': f"{kospi_ret:+.2f}%",
+                                '총 수익률': f"{kospi_ret_val:+.2f}%",
                                 '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (패시브 투자 기준)'
                             },
                             {
@@ -726,10 +745,9 @@ with tab2:
                             unrealized_pnl = shares[name] * (final_c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
                             total_profit = realized_pnl[name] + unrealized_pnl
                             
-                            # 수익률 계산 시 분모를 '해당 종목에 투입되었던 역대 최대 자본'으로 사용하여 -100% 오류 방지
                             invested_base = max_invested[name] if max_invested[name] > 0 else (init_cash / len(stock_dfs))
                             ret = (total_profit / invested_base) * 100
-                            ret = max(ret, -100.0) # 수학적 상한선 캡 적용
+                            ret = max(ret, -100.0) 
                             weight = (holding_val / final_asset) * 100 if final_asset > 0 else 0.0
                             
                             b_cnt = trade_stats[name]['buy']
@@ -762,4 +780,4 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 각 주식의 보유 비중 추이 (%)")
                         st.area_chart(eom_weights)
-                        st.info("💡 위 비중 추이는 AI 진단 룰에 따라 조건이 우수한 종목에 가중치가 차등 부여되어 자금이 역동적으로 배분된 결과입니다.")
+                        st.info("💡 위 비중 추이는 KOSPI 상회 종목 및 모멘텀 우수 종목에 가중치가 차등 부여되어 자금이 역동적으로 배분된 결과입니다.")
