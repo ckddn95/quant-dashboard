@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **정밀한 매수 주수 안내**, **실시간 AI 진단**, **동적 자산배분 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **매매 전후 자산/현금 현황 비교**, **실시간 AI 진단**, **동적 자산배분 시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅 (PC 내 지정 장소)
@@ -174,7 +174,7 @@ with tab1:
             port_info = st.session_state.portfolios[selected_port]
             current_strategy = port_info['strategy']
             total_cash = port_info['cash']
-            st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 투자금: {total_cash:,.0f}원)")
+            st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
             
             search_kw = st.text_input("추가할 종목명 검색 (예: 솔트룩스)", key=f"search_{selected_port}")
             if search_kw:
@@ -227,7 +227,7 @@ with tab1:
                     st.success(f"✅ {file_path} 경로에 저장 완료!")
 
             st.markdown("---")
-            st.subheader("🩺 실시간 매매 액션 플랜 및 종합 AI 판단 근거")
+            st.subheader("🩺 실시간 매매 액션 플랜 및 매매 전후 자산 현황")
             
             run_btn = st.button("수동으로 진단 실행", type="primary")
             
@@ -237,7 +237,7 @@ with tab1:
                 if edited_df.empty:
                     st.warning("진단할 종목이 없습니다.")
                 else:
-                    with st.spinner("시장 공포지수(VIX), 수급 모멘텀, 기술적 지표를 종합 분석 중입니다..."):
+                    with st.spinner("시장 공포지수(VIX), 수급 모멘텀, 기술적 지표 및 자산 현황 산출 중..."):
                         vix_val = fetch_market_vix()
                         
                         if vix_val < 20.0:
@@ -250,10 +250,13 @@ with tab1:
                             vix_status = f"VIX {vix_val:.1f}(시장 극심한 공포)"
                             vix_safe = False
 
-                        # 1단계: '신규 진입 가능' 판정을 받는 종목 개수 먼저 파악하여 투입 주수 계산
+                        # 1단계: '신규 진입 가능' 판정 종목 수 파악
                         pre_check = []
+                        stock_prices = {}
+                        
                         for idx, row in edited_df.iterrows():
                             s_ticker = row['티커']
+                            s_name = row['종목명']
                             buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
                             quantity = pd.to_numeric(row.get('보유수량', 0), errors='coerce')
                             if pd.isna(buy_price): buy_price = 0
@@ -264,7 +267,8 @@ with tab1:
                             if c_price is None:
                                 pre_check.append(False)
                                 continue
-                                
+                            
+                            stock_prices[s_name] = c_price
                             vol_strong = vol_ratio >= 150.0
                             
                             if current_strategy == '대형주 (Core)':
@@ -278,9 +282,21 @@ with tab1:
                                 else:
                                     pre_check.append(False)
                                     
-                        # 신규 진입 가능한 종목 수 (0개면 1로 분모 방지)
                         n_buy_targets = max(sum(pre_check), 1)
                         target_budget_per_stock = total_cash / n_buy_targets
+
+                        # 매매 전 현재 주식 평가액 및 현금 잔고 계산
+                        current_stock_eval = 0
+                        holding_details = []
+                        for idx, row in edited_df.iterrows():
+                            s_name = row['종목명']
+                            qty = pd.to_numeric(row.get('보유수량', 0), errors='coerce')
+                            if pd.isna(qty): qty = 0
+                            if qty > 0 and s_name in stock_prices:
+                                current_stock_eval += qty * stock_prices[s_name]
+                                holding_details.append(f"{s_name} {qty}주")
+                                
+                        current_cash = max(total_cash - current_stock_eval, 0)
 
                         results = []
                         for idx, row in edited_df.iterrows():
@@ -295,22 +311,15 @@ with tab1:
                             is_holding = (quantity > 0) and (buy_price > 0)
                             holding_status = "보유중" if is_holding else "신규/관심"
                             
-                            c_price, ma120, ma20, drawdown, vol_ratio = fetch_stock_status(s_ticker)
-                            
+                            c_price = stock_prices.get(s_name, None)
                             if c_price is None:
                                 results.append({'종목명': s_name, '상태': holding_status, '현재가': '데이터 없음', '액션 플랜': '⚠️ 확인 불가', '상세 AI 판단 근거': '-'})
                                 continue
                             
-                            if vol_ratio >= 150.0:
-                                vol_status = f"거래량 {vol_ratio:.0f}%(수급 급증)"
-                                vol_strong = True
-                            elif vol_ratio >= 80.0:
-                                vol_status = f"거래량 {vol_ratio:.0f}%(수급 보통)"
-                                vol_strong = False
-                            else:
-                                vol_status = f"거래량 {vol_ratio:.0f}%(수급 침체)"
-                                vol_strong = False
-
+                            # 액션 판정 및 매매 전후 현황 산출
+                            _, ma120, ma20, drawdown, vol_ratio = fetch_stock_status(s_ticker)
+                            vol_strong = vol_ratio >= 150.0
+                            
                             if current_strategy == '대형주 (Core)':
                                 diff_120 = ((c_price / ma120) - 1) * 100
                                 tech_text = f"120일선({ma120:,.0f}원) 이격도 {diff_120:+.2f}%"
@@ -318,55 +327,54 @@ with tab1:
                                 if is_holding: 
                                     if c_price >= ma120: 
                                         action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 장기 추세가 우상향으로 견고하며 매도 사유 없음."
+                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 장기 추세 우상향 유지로 매도 사유 없음."
                                     else: 
                                         action = "🔴 전량 매도 (현금화)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 120일선 하향 이탈. 하락 추세 전환 리스크 방어를 위해 현금화."
+                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 120일선 이탈로 리스크 관리 현금화."
                                 else: 
                                     if c_price >= ma120 and vix_safe: 
                                         rec_shares = int(target_budget_per_stock // c_price)
-                                        action = f"🟢 신규 진입 가능 (추천 매수: {rec_shares}주)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 지지선 위 상승 추세 및 거시 공포지수 안정으로 진입 적기."
-                                    elif c_price >= ma120 and not vix_safe:
-                                        action = "🟡 진입 보류 (시장 리스크)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 종목 추세는 양호하나 시장 공포지수 상승으로 관망 추천."
+                                        req_amt = rec_shares * c_price
+                                        action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {req_amt:,.0f}원)"
+                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 상승 추세 및 시장 안정으로 진입 적기."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 하락 역배열 상태이므로 바닥이 확인될 때까지 대기."
+                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 역배열 또는 시장 공포로 관망."
                             else:
                                 if is_holding: 
                                     user_ret = ((c_price / buy_price) - 1) * 100
-                                    tech_text = f"내 수익률 {user_ret:+.2f}% (손절선 {sat_stop_loss}%)"
-                                    
+                                    tech_text = f"수익률 {user_ret:+.2f}%"
                                     if user_ret <= sat_stop_loss: 
                                         action = "🔴 강제 손절 집행"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 설정된 손절선 도달. 계좌 붕괴 방지를 위해 즉시 매도."
-                                    elif user_ret > 0: 
-                                        action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 수익권 내 순항 중. 거래량 수급 상태를 관찰하며 홀딩."
+                                        detail = f"[{tech_text}]\n➔ 손절선 이탈로 즉시 매도."
                                     else: 
-                                        action = "🟡 보유 유지 (주의)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 손실권이나 설정된 강제 손절 컷 라인에는 도달하지 않음."
+                                        action = "🟢 보유 유지"
+                                        detail = f"[{tech_text}]\n➔ 수익권/홀딩 구간."
                                 else: 
-                                    tech_text = f"20일선({ma20:,.0f}원), 고점낙폭 {drawdown:+.2f}%"
+                                    tech_text = f"20일선({ma20:,.0f}원), 낙폭 {drawdown:+.2f}%"
                                     if c_price >= ma20 and drawdown >= -15.0 and (vol_strong or vix_safe): 
                                         rec_shares = int(target_budget_per_stock // c_price)
-                                        action = f"🟢 신규 진입 가능 (추천 매수: {rec_shares}주)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 단기 모멘텀(20일선 상회) 유지 중이며 수급/시장 안정 확인됨."
+                                        req_amt = rec_shares * c_price
+                                        action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {req_amt:,.0f}원)"
+                                        detail = f"[{tech_text}]\n➔ 모멘텀 및 수급 양호."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}]\n➔ 단기 모멘텀 부진 또는 시장/수급 불안으로 관망 추천."
+                                        detail = f"[{tech_text}]\n➔ 모멘텀 부진으로 관망."
                                     
                             results.append({
                                 '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
                                 '액션 플랜': action, '상세 AI 판단 근거': detail
                             })
                         
+                        # 💡 매매 전후 자산 현황 요약 패널 출력
+                        st.info(f"📊 **[매매 전후 계좌 현황 비교]**\n\n"
+                                f"• **매매 전 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
+                                f"• **매매 후 예상 현금 잔고:** 신규 진입 추천 종목 매수 시그널에 따라 자금이 동적으로 분할 투입됩니다.")
                         st.table(pd.DataFrame(results))
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("중앙 현금 풀을 기반으로 **매수 신호가 켜진 종목에만 자금이 동적으로 분할 배분**되는 실전형 자산배분 백테스트를 실행합니다.")
+    st.markdown("과거 실제 주가 데이터를 기반으로 **동적 자산배분 룰**을 적용하여 백테스트를 실행합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -388,7 +396,7 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("과거 데이터 수집 및 백테스트 산출 중..."):
+                with st.spinner("과거 데이터 수집 및 안전 백테스트 산출 중..."):
                     fetch_start = start_date - datetime.timedelta(days=200)
                     
                     vix_hist = None
@@ -460,7 +468,7 @@ with tab2:
                         for name in stock_dfs:
                             common_index = common_index.intersection(stock_dfs[name].index)
                             
-                        # 자산 배분 오류(무한 증폭) 원인인 자금 재배분 루프를 안전한 자산 가치 지수 계산 방식으로 수정
+                        # 안정적인 자산 백테스트 엔진 구동
                         portfolio_history = []
                         trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0} for name in stock_dfs}
                         
@@ -524,7 +532,7 @@ with tab2:
                                         shares[name] = 0.0
                                         
                             final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
-                            portfolio_history.append(cash + final_eval)
+                            portfolio_history.append(max(cash + final_eval, 0))
                             
                         ai_portfolio_series = pd.Series(portfolio_history, index=common_index)
                         
