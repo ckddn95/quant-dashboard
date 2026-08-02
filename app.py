@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **듀얼 모멘텀·상대강도(RS)·VIX 역발상 바닥잡기**가 결합된 고수익 추구형 퀀트 시뮬레이션을 제공하는 실전 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **추세 기울기 필터**, **트레일링 스탑 익절**, **KOSPI 벤치마크 비교**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -46,17 +46,14 @@ def load_krx_universe():
 @st.cache_data(ttl=1800)
 def fetch_market_data():
     try:
-        # VIX 공포지수 처리
         vix_df = yf.download("^VIX", period="3mo", progress=False)
         if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
         vix_close = vix_df['Close'].dropna()
         vix_val = float(vix_close.iloc[-1])
         vix_ma3 = float(vix_close.rolling(3).mean().iloc[-1])
-        # VIX 역발상: 25 이상 고점에서 꺾이기 시작할 때 (V자 반등 시그널)
         vix_contrarian = (vix_val >= 25.0) and (vix_val < vix_ma3)
         vix_safe = (vix_val < 30.0)
         
-        # KOSPI 최근 60일 수익률 (상대강도 비교용)
         kospi_df = yf.download("^KS11", period="4mo", progress=False)
         if isinstance(kospi_df.columns, pd.MultiIndex): kospi_df.columns = kospi_df.columns.get_level_values(0)
         k_close = kospi_df['Close'].dropna()
@@ -87,6 +84,7 @@ def fetch_stock_status(ticker_code):
                 
                 current_price = float(close_prices.iloc[-1])
                 ma60 = float(close_prices.rolling(window=60).mean().iloc[-1]) if len(close_prices) >= 60 else current_price
+                ma60_5d_ago = float(close_prices.rolling(window=60).mean().iloc[-6]) if len(close_prices) >= 65 else ma60
                 ma20 = float(close_prices.rolling(window=20).mean().iloc[-1]) if len(close_prices) >= 20 else current_price
                 recent_high = float(close_prices.tail(120).max())
                 drawdown = ((current_price / recent_high) - 1) * 100 if recent_high > 0 else 0.0
@@ -97,10 +95,12 @@ def fetch_stock_status(ticker_code):
                 
                 ret_60 = ((current_price / float(close_prices.iloc[-60])) - 1) * 100 if len(close_prices) >= 60 else 0.0
                 
-                return current_price, ma60, ma20, drawdown, vol_ratio, ret_60
+                ma60_slope_positive = (ma60 > ma60_5d_ago) # 60일선 우상향 기울기 여부
+                
+                return current_price, ma60, ma20, drawdown, vol_ratio, ret_60, ma60_slope_positive
     except Exception:
         pass
-    return None, None, None, None, None, None
+    return None, None, None, None, None, None, False
 
 # ==========================================
 # 2. 데이터 저장소 초기화
@@ -255,11 +255,11 @@ with tab1:
                 if edited_df.empty:
                     st.warning("진단할 종목이 없습니다.")
                 else:
-                    with st.spinner("거시 지표(VIX/KOSPI) 및 개별 종목 모멘텀 스코어 산출 중..."):
+                    with st.spinner("거시 지표(VIX/KOSPI) 및 개별 종목 기울기/모멘텀 산출 중..."):
                         vix_val, vix_contrarian, vix_safe, kospi_ret_60 = fetch_market_data()
                         
                         vix_text = f"VIX {vix_val:.1f}"
-                        if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 시그널 포착)"
+                        if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 포착)"
                         elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
                         else: vix_status = f"{vix_text}(시장 경계/공포)"
 
@@ -275,26 +275,28 @@ with tab1:
                             if pd.isna(quantity): quantity = 0
                             is_holding = (quantity > 0) and (buy_price > 0)
                             
-                            c_price, ma60, ma20, drawdown, vol_ratio, ret_60 = fetch_stock_status(s_ticker)
+                            c_price, ma60, ma20, drawdown, vol_ratio, ret_60, ma60_slope_positive = fetch_stock_status(s_ticker)
                             if c_price is None: continue
                             
                             stock_data_cache[s_name] = {
                                 'price': c_price, 'ma60': ma60, 'ma20': ma20, 
-                                'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 'is_holding': is_holding
+                                'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 
+                                'ma60_slope': ma60_slope_positive, 'is_holding': is_holding
                             }
                             
                             vol_strong = vol_ratio >= 150.0
-                            rs_strong = ret_60 > kospi_ret_60 # 시장(KOSPI) 상회 여부
+                            rs_strong = ret_60 > kospi_ret_60
                             
+                            # 신규 매수 조건: 60일선 우상향 기울기가 유효할 때만 골든크로스 인정
                             if current_strategy == '대형주 (Core)':
-                                if not is_holding and ((ma20 >= ma60 and vix_safe) or vix_contrarian):
+                                if not is_holding and (((ma20 >= ma60 and ma60_slope_positive) and vix_safe) or vix_contrarian):
                                     score = 1.0
                                     if vol_strong: score += 0.5
                                     if rs_strong: score += 0.5
-                                    if vix_contrarian: score += 1.0 # VIX 바닥잡기 강력 가중치
+                                    if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
                             else:
-                                if not is_holding and (((ma20 >= ma60 and vix_safe) or vix_contrarian) and drawdown >= -15.0):
+                                if not is_holding and ((((ma20 >= ma60 and ma60_slope_positive) and vix_safe) or vix_contrarian) and drawdown >= -15.0):
                                     score = 1.0
                                     if vol_strong: score += 0.5
                                     if rs_strong: score += 0.5
@@ -338,12 +340,14 @@ with tab1:
                             drawdown = data['drawdown']
                             vol_ratio = data['vol_ratio']
                             ret_60 = data['ret_60']
+                            ma60_slope_positive = data['ma60_slope']
                             
                             vol_strong = vol_ratio >= 150.0
                             rs_strong = ret_60 > kospi_ret_60
                             
                             vol_status = f"거래량 {vol_ratio:.0f}%(수급 급증)" if vol_strong else (f"거래량 {vol_ratio:.0f}%(수급 보통)" if vol_ratio >= 80 else f"거래량 {vol_ratio:.0f}%(수급 침체)")
                             rs_status = f"상대강도 우위(시장 주도주)" if rs_strong else "상대강도 열위"
+                            slope_status = "60일선 우상향" if ma60_slope_positive else "60일선 횡보/우하향"
 
                             if current_strategy == '대형주 (Core)':
                                 tech_text = f"20일선({ma20:,.0f}원) vs 60일선({ma60:,.0f}원)"
@@ -351,26 +355,26 @@ with tab1:
                                 if is_holding: 
                                     if ma20 >= ma60: 
                                         action = "🟢 보유 유지"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열(골든크로스) 상승 추세 유지."
+                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중."
                                     else: 
                                         action = "🔴 전량 매도 (현금화)"
                                         detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
                                 else: 
-                                    if (ma20 >= ma60 and vix_safe) or vix_contrarian: 
+                                    if ((ma20 >= ma60 and ma60_slope_positive) and vix_safe) or vix_contrarian: 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                                         target_amt = min(total_cash * stock_weight, total_cash * max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            reason = "V자 반등 바닥잡기(VIX Contrarian)" if vix_contrarian else "골든크로스 돌파"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason}에 따른 강력 매수(알파 스코어: {buy_scores[s_name]:.1f})."
+                                            reason = "V자 반등 바닥잡기" if vix_contrarian else "60일선 우상향 골든크로스"
+                                            detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason} 검증 완료(알파 스코어: {buy_scores[s_name]:.1f})."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 조건은 우수하나 가용 현금 부족."
+                                            detail = f"[{tech_text}] | [{slope_status}]\n➔ 조건은 우수하나 가용 현금 부족."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 역배열 또는 시장 공포 구간."
+                                        detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}]\n➔ 횡보 휩소 구간이거나 역배열 관망."
                             else:
                                 if is_holding: 
                                     user_ret = ((c_price / buy_price) - 1) * 100
@@ -386,21 +390,21 @@ with tab1:
                                         detail = f"[{tech_text}]\n➔ 데드크로스 발생으로 차익 실현/손절."
                                 else: 
                                     tech_text = f"20/60일선 교차, 낙폭 {drawdown:+.2f}%"
-                                    if ((ma20 >= ma60 and vix_safe) or vix_contrarian) and drawdown >= -15.0: 
+                                    if (((ma20 >= ma60 and ma60_slope_positive) and vix_safe) or vix_contrarian) and drawdown >= -15.0: 
                                         stock_weight = (buy_scores[s_name] / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
                                         target_amt = min(total_cash * stock_weight, total_cash * max_alloc_ratio, current_cash)
                                         rec_shares = int(target_amt // c_price) if c_price > 0 else 0
                                         
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            reason = "V자 바닥 포착" if vix_contrarian else "모멘텀 돌파"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason} 및 수급/상대강도 점수({buy_scores[s_name]:.1f}) 기반 매수."
+                                            reason = "V자 바닥 포착" if vix_contrarian else "60일선 우상향 모멘텀"
+                                            detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}] | [{vol_status}] | [{rs_status}]\n➔ {reason} 기반 매수."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
                                             detail = f"[{tech_text}]\n➔ 가용 현금 부족."
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{vix_status}]\n➔ 모멘텀 부진 및 조건 미달."
+                                        detail = f"[{tech_text}] | [{slope_status}] | [{vix_status}]\n➔ 모멘텀 부진 및 조건 미달."
                                     
                             results.append({
                                 '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
@@ -409,12 +413,12 @@ with tab1:
                         
                         st.info(f"📊 **[스마트 가중치 배분 및 현금 현황]**\n\n"
                                 f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
-                                f"• **운용 특징:** **KOSPI 시장을 이기는 주도주(상대강도 우위)**와 **VIX 극단 공포 시점의 V자 반등**에 강력한 가중치를 부여하여 폭발적인 수익을 추구합니다.")
+                                f"• **운용 특징:** **60일선 우상향 기울기 검증**으로 횡보장 휩소를 차단하고, **트레일링 스탑 익절 룰**로 수익을 안전하게 확정 짓습니다.")
                         st.table(pd.DataFrame(results))
 
 with tab2:
     st.header("Simulation & Backtest")
-    st.markdown("과거 주가 데이터를 바탕으로 **듀얼 모멘텀 + VIX 바닥잡기 + 상대강도(RS)**가 결합된 고수익 추구 엔진을 검증합니다.")
+    st.markdown("과거 주가 데이터를 바탕으로 **기울기 필터 + 트레일링 스탑 + VIX 바닥잡기**가 결합된 고수익 추구 엔진을 검증합니다.")
 
     if not st.session_state.portfolios:
         st.warning("포트폴리오가 없습니다.")
@@ -436,10 +440,9 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("KOSPI 벤치마크, VIX 및 종목별 모멘텀 분석 엔진 구동 중..."):
+                with st.spinner("KOSPI 벤치마크, VIX 및 종목별 기울기/트레일링 스탑 분석 구동 중..."):
                     fetch_start = start_date - datetime.timedelta(days=200)
                     
-                    # 시장 데이터프레임 조립 (KOSPI & VIX)
                     market_df = pd.DataFrame()
                     kospi_ret_val = 0.0
                     final_kospi_asset = init_cash
@@ -451,7 +454,6 @@ with tab2:
                             kospi_df['Kospi_Ret_60'] = kospi_df['Close'] / kospi_df['Close'].shift(60) - 1
                             market_df['Kospi_Ret_60'] = kospi_df['Kospi_Ret_60']
                             
-                            # 성과 평가용
                             sim_kospi = kospi_df.loc[start_date:end_date]['Close'].dropna()
                             if len(sim_kospi) > 1:
                                 k_start = float(sim_kospi.iloc[0])
@@ -465,12 +467,11 @@ with tab2:
                         if not vix_df.empty:
                             if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
                             vix_df['VIX_MA3'] = vix_df['Close'].rolling(3).mean()
-                            # VIX 역발상 로직: 25이상 고점 후 단기 MA 하향 돌파 시점
                             market_df['VIX_Contrarian'] = (vix_df['Close'] >= 25.0) & (vix_df['Close'] < vix_df['VIX_MA3'])
                             market_df['VIX_Safe'] = vix_df['Close'] < 30.0
                     except: pass
                     
-                    market_df = market_df.ffill().fillna(0) # 결측치 처리
+                    market_df = market_df.ffill().fillna(0)
                     
                     stock_dfs = {}
                     for idx, row in stocks.iterrows():
@@ -491,8 +492,8 @@ with tab2:
                         df['Volume'] = df['Volume'].ffill()
                         df['Daily_Ret'] = df['Close'].pct_change()
                         
-                        # 종목 지표 계산
                         df['MA60'] = df['Close'].rolling(60).mean()
+                        df['MA60_Slope'] = df['MA60'] > df['MA60'].shift(5) # 60일선 5일 전 대비 우상향 여부
                         df['MA20'] = df['Close'].rolling(20).mean()
                         df['Ret_60'] = df['Close'] / df['Close'].shift(60) - 1
                         
@@ -500,28 +501,26 @@ with tab2:
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
                         df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
                         
-                        # 시장 지표 병합
                         df = df.join(market_df, how='left')
                         df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
                         df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
                         df['Kospi_Ret_60'] = df['Kospi_Ret_60'].fillna(0.0)
                         
-                        # 전략별 매수/매도 시그널 및 알파 스코어 부여
+                        # 60일선 우상향 기울기 조건 추가로 휩소 방지
                         if strat == '대형주 (Core)':
-                            entry_cond = ((df['MA20'] >= df['MA60']) & df['VIX_Safe']) | df['VIX_Contrarian']
+                            entry_cond = ((df['MA20'] >= df['MA60']) & df['MA60_Slope'] & df['VIX_Safe']) | df['VIX_Contrarian']
                             exit_cond = (df['MA20'] < df['MA60']) & (~df['VIX_Contrarian'])
                         else:
                             df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
                             stop_loss_pct = sat_stop_loss / 100.0
                             
-                            entry_cond = (((df['MA20'] >= df['MA60']) & df['VIX_Safe']) | df['VIX_Contrarian']) & (df['Drawdown'] >= -0.15)
+                            entry_cond = (((df['MA20'] >= df['MA60']) & df['MA60_Slope'] & df['VIX_Safe']) | df['VIX_Contrarian']) & (df['Drawdown'] >= -0.15)
                             exit_cond = (df['Drawdown'] <= stop_loss_pct) | ((df['MA20'] < df['MA60']) & (~df['VIX_Contrarian']))
                         
                         df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
                         df['Signal'] = df['Signal'].ffill().fillna(0)
                         
-                        # 알파 스코어 (조건이 완벽할수록 높은 점수)
                         rs_condition = df['Ret_60'] > df['Kospi_Ret_60']
                         df['Score'] = np.where(entry_cond, 
                                                1.0 + np.where(df['Vol_Strong'], 0.5, 0.0) + 
@@ -545,6 +544,10 @@ with tab2:
                         shares = {name: 0.0 for name in stock_dfs}
                         hold_days = {name: 0 for name in stock_dfs}
                         max_invested = {name: 0.0 for name in stock_dfs}
+                        
+                        # 트레일링 스탑용 고점가 기록
+                        peak_price_since_buy = {name: 0.0 for name in stock_dfs}
+                        
                         cash = init_cash
                         avg_buy_price = {name: 0.0 for name in stock_dfs}
                         realized_pnl = {name: 0.0 for name in stock_dfs}
@@ -566,16 +569,33 @@ with tab2:
                             scores = {}
                             for name, df in stock_dfs.items():
                                 sig = df.loc[date_val, 'Signal']
+                                c_price = df.loc[date_val, 'Close']
+                                
+                                # 트레일링 스탑 익절 체크: 매수 후 수익률 +10% 이상 달성 후 최고점 대비 -5% 하락 시 익절 매도
+                                trailing_stop_exit = False
+                                if shares[name] > 0 and avg_buy_price[name] > 0:
+                                    peak_price_since_buy[name] = max(peak_price_since_buy[name], c_price)
+                                    curr_ret = (c_price / avg_buy_price[name]) - 1
+                                    drop_from_peak = (c_price / peak_price_since_buy[name]) - 1
+                                    
+                                    if curr_ret >= 0.10 and drop_from_peak <= -0.05:
+                                        trailing_stop_exit = True
+                                
                                 force_exit = False
                                 if strat != '대형주 (Core)' and df.loc[date_val, 'Drawdown'] <= (sat_stop_loss / 100.0):
                                     force_exit = True
                                     
-                                if shares[name] > 0 and hold_days[name] < min_hold_days and not force_exit:
-                                    sig = 1.0 # 최소 보유 기간 보장
+                                # 트레일링 스탑이나 손절이 발생하면 즉시 청산
+                                if trailing_stop_exit or force_exit:
+                                    sig = 0.0
+                                elif shares[name] > 0 and hold_days[name] < min_hold_days:
+                                    sig = 1.0
                                     
                                 if sig == 1:
                                     active_stocks.append(name)
                                     scores[name] = df.loc[date_val, 'Score'] if df.loc[date_val, 'Score'] > 0 else 1.0
+                                else:
+                                    peak_price_since_buy[name] = 0.0
                                     
                             for name, df in stock_dfs.items():
                                 curr_sig = 1 if name in active_stocks else 0
@@ -610,6 +630,7 @@ with tab2:
                                                     avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
                                                 else:
                                                     avg_buy_price[name] = c_price
+                                                    peak_price_since_buy[name] = c_price
                                                 shares[name] += added_shares
                                                 trade_stats[name]['fee'] += fee
                                                 max_invested[name] = max(max_invested[name], shares[name] * c_price)
@@ -623,6 +644,7 @@ with tab2:
                                                         avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
                                                     else:
                                                         avg_buy_price[name] = c_price
+                                                        peak_price_since_buy[name] = c_price
                                                     shares[name] += added_shares
                                                     trade_stats[name]['fee'] += fee
                                                     max_invested[name] = max(max_invested[name], shares[name] * c_price)
@@ -645,6 +667,7 @@ with tab2:
                                             trade_stats[name]['fee'] += fee
                                             shares[name] = 0.0
                                             avg_buy_price[name] = 0.0
+                                            peak_price_since_buy[name] = 0.0
                             else:
                                 for name in stock_dfs:
                                     if shares[name] > 0:
@@ -657,6 +680,7 @@ with tab2:
                                         trade_stats[name]['fee'] += fee
                                         shares[name] = 0.0
                                         avg_buy_price[name] = 0.0
+                                        peak_price_since_buy[name] = 0.0
                                         
                             final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
                             portfolio_history.append(max(cash + final_eval, 0))
@@ -708,10 +732,10 @@ with tab2:
                         
                         comparison_data = [
                             {
-                                '전략 구분': '🚀 AI 고수익 모멘텀 (Dual-Momentum + RS + VIX)',
+                                '전략 구분': '🚀 AI 고수익 모멘텀 (Dual-Momentum + RS + Trailing Stop)',
                                 '최종 기말 자산': f"{final_asset:,.0f} 원",
                                 '총 수익률': f"{final_port_ret:+.2f}%",
-                                '운용 방식 및 특징': f'20일/60일선 골든크로스 상승 추세 파악. KOSPI 대비 60일 상대강도(RS)가 우수하고 수급이 좋은 주도주에 알파 가중치 배분. 공포지수(VIX) 폭등 후 꺾이는 V자 바닥 시점에서 적극 매수.'
+                                '운용 방식 및 특징': '60일선 우상향 확인 후 20/60일선 골든크로스 진입. KOSPI 상회 주도주에 알파 가중치 실어주기. +10% 수익 도달 후 최고점 대비 -5% 이탈 시 트레일링 스탑 사전 익절로 수익 보존.'
                             },
                             {
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
@@ -780,4 +804,4 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 각 주식의 보유 비중 추이 (%)")
                         st.area_chart(eom_weights)
-                        st.info("💡 위 비중 추이는 KOSPI 상회 종목 및 모멘텀 우수 종목에 가중치가 차등 부여되어 자금이 역동적으로 배분된 결과입니다.")
+                        st.info("💡 위 비중 추이는 KOSPI 상회 종목 및 기울기가 살아있는 주도주에 자금이 역동적으로 배분되고 익절 룰이 작동한 결과입니다.")
