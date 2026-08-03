@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **원클릭 스캐너 추가**, **매수 수수료 완벽 연동**, **가짜 반등 필터**, **트레일링 스탑 익절**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **완벽 연동 스캐너 & 오토세이브**, **매수 수수료 연동**, **가짜 반등 필터**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -106,10 +106,10 @@ def fetch_stock_status(ticker_code):
     return None, None, None, None, None, None, None, None, False, False
 
 # ==========================================
-# 중소형주 눌림목 스캐너 함수
+# [개선] 진단 로직과 100% 동기화된 중소형주 눌림목 스캐너 
 # ==========================================
 @st.cache_data(ttl=3600)
-def run_satellite_scanner():
+def run_satellite_scanner(use_ma200_filter_flag):
     results = []
     krx = load_krx_universe()
     
@@ -127,26 +127,37 @@ def run_satellite_scanner():
         code = row['Code']
         name = row['Name']
         try:
-            df = yf.download(f"{code}.KQ", period="3mo", progress=False)
+            # 200일선 추적을 위해 2년 치 데이터 확보
+            df = yf.download(f"{code}.KQ", period="2y", progress=False)
             if df.empty: continue
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             
             df['MA20'] = df['Close'].rolling(20).mean()
+            df['MA200'] = df['Close'].rolling(200).mean()
+            df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
             df['Vol_5MA'] = df['Volume'].rolling(5).mean().shift(1)
             df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
             
-            df = df.dropna()
+            df = df.dropna(subset=['Close', 'MA20', 'Volume'])
             if len(df) < 20: continue
+            
+            current_close = float(df['Close'].iloc[-1])
+            current_ma20 = float(df['MA20'].iloc[-1])
+            current_ma200 = float(df['MA200'].iloc[-1]) if pd.notna(df['MA200'].iloc[-1]) else current_close
+            recent_high = float(df['Roll_Max'].iloc[-1]) if pd.notna(df['Roll_Max'].iloc[-1]) else current_close
             
             recent_20d_vol_max = df['Vol_Ratio'].tail(20).max()
             vol_surged = recent_20d_vol_max >= 200.0
             
-            current_close = float(df['Close'].iloc[-1])
-            current_ma20 = float(df['MA20'].iloc[-1])
             dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
             is_dip_buying = -2.0 <= dist_from_ma20 <= 2.0
             
-            if vol_surged and is_dip_buying:
+            # [수정됨] 진단 엔진과 완벽히 동일한 방어 룰 탑재
+            ma200_pass = (not use_ma200_filter_flag) or (current_close >= current_ma200)
+            drawdown = ((current_close / recent_high) - 1) * 100
+            dd_pass = drawdown >= -20.0
+            
+            if vol_surged and is_dip_buying and ma200_pass and dd_pass:
                 results.append({
                     '종목명': name,
                     '티커': code,
@@ -295,23 +306,22 @@ with tab1:
             total_cash = port_info['cash']
             st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
             
-            # [신규] 스캐너 UI 및 원클릭 추가 기능
+            # [스캐너 UI]
             if current_strategy == '중소형주 (Satellite)':
                 st.markdown("---")
                 st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (발굴)")
-                st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 예쁘게 조정을 받은(Dip-Buying) 타점을 실시간으로 찾아냅니다.")
+                st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 조정을 받은(Dip-Buying) 완벽한 타점을 찾아냅니다.")
                 
-                # 버튼을 누르거나 이미 스캐너가 열려있을 때 작동
                 if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary") or st.session_state.show_scanner:
                     st.session_state.show_scanner = True
                     
-                    with st.spinner("코스닥 유동성 100개 종목의 거래량 및 20일선 이격도 정밀 분석 중... (약 10초 소요)"):
-                        scan_result = run_satellite_scanner()
+                    with st.spinner("코스닥 유동성 100개 종목의 거래량 및 방어 필터(200일선) 동기화 분석 중... (약 10초 소요)"):
+                        # 스캐너에 200일선 적용 여부를 전달하여 진단 룰과 일치시킴
+                        scan_result = run_satellite_scanner(use_ma200_filter)
                         
                         if not scan_result.empty:
-                            st.success(f"✅ AI가 오늘 진입하기 좋은 눌림목 종목 {len(scan_result)}개를 발굴했습니다!")
+                            st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 조건 완벽 일치)")
                             
-                            # 스캐너 결과 커스텀 헤더 생성
                             hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
                             hc1.write("**종목명 (티커)**")
                             hc2.write("**현재가**")
@@ -320,7 +330,6 @@ with tab1:
                             hc5.write("**포트폴리오 관리**")
                             st.markdown("---")
                             
-                            # 스캐너 결과 출력 및 추가 버튼
                             for idx, row in scan_result.iterrows():
                                 c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
                                 ticker = row['티커']
@@ -331,7 +340,6 @@ with tab1:
                                 c3.write(row['20일선 이격도'])
                                 c4.write(row['최근 최대 수급'])
                                 
-                                # 이미 포트폴리오에 있는지 확인
                                 is_exist = False
                                 if not port_info['stocks'].empty and '티커' in port_info['stocks'].columns:
                                     is_exist = (port_info['stocks']['티커'] == ticker).any()
@@ -339,13 +347,23 @@ with tab1:
                                 if is_exist:
                                     c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
                                 else:
-                                    if c5.button("➕ 추가", key=f"scan_{ticker}_add"):
+                                    if c5.button("➕ 포트폴리오 추가", key=f"scan_{ticker}_add"):
                                         new_row = pd.DataFrame({'종목명': [name], '티커': [ticker], '매수단가': [0], '보유수량': [0]})
                                         comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
                                         st.session_state.portfolios[selected_port]['stocks'] = comb
-                                        st.rerun() # 추가 후 화면 갱신
+                                        
+                                        # [신규] 스캐너에서 추가 즉시 Auto-Save 기능
+                                        if st.session_state.current_loaded_file:
+                                            save_data = {}
+                                            for p_name, p_data in st.session_state.portfolios.items():
+                                                save_data[p_name] = {'strategy': p_data['strategy'], 'cash': p_data['cash'], 'stocks': p_data['stocks'].to_dict(orient='records')}
+                                            with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
+                                                json.dump(save_data, f, ensure_ascii=False, indent=2)
+                                            st.toast(f"✅ {name} 추가 및 자동 저장 완료!")
+                                        
+                                        st.rerun() 
                         else:
-                            st.warning("⚠️ 현재 조건(수급 폭발 후 20일선 눌림목)을 완벽히 만족하는 중소형 주도주가 없습니다. 시장이 과열되거나 침체된 상태입니다.")
+                            st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
             
             st.markdown("---")
             st.markdown("### 📝 수동 종목 관리 (검색 / 삭제)")
@@ -367,6 +385,13 @@ with tab1:
                             new_row = pd.DataFrame({'종목명': [sel_name], '티커': [sel_code], '매수단가': [0], '보유수량': [0]})
                             comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
                             st.session_state.portfolios[selected_port]['stocks'] = comb
+                            
+                            # Auto-Save
+                            if st.session_state.current_loaded_file:
+                                save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
+                                with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
+                                    json.dump(save_data, f, ensure_ascii=False, indent=2)
+                                st.toast(f"✅ {sel_name} 수동 추가 및 자동 저장 완료!")
                             st.rerun()
 
             with col_manage2:
@@ -377,6 +402,13 @@ with tab1:
                     if st.button("선택 종목 삭제하기", key=f"del_btn_{selected_port}", use_container_width=True):
                         port_info['stocks'] = port_info['stocks'][port_info['stocks']['종목명'] != del_selected].reset_index(drop=True)
                         st.session_state.portfolios[selected_port]['stocks'] = port_info['stocks']
+                        
+                        # Auto-Save
+                        if st.session_state.current_loaded_file:
+                            save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
+                            with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
+                                json.dump(save_data, f, ensure_ascii=False, indent=2)
+                            st.toast(f"✅ {del_selected} 삭제 및 자동 저장 완료!")
                         st.rerun()
                 else:
                     st.caption("현재 등록된 종목이 없습니다.")
@@ -388,28 +420,21 @@ with tab1:
                 port_info['stocks'], num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
             )
             st.session_state.portfolios[selected_port]['stocks'] = edited_df
-
-            st.markdown("---")
-            st.subheader("💾 본문에서 다른 이름으로 새로 저장하기 (Save As)")
             
-            col_save1, col_save2 = st.columns([3, 1])
-            with col_save1:
-                default_save_name = st.session_state.current_loaded_file.replace('.json', '') if st.session_state.current_loaded_file else f"포트폴리오_{datetime.date.today().strftime('%Y%m%d')}"
-                save_filename = st.text_input("저장할 파일명 (사이드바의 '퀵 세이브'를 이용하면 더 편리합니다)", value=default_save_name)
-            with col_save2:
+            # [신규] 표 수정 후 즉시 저장 버튼 (Quick Save)
+            if st.session_state.current_loaded_file:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("새 이름으로 저장하기", type="secondary", use_container_width=True):
+                if st.button("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True, type="primary"):
                     save_data = {}
                     for p_name, p_data in st.session_state.portfolios.items():
                         save_data[p_name] = {
                             'strategy': p_data['strategy'], 'cash': p_data['cash'],
                             'stocks': p_data['stocks'].to_dict(orient='records')
                         }
-                    file_path = os.path.join(SAVE_DIR, f"{save_filename}.json")
+                    file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
                     with open(file_path, "w", encoding="utf-8") as f:
                         json.dump(save_data, f, ensure_ascii=False, indent=2)
-                    st.session_state.current_loaded_file = f"{save_filename}.json"
-                    st.success(f"✅ {file_path} 경로에 새롭게 저장 완료!")
+                    st.success("✅ 포트폴리오 변경사항이 즉시 저장되었습니다!")
 
             st.markdown("---")
             st.subheader("🩺 실시간 매매 액션 플랜 및 증/감액 동적 리밸런싱 진단")
