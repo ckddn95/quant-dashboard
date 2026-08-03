@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **실전 눌림목 타점 보정**, **1:1 직관적 파일 관리**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **전략별 파라미터 자동 스위칭**, **1:1 직관적 파일 관리**, **스캐너 백테스트 이식**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -155,7 +155,6 @@ def run_satellite_scanner(use_ma200_filter_flag):
             recent_20d_vol_max = df['Vol_Ratio'].tail(20).max()
             vol_surged = recent_20d_vol_max >= 200.0
             
-            # [보정] 실전 눌림목 조건: 종가 이격도 -5% ~ +3% 또는 당일 저가가 20일선 터치
             dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
             is_dip_buying = (-5.0 <= dist_from_ma20 <= 3.0) or (current_low <= current_ma20 * 1.01 and current_close >= current_ma20 * 0.95)
             
@@ -260,23 +259,36 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
                 json.dump(new_data, f, ensure_ascii=False, indent=2)
             st.rerun()
 
+# ==========================================
+# [신규] 포트폴리오 전략별 파라미터 자동 연동 (Auto-Switching)
+# ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
 
+active_strat = p_data['strategy'] if p_data else "대형주 (Core)"
+
+st.sidebar.info(f"💡 현재 **{active_strat}** 전략에 맞춰 AI 최적값으로 자동 세팅되었습니다. (수동 조절 가능)")
+
+# 전략별 권장 디폴트 파라미터 설정
+def_sl = -15 if active_strat == '대형주 (Core)' else -12
+def_alloc = 35 if active_strat == '대형주 (Core)' else 20
+def_ts_target = 30 if active_strat == '대형주 (Core)' else 15
+def_ts_drop = -10 if active_strat == '대형주 (Core)' else -5
+
 st.sidebar.markdown("**횡보/하락장 방어 필터**")
-use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True)
-cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=60, step=15)
+use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True, key=f"ma200_{active_strat}")
+cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=60, step=15, key=f"cd_{active_strat}")
 
 st.sidebar.markdown("**기본 리스크 관리**")
-whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5)
-sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-12, step=1)
-max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=20, step=5)
-min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1)
+whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5, key=f"wb_{active_strat}")
+sat_stop_loss = st.sidebar.slider("긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=def_sl, step=1, key=f"sl_{active_strat}")
+max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=def_alloc, step=5, key=f"alloc_{active_strat}")
+min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1, key=f"hold_{active_strat}")
 
 st.sidebar.markdown("**🔥 대세 추세장 셋업**")
-ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=15, step=5)
-ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=-5, step=1)
-bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=True)
+ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=def_ts_target, step=5, key=f"ts_t_{active_strat}")
+ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=def_ts_drop, step=1, key=f"ts_d_{active_strat}")
+bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=True, key=f"boost_{active_strat}")
 
 # ==========================================
 # 4. 탭 구성
@@ -783,9 +795,7 @@ with tab2:
                         else:
                             df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
-                            stop_loss_pct = sat_stop_loss / 100.0
                             
-                            # [보정] 실전 눌림목 타점 현실화 (저가 터치 또는 종가 -5%~+3% 안착)
                             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
                             low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
                             is_dip = (dist_ma20 >= -5.0) & (dist_ma20 <= 3.0) & low_ma20_touch
@@ -808,12 +818,11 @@ with tab2:
                     if not stock_dfs:
                         st.warning("유효한 데이터가 없습니다.")
                     else:
-                        # [보정] 종목별 상장일 차이로 백테스트 일수가 쪼그라드는 현상 방지 (유효 데이터 최대화)
                         all_indices = [df.index for df in stock_dfs.values()]
                         common_index = all_indices[0]
                         for idx_df in all_indices[1:]:
                             if len(idx_df) > len(common_index):
-                                common_index = idx_df # 가장 데이터가 긴 벤치마크 날짜 기준 채택
+                                common_index = idx_df 
                             
                         portfolio_history = []
                         history_records = [] 
@@ -1045,7 +1054,7 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 눌림목 타점 보정 및 백테스트 실행 완료!")
+                        st.success(f"✅ 매매 타점 동기화 및 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
@@ -1210,7 +1219,7 @@ with tab3:
     st.subheader("4. 자산 배분 및 자본금 증감액 룰 (Capital & Weight Allocation)")
     
     st.markdown(f"""
-    * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 **{max_alloc_pct}%** 로 제한되나, KOSPI 지수가 60일선 위에 있는 대세 상승장에서는 남는 현금을 없애기 위해 최대 투입 한도를 **1.5배** 강제로 상향합니다.
+    * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 사이드바 파라미터에 따르며, KOSPI 지수가 60일선 위에 있는 대세 상승장에서는 최대 투입 한도를 **1.5배** 강제로 상향합니다.
     * **알파 점수 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
     * **자본 증액 리밸런싱 (Capital Inflow):** 사이드바의 설정 운용 자금이 늘어나면, **이미 보유 중인 주도주라도 새로 늘어난 한도(Target Weight)만큼 정확히 계산하여 추가 매수를 지시**합니다.
     * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
@@ -1223,7 +1232,7 @@ with tab3:
     st.warning("**🔻 매도 및 방어 규정**")
     st.markdown(f"""
     * **추세 이탈 (데드크로스):** 20일선이 60일선을 하향 이탈하되, 잦은 손절을 막기 위해 버퍼의 절반({whipsaw_buffer/2}%) 이상 뚫고 내려갈 때 전량 매도합니다.
-    * **트레일링 스탑 익절 (Trailing Stop):** 수익이 **{ts_target_pct}%** 에 도달한 이후부터 룰이 켜집니다. 이후 최고점 대비 **{abs(ts_drop_pct)}%** 이상 하락하면 더 기다리지 않고 즉시 수익을 확정 짓습니다.
+    * **트레일링 스탑 익절 (Trailing Stop):** 지정된 목표 수익률 도달 이후부터 룰이 켜집니다. 이후 최고점 대비 허용 하락폭 이상 떨어지면 즉시 수익을 확정 짓습니다.
     * **연속 손실 쿨다운 (Cooldown):** 횡보 박스권에 갇혀 연속으로 2회 손실을 발생시킨 종목은 **{cooldown_days}일 동안 강제로 매수를 금지(격리)** 시켜 수수료 누수를 막습니다.
-    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다. (단, 매수가 대비 손절컷 **{sat_stop_loss}%** 도달 시 즉각 전량 매도 탈출)
+    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다. (단, 매수가 대비 손절컷 도달 시 즉각 전량 매도 탈출)
     """)
