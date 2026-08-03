@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **AI 중소형주 눌림목 스캐너**, **매수 수수료 완벽 연동**, **가짜 반등 필터**, **트레일링 스탑 익절**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **원클릭 스캐너 추가**, **매수 수수료 완벽 연동**, **가짜 반등 필터**, **트레일링 스탑 익절**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -106,25 +106,23 @@ def fetch_stock_status(ticker_code):
     return None, None, None, None, None, None, None, None, False, False
 
 # ==========================================
-# [신규] 중소형주 눌림목 스캐너 함수
+# 중소형주 눌림목 스캐너 함수
 # ==========================================
 @st.cache_data(ttl=3600)
 def run_satellite_scanner():
     results = []
     krx = load_krx_universe()
     
-    # 1차 필터: KOSDAQ 종목, 시가총액 500억 이상, 거래대금 상위 100개 추출 (속도 및 유동성 확보)
     try:
         kosdaq = krx[(krx['Market'] == 'KOSDAQ') | (krx['Market'] == 'KOSDAQ GLOBAL')]
         if 'Marcap' in kosdaq.columns and 'Amount' in kosdaq.columns:
-            kosdaq = kosdaq[kosdaq['Marcap'] >= 50000000000] # 시총 500억 이상
-            candidates = kosdaq.sort_values('Amount', ascending=False).head(100) # 거래대금 상위 100
+            kosdaq = kosdaq[kosdaq['Marcap'] >= 50000000000]
+            candidates = kosdaq.sort_values('Amount', ascending=False).head(100)
         else:
             candidates = kosdaq.head(100)
     except:
         return []
 
-    # 2차 필터: 야후 파이낸스 개별 종목 데이터 분석 (최근 20일 거래량 폭발 & 20일선 근접도)
     for idx, row in candidates.iterrows():
         code = row['Code']
         name = row['Name']
@@ -140,11 +138,9 @@ def run_satellite_scanner():
             df = df.dropna()
             if len(df) < 20: continue
             
-            # 최근 20일 이내에 거래량 200% 이상 폭발한 적이 있는지 (수급 유입)
             recent_20d_vol_max = df['Vol_Ratio'].tail(20).max()
             vol_surged = recent_20d_vol_max >= 200.0
             
-            # 현재 주가가 20일선(생명선)의 ±2% 이내로 조정을 받았는지 (눌림목 타점)
             current_close = float(df['Close'].iloc[-1])
             current_ma20 = float(df['MA20'].iloc[-1])
             dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
@@ -156,8 +152,8 @@ def run_satellite_scanner():
                     '티커': code,
                     '현재가': f"{current_close:,.0f} 원",
                     '20일선 이격도': f"{dist_from_ma20:+.2f}%",
-                    '최근 최대 거래량 폭발': f"{recent_20d_vol_max:,.0f}%",
-                    '진단 근거': "수급 유입 후 20일선 안착 (눌림목)"
+                    '최근 최대 수급': f"{recent_20d_vol_max:,.0f}%",
+                    '진단 근거': "수급 유입 후 20일선 안착"
                 })
         except:
             continue
@@ -173,6 +169,8 @@ if 'auto_diagnose' not in st.session_state:
     st.session_state.auto_diagnose = False
 if 'current_loaded_file' not in st.session_state:
     st.session_state.current_loaded_file = None
+if 'show_scanner' not in st.session_state:
+    st.session_state.show_scanner = False
 
 # ==========================================
 # 3. 사이드바: 포트폴리오 관리 및 퀵 세이브
@@ -198,6 +196,7 @@ if saved_files:
                 st.session_state.portfolios = new_portfolios
                 st.session_state.current_loaded_file = selected_file
                 st.session_state.auto_diagnose = True
+                st.session_state.show_scanner = False
                 st.rerun()
         except Exception as e:
             st.sidebar.error(f"불러오기 실패: {e}")
@@ -268,12 +267,12 @@ cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)",
 
 st.sidebar.markdown("**기본 리스크 관리**")
 whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5)
-sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-12, step=1) # -12% 권장치로 변경
-max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=20, step=5) # 중소형주 권장 20%
+sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-12, step=1)
+max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=20, step=5)
 min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1)
 
 st.sidebar.markdown("**🔥 대세 추세장 셋업**")
-ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=15, step=5) # 중소형주 빠른 익절 권장 15%
+ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=15, step=5)
 ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=-5, step=1)
 bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
@@ -296,26 +295,64 @@ with tab1:
             total_cash = port_info['cash']
             st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
             
-            # [신규 추가] 중소형주 전략일 때만 스캐너 기능 노출
+            # [신규] 스캐너 UI 및 원클릭 추가 기능
             if current_strategy == '중소형주 (Satellite)':
                 st.markdown("---")
                 st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (발굴)")
                 st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 예쁘게 조정을 받은(Dip-Buying) 타점을 실시간으로 찾아냅니다.")
-                if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary"):
+                
+                # 버튼을 누르거나 이미 스캐너가 열려있을 때 작동
+                if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary") or st.session_state.show_scanner:
+                    st.session_state.show_scanner = True
+                    
                     with st.spinner("코스닥 유동성 100개 종목의 거래량 및 20일선 이격도 정밀 분석 중... (약 10초 소요)"):
                         scan_result = run_satellite_scanner()
+                        
                         if not scan_result.empty:
-                            st.success(f"✅ AI가 오늘 진입하기 좋은 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (아래 표의 종목명을 복사하여 추가하세요)")
-                            st.table(scan_result)
+                            st.success(f"✅ AI가 오늘 진입하기 좋은 눌림목 종목 {len(scan_result)}개를 발굴했습니다!")
+                            
+                            # 스캐너 결과 커스텀 헤더 생성
+                            hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                            hc1.write("**종목명 (티커)**")
+                            hc2.write("**현재가**")
+                            hc3.write("**20일선 이격도**")
+                            hc4.write("**최대 수급(거래량)**")
+                            hc5.write("**포트폴리오 관리**")
+                            st.markdown("---")
+                            
+                            # 스캐너 결과 출력 및 추가 버튼
+                            for idx, row in scan_result.iterrows():
+                                c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                                ticker = row['티커']
+                                name = row['종목명']
+                                
+                                c1.write(f"**{name}** (`{ticker}`)")
+                                c2.write(row['현재가'])
+                                c3.write(row['20일선 이격도'])
+                                c4.write(row['최근 최대 수급'])
+                                
+                                # 이미 포트폴리오에 있는지 확인
+                                is_exist = False
+                                if not port_info['stocks'].empty and '티커' in port_info['stocks'].columns:
+                                    is_exist = (port_info['stocks']['티커'] == ticker).any()
+                                
+                                if is_exist:
+                                    c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
+                                else:
+                                    if c5.button("➕ 추가", key=f"scan_{ticker}_add"):
+                                        new_row = pd.DataFrame({'종목명': [name], '티커': [ticker], '매수단가': [0], '보유수량': [0]})
+                                        comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
+                                        st.session_state.portfolios[selected_port]['stocks'] = comb
+                                        st.rerun() # 추가 후 화면 갱신
                         else:
                             st.warning("⚠️ 현재 조건(수급 폭발 후 20일선 눌림목)을 완벽히 만족하는 중소형 주도주가 없습니다. 시장이 과열되거나 침체된 상태입니다.")
             
             st.markdown("---")
-            st.markdown("### 📝 포트폴리오 종목 관리 (추가 / 삭제)")
+            st.markdown("### 📝 수동 종목 관리 (검색 / 삭제)")
             col_manage1, col_manage2 = st.columns(2)
             
             with col_manage1:
-                st.markdown("**[➕ 종목 추가]**")
+                st.markdown("**[➕ 수동 종목 검색 추가]**")
                 search_kw = st.text_input("추가할 종목명 검색", key=f"search_{selected_port}")
                 if search_kw:
                     krx_df = load_krx_universe()
@@ -323,7 +360,7 @@ with tab1:
                     if not filtered_stocks.empty:
                         display_options = [f"{row['Name']} ({row['Code']})" for _, row in filtered_stocks.iterrows()]
                         selected_option = st.selectbox("검색 결과", display_options, key=f"sel_{selected_port}")
-                        if st.button("종목 추가하기", key=f"add_btn_{selected_port}", use_container_width=True):
+                        if st.button("수동 종목 추가하기", key=f"add_btn_{selected_port}", use_container_width=True):
                             sel_name = selected_option.split(" (")[0]
                             sel_code = selected_option.split(" (")[1].replace(")", "")
                             
@@ -428,12 +465,11 @@ with tab1:
                                     if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
                             else:
-                                # 중소형주: 20일선 눌림목 조건으로 진입 스코어 계산
                                 dist_ma20 = ((c_price / ma20) - 1) * 100
                                 is_dip = -2.0 <= dist_ma20 <= 2.0
                                 if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -20.0:
                                     score = 1.0
-                                    if vol_strong: score += 1.0 # 중소형주는 수급 비중 높임
+                                    if vol_strong: score += 1.0
                                     if rs_strong: score += 0.5
                                     if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
