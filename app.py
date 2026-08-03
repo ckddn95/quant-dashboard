@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **1:1 직관적 파일 관리**, **스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **실전 눌림목 타점 보정**, **1:1 직관적 파일 관리**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -30,29 +30,25 @@ if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 
 # ==========================================
-# [핵심] 구버전 좀비 파일 청소 및 마이그레이션 로직 (최초 1회 자동 실행)
+# 구버전 파일 자동 청소 및 마이그레이션
 # ==========================================
 raw_files = glob.glob(f"{SAVE_DIR}/*.json")
 for f_path in raw_files:
     try:
         with open(f_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
-        # 1. 속이 텅 빈 찌꺼기 파일이면 삭제
         if not data:
             os.remove(f_path)
             continue
-            
-        # 2. 구버전 포맷(파일 하나에 여러 포트폴리오가 묶인 형태) 감지 및 분리
         if 'strategy' not in data:
             for p_name, p_data in data.items():
-                safe_name = re.sub(r'[\\/*?:"<>|]', "", p_name) # 윈도우 파일명 오류 방지
+                safe_name = re.sub(r'[\\/*?:"<>|]', "", p_name)
                 new_path = os.path.join(SAVE_DIR, f"{safe_name}.json")
                 with open(new_path, 'w', encoding='utf-8') as out_f:
                     json.dump(p_data, out_f, ensure_ascii=False, indent=2)
-            os.remove(f_path) # 분리 완료 후 기존 묶음 파일은 폐기
+            os.remove(f_path)
     except Exception:
-        try: os.remove(f_path) # 읽을 수 없는 깨진 파일 폐기
+        try: os.remove(f_path)
         except: pass
 
 # ==========================================
@@ -97,6 +93,7 @@ def fetch_stock_status(ticker_code):
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 close_prices = df['Close'].dropna()
                 volumes = df['Volume'].dropna()
+                low_prices = df['Low'].dropna() if 'Low' in df.columns else close_prices
                 if len(close_prices) == 0: continue
                 
                 current_price = float(close_prices.iloc[-1])
@@ -150,14 +147,17 @@ def run_satellite_scanner(use_ma200_filter_flag):
             if len(df) < 20: continue
             
             current_close = float(df['Close'].iloc[-1])
+            current_low = float(df['Low'].iloc[-1]) if 'Low' in df.columns else current_close
             current_ma20 = float(df['MA20'].iloc[-1])
             current_ma200 = float(df['MA200'].iloc[-1]) if pd.notna(df['MA200'].iloc[-1]) else current_close
             recent_high = float(df['Roll_Max'].iloc[-1]) if pd.notna(df['Roll_Max'].iloc[-1]) else current_close
             
             recent_20d_vol_max = df['Vol_Ratio'].tail(20).max()
             vol_surged = recent_20d_vol_max >= 200.0
+            
+            # [보정] 실전 눌림목 조건: 종가 이격도 -5% ~ +3% 또는 당일 저가가 20일선 터치
             dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
-            is_dip_buying = -2.0 <= dist_from_ma20 <= 2.0
+            is_dip_buying = (-5.0 <= dist_from_ma20 <= 3.0) or (current_low <= current_ma20 * 1.01 and current_close >= current_ma20 * 0.95)
             
             ma200_pass = (not use_ma200_filter_flag) or (current_close >= current_ma200)
             drawdown = ((current_close / recent_high) - 1) * 100
@@ -185,7 +185,6 @@ if 'show_scanner' not in st.session_state:
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 
-# 디스크에 있는 파일 목록을 실시간으로 읽어와서 표시 (가장 깔끔한 1:1 동기화)
 valid_files = glob.glob(f"{SAVE_DIR}/*.json")
 port_names = [os.path.basename(f).replace('.json', '') for f in valid_files]
 
@@ -197,11 +196,9 @@ if port_names:
     selected_port = st.sidebar.selectbox("포트폴리오(파일) 목록", port_names)
     file_path = os.path.join(SAVE_DIR, f"{selected_port}.json")
     
-    # 선택된 포트폴리오 파일 로드
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             p_data = json.load(f)
-            # 빈 딕셔너리 예방 기본값 주입
             if 'strategy' not in p_data: p_data['strategy'] = '대형주 (Core)'
             if 'cash' not in p_data: p_data['cash'] = 10000000
             if 'stocks' not in p_data: p_data['stocks'] = []
@@ -223,7 +220,6 @@ if port_names:
             format="%d"
         )
         
-        # 금액 변경 시 즉시 파일에 덮어쓰기
         if new_cash != int(p_data['cash']):
             p_data['cash'] = new_cash
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -231,7 +227,6 @@ if port_names:
                 
         st.sidebar.caption(f"💵 설정 금액: **{new_cash:,.0f} 원**")
         
-        # 완전 영구 삭제 버튼
         if st.sidebar.button(f"🗑️ '{selected_port}' 포트폴리오 영구 삭제", type="primary"):
             try:
                 os.remove(file_path)
@@ -345,7 +340,6 @@ with tab1:
                                 if c5.button("➕ 포트폴리오 추가", key=f"scan_{ticker}_add"):
                                     new_row = {'종목명': name, '티커': ticker, '매수단가': 0, '보유수량': 0}
                                     p_data['stocks'].append(new_row)
-                                    # 중복 티커 제거 방어
                                     temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
                                     p_data['stocks'] = temp_df.to_dict(orient='records')
                                     
@@ -478,7 +472,7 @@ with tab1:
                                 buy_scores[s_name] = score
                         else:
                             dist_ma20 = ((c_price / ma20) - 1) * 100
-                            is_dip = -2.0 <= dist_ma20 <= 2.0
+                            is_dip = -5.0 <= dist_ma20 <= 3.0
                             if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0:
                                 score = 1.0
                                 if vol_strong: score += 1.0
@@ -608,7 +602,7 @@ with tab1:
                                     action = "🔴 강제 손절 집행"
                                     detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷."
                                 elif ma20 >= ma60 * (1 - buf/2):
-                                    is_dip = -2.0 <= dist_ma20 <= 2.0
+                                    is_dip = -5.0 <= dist_ma20 <= 3.0
                                     add_cond = (is_dip or vix_contrarian) and data['drawdown'] >= -30.0
                                     if diff_amt > 0 and current_cash >= c_price and add_cond:
                                         add_shares = int(min(diff_amt, current_cash) // c_price)
@@ -633,7 +627,7 @@ with tab1:
                                     action = "🟡 진입 보류 (200일선 하회)"
                                     detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
                                 else:
-                                    is_dip = -2.0 <= dist_ma20 <= 2.0
+                                    is_dip = -5.0 <= dist_ma20 <= 3.0
                                     if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0: 
                                         rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                         if rec_shares > 0:
@@ -644,7 +638,7 @@ with tab1:
                                             detail = f"[{tech_text}]\n➔ 현금 부족."
                                     else: 
                                         action = "🟡 진입 보류 (타점 대기)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(±2%) 및 스캐너 조건 대기 중."
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(-5%~+3%) 및 스캐너 조건 대기 중."
                                 
                         results.append({
                             '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
@@ -791,8 +785,10 @@ with tab2:
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
                             stop_loss_pct = sat_stop_loss / 100.0
                             
+                            # [보정] 실전 눌림목 타점 현실화 (저가 터치 또는 종가 -5%~+3% 안착)
                             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
-                            is_dip = (dist_ma20 >= -2.0) & (dist_ma20 <= 2.0)
+                            low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
+                            is_dip = (dist_ma20 >= -5.0) & (dist_ma20 <= 3.0) & low_ma20_touch
                             
                             entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
                             exit_cond = ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
@@ -812,9 +808,12 @@ with tab2:
                     if not stock_dfs:
                         st.warning("유효한 데이터가 없습니다.")
                     else:
-                        common_index = list(stock_dfs.values())[0].index
-                        for name in stock_dfs:
-                            common_index = common_index.intersection(stock_dfs[name].index)
+                        # [보정] 종목별 상장일 차이로 백테스트 일수가 쪼그라드는 현상 방지 (유효 데이터 최대화)
+                        all_indices = [df.index for df in stock_dfs.values()]
+                        common_index = all_indices[0]
+                        for idx_df in all_indices[1:]:
+                            if len(idx_df) > len(common_index):
+                                common_index = idx_df # 가장 데이터가 긴 벤치마크 날짜 기준 채택
                             
                         portfolio_history = []
                         history_records = [] 
@@ -851,8 +850,9 @@ with tab2:
                             current_max_alloc_ratio = base_alloc_ratio
                             market_bull = False
                             for df in stock_dfs.values():
-                                market_bull = df.loc[date_val, 'Kospi_Bull']
-                                break
+                                if date_val in df.index:
+                                    market_bull = df.loc[date_val, 'Kospi_Bull']
+                                    break
                             
                             if bull_market_boost and market_bull:
                                 current_max_alloc_ratio = min(base_alloc_ratio * 1.5, 1.0)
@@ -864,6 +864,7 @@ with tab2:
                             active_stocks = []
                             scores = {}
                             for name, df in stock_dfs.items():
+                                if date_val not in df.index: continue
                                 sig = df.loc[date_val, 'Signal']
                                 c_price = df.loc[date_val, 'Close']
                                 
@@ -904,13 +905,14 @@ with tab2:
                                 elif curr_sig == 0 and prev_sig == 1:
                                     trade_stats[name]['sell'] += 1
                                     
-                            stock_eval_total = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
+                            stock_eval_total = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
                             total_asset = cash + stock_eval_total
                             
                             n_active = len(active_stocks)
                             if n_active > 0:
                                 total_score = sum(scores.values()) if sum(scores.values()) > 0 else n_active
                                 for name in stock_dfs:
+                                    if date_val not in stock_dfs[name].index: continue
                                     c_price = stock_dfs[name].loc[date_val, 'Close']
                                     current_val = shares[name] * c_price
                                     
@@ -979,7 +981,7 @@ with tab2:
                                             peak_price_since_buy[name] = 0.0
                             else:
                                 for name in stock_dfs:
-                                    if shares[name] > 0:
+                                    if shares[name] > 0 and date_val in stock_dfs[name].index:
                                         c_price = stock_dfs[name].loc[date_val, 'Close']
                                         proceeds = shares[name] * c_price
                                         fee = proceeds * 0.0025
@@ -999,12 +1001,12 @@ with tab2:
                                         avg_buy_price[name] = 0.0
                                         peak_price_since_buy[name] = 0.0
                                         
-                            final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs)
+                            final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
                             portfolio_history.append(max(cash + final_eval, 0))
                             
                             record = {'Date': date_val, '현금(Cash)': max(cash, 0)}
                             for name in stock_dfs:
-                                record[name] = shares[name] * stock_dfs[name].loc[date_val, 'Close']
+                                record[name] = shares[name] * stock_dfs[name].loc[date_val, 'Close'] if date_val in stock_dfs[name].index else 0.0
                             history_records.append(record)
                             
                         ai_portfolio_series = pd.Series(portfolio_history, index=common_index)
@@ -1043,7 +1045,7 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 매매 타점 동기화 및 버그 교정 완료!")
+                        st.success(f"✅ 눌림목 타점 보정 및 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
@@ -1085,7 +1087,8 @@ with tab2:
                         st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
                         summary_rows = []
                         for name in stock_dfs:
-                            final_c_price = stock_dfs[name].loc[dates[-1], 'Close']
+                            last_dt = stock_dfs[name].index[-1]
+                            final_c_price = stock_dfs[name].loc[last_dt, 'Close']
                             holding_val = shares[name] * final_c_price
                             
                             unrealized_pnl = shares[name] * (final_c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
@@ -1146,7 +1149,6 @@ with tab2:
                         
                         st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, 누적 막대)")
                         st.altair_chart(chart, use_container_width=True)
-                        st.info("💡 위 차트는 **현금(블랙)을 항상 최상단에 고정**하여 현재 시장에 노출된 총 주식 비중을 직관적으로 보여주며, 각 종목의 층(Layer)이 항상 일정하여 비중 증감을 쉽게 파악할 수 있습니다.")
 
 with tab3:
     st.header("📄 AI 퀀트 투자 전략 및 운용 알고리즘 백서")
@@ -1199,7 +1201,7 @@ with tab3:
     
     **[중소형주 (Satellite) 전략 전용 필터: 1+2+3 동시 만족 시 진입]**
     1. **유동성 및 수급 폭발 이력:** KOSDAQ 시가총액 500억 이상 유동성 종목 중, 최근 20일 내 거래량이 평소 대비 200% 이상 폭발한 이력이 있어야 함.
-    2. **눌림목(Dip-Buying) 타점:** 수급이 터진 주도주가 조정을 받아 주가가 **20일선 기준 ±2% 이내로 근접했을 때만** 진입을 승인.
+    2. **눌림목(Dip-Buying) 타점:** 수급이 터진 주도주가 조정을 받아 주가가 **20일선 부근(-5% ~ +3% 또는 당일 저가 20일선 터치)**에 안착했을 때 진입.
     3. **하락장 및 투매 방어:** 200일선(옵션)을 상회해야 하며, 최근 단기 고점 대비 -30% 이상 무너진 폭락 종목은 제외.
     """)
     
