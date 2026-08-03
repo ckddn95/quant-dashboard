@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **전략별 파라미터 자동 스위칭**, **1:1 직관적 파일 관리**, **스캐너 백테스트 이식**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **안전 확인 팝업**, **전략별 테마 스위칭**, **파라미터 초기화** 기능을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -226,13 +226,16 @@ if port_names:
                 
         st.sidebar.caption(f"💵 설정 금액: **{new_cash:,.0f} 원**")
         
-        if st.sidebar.button(f"🗑️ '{selected_port}' 포트폴리오 영구 삭제", type="primary"):
-            try:
-                os.remove(file_path)
-                st.sidebar.success(f"✅ 완전히 삭제되었습니다.")
-                st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"삭제 실패: {e}")
+        # [안전장치 1] 삭제 확인 팝오버 (Popover Double Check)
+        with st.sidebar.popover(f"🗑️ '{selected_port}' 포트폴리오 삭제", use_container_width=True):
+            st.markdown("⚠️ **경고: 정말 삭제하시겠습니까?**<br>하드디스크에서 영구적으로 파일이 삭제되며 복구할 수 없습니다.", unsafe_allow_html=True)
+            if st.button("🚨 네, 영구 삭제합니다", key=f"del_{selected_port}", type="primary", use_container_width=True):
+                try:
+                    os.remove(file_path)
+                    st.sidebar.success(f"✅ 완전히 삭제되었습니다.")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"삭제 실패: {e}")
 else:
     st.sidebar.info("👈 생성된 포트폴리오가 없습니다. 아래에서 새로 추가해 주세요.")
 
@@ -260,20 +263,39 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             st.rerun()
 
 # ==========================================
-# [신규] 포트폴리오 전략별 파라미터 자동 연동 (Auto-Switching)
+# 파라미터 세팅 및 테마 인디케이터 (Theme & Reset)
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
 
 active_strat = p_data['strategy'] if p_data else "대형주 (Core)"
 
-st.sidebar.info(f"💡 현재 **{active_strat}** 전략에 맞춰 AI 최적값으로 자동 세팅되었습니다. (수동 조절 가능)")
+# [테마 1] 사이드바 전략별 시각적 분리 (CSS 인젝션)
+if active_strat == '대형주 (Core)':
+    st.sidebar.markdown("<div style='padding: 12px; border-radius: 8px; background-color: rgba(31, 119, 180, 0.1); border-left: 5px solid #1f77b4; color: #1f77b4;'><b>🟦 대형주 (Core) 활성화됨</b><br><span style='font-size: 0.85em; color: #a0a0a0;'>안정적 우량주 장기 추세 추종 모델</span></div>", unsafe_allow_html=True)
+else:
+    st.sidebar.markdown("<div style='padding: 12px; border-radius: 8px; background-color: rgba(255, 127, 14, 0.1); border-left: 5px solid #ff7f0e; color: #ff7f0e;'><b>🟧 중소형주 (Satellite) 활성화됨</b><br><span style='font-size: 0.85em; color: #a0a0a0;'>주도주 눌림목 단기 스윙 타점 모델</span></div>", unsafe_allow_html=True)
 
-# 전략별 권장 디폴트 파라미터 설정
+st.sidebar.write("") # 간격 띄우기
+
+# 전략별 권장 디폴트 파라미터 변수
 def_sl = -15 if active_strat == '대형주 (Core)' else -12
 def_alloc = 35 if active_strat == '대형주 (Core)' else 20
 def_ts_target = 30 if active_strat == '대형주 (Core)' else 15
 def_ts_drop = -10 if active_strat == '대형주 (Core)' else -5
+
+# [초기화 기능] 원클릭 기본 세팅 복구
+if st.sidebar.button("🔄 초기 AI 권장 세팅으로 복구", use_container_width=True):
+    st.session_state[f"ma200_{active_strat}"] = True
+    st.session_state[f"cd_{active_strat}"] = 60
+    st.session_state[f"wb_{active_strat}"] = 1.5
+    st.session_state[f"sl_{active_strat}"] = def_sl
+    st.session_state[f"alloc_{active_strat}"] = def_alloc
+    st.session_state[f"hold_{active_strat}"] = 5
+    st.session_state[f"ts_t_{active_strat}"] = def_ts_target
+    st.session_state[f"ts_d_{active_strat}"] = def_ts_drop
+    st.session_state[f"boost_{active_strat}"] = True
+    st.rerun()
 
 st.sidebar.markdown("**횡보/하락장 방어 필터**")
 use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True, key=f"ma200_{active_strat}")
@@ -307,7 +329,13 @@ with tab1:
         if stocks_df.empty:
             stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
             
-        st.subheader(f"📂 활성 포트폴리오: `{selected_port}` (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
+        # [테마 2] 본문 상단 헤더 전략별 테마 분리
+        if current_strategy == '대형주 (Core)':
+            st.markdown(f"<h3 style='color: #1f77b4;'>🟦 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
+            st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
+        else:
+            st.markdown(f"<h3 style='color: #ff7f0e;'>🟧 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
+            st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
         
         # [스캐너 UI]
         if current_strategy == '중소형주 (Satellite)':
@@ -411,18 +439,20 @@ with tab1:
         
         col_qsave1, col_qsave2 = st.columns([1, 1])
         with col_qsave1:
-            if st.button("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True, type="primary"):
-                p_data['stocks'] = edited_df.to_dict(orient='records')
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(p_data, f, ensure_ascii=False, indent=2)
-                st.success("✅ 포트폴리오 변경사항이 즉시 저장되었습니다!")
+            # [안전장치 2] 덮어쓰기 저장 확인 팝오버 (Double Check)
+            with st.popover("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True):
+                st.markdown("⚠️ **현재 입력하신 '매수 단가'와 '보유 수량'을 기존 파일에 덮어씁니다.**<br>정말 저장하시겠습니까?", unsafe_allow_html=True)
+                if st.button("✔️ 네, 덮어쓰기 저장합니다.", key=f"save_{selected_port}", type="primary", use_container_width=True):
+                    p_data['stocks'] = edited_df.to_dict(orient='records')
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    st.success("✅ 포트폴리오 변경사항이 안전하게 저장되었습니다!")
+                    
         with col_qsave2:
-            st.markdown("""<style>
-                [data-testid="stPopover"] { width: 100%; }
-                </style>""", unsafe_allow_html=True)
+            st.markdown("""<style>[data-testid="stPopover"] { width: 100%; }</style>""", unsafe_allow_html=True)
             with st.popover("📄 새 이름으로 복사/저장하기 (Save As)", use_container_width=True):
                 save_filename = st.text_input("새 파일명", value=f"{selected_port}_복사본")
-                if st.button("복사본 생성"):
+                if st.button("복사본 생성하기", type="primary"):
                     safe_new_name = re.sub(r'[\\/*?:"<>|]', "", save_filename)
                     new_file_path = os.path.join(SAVE_DIR, f"{safe_new_name}.json")
                     with open(new_file_path, "w", encoding="utf-8") as f:
@@ -1204,7 +1234,7 @@ with tab3:
     st.markdown(f"""
     **[대형주 (Core) 전략 4대 필터]**
     1. **대장기 하락장 차단:** 주가가 200일선 위에 위치해야 함.
-    2. **가짜 반등 차단:** 단기 20일선이 중기 60일선을 단순 교차를 넘어 **버퍼({whipsaw_buffer}%) 이상 확실하게 돌파**해야 함.
+    2. **가짜 반등 차단:** 단기 20일선이 중기 60일선을 단순 교차를 넘어 **버퍼 이상 확실하게 돌파**해야 함.
     3. **진짜 추세 검증:** 60일선 우상향(Slope > 0) 및 최근 20일 모멘텀 양수(> 0).
     4. **거시적 승인:** VIX가 30 미만이거나 VIX 역발상 바닥 시그널 발생.
     
@@ -1231,8 +1261,8 @@ with tab3:
     
     st.warning("**🔻 매도 및 방어 규정**")
     st.markdown(f"""
-    * **추세 이탈 (데드크로스):** 20일선이 60일선을 하향 이탈하되, 잦은 손절을 막기 위해 버퍼의 절반({whipsaw_buffer/2}%) 이상 뚫고 내려갈 때 전량 매도합니다.
+    * **추세 이탈 (데드크로스):** 20일선이 60일선을 하향 이탈하되, 잦은 손절을 막기 위해 버퍼의 절반 이상 뚫고 내려갈 때 전량 매도합니다.
     * **트레일링 스탑 익절 (Trailing Stop):** 지정된 목표 수익률 도달 이후부터 룰이 켜집니다. 이후 최고점 대비 허용 하락폭 이상 떨어지면 즉시 수익을 확정 짓습니다.
-    * **연속 손실 쿨다운 (Cooldown):** 횡보 박스권에 갇혀 연속으로 2회 손실을 발생시킨 종목은 **{cooldown_days}일 동안 강제로 매수를 금지(격리)** 시켜 수수료 누수를 막습니다.
-    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다. (단, 매수가 대비 손절컷 도달 시 즉각 전량 매도 탈출)
+    * **연속 손실 쿨다운 (Cooldown):** 횡보 박스권에 갇혀 연속으로 2회 손실을 발생시킨 종목은 지정된 기간 동안 강제로 매수를 금지(격리)시켜 수수료 누수를 막습니다.
+    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 일정 기간 강제로 홀딩합니다. (단, 매수가 대비 손절컷 도달 시 즉각 전량 매도 탈출)
     """)
