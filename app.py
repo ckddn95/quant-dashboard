@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **단일 작업공간 UI & 파일 완전삭제**, **스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **단일 작업공간 UI & 좀비 파일 완전삭제**, **스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -182,24 +182,31 @@ if 'show_scanner' not in st.session_state:
     st.session_state.show_scanner = False
 
 # ==========================================
-# 3. 사이드바: 퀵 세이브 및 파일 불러오기
+# 3. 사이드바: 퀵 세이브 및 찌꺼기 파일 클린업 (중요 버그 패치)
 # ==========================================
 st.sidebar.header("📂 내 PC 포트폴리오 불러오기")
 
-# [핵심 버그 수정 1] 찌꺼기(빈 파일) 자동 청소 및 목록에서 영구 제외 로직 추가
 raw_files = glob.glob(f"{SAVE_DIR}/*.json")
 valid_files = []
 
+# [버그 패치] 윈도우 파일 잠금(Lock)을 피하기 위해 파일을 닫은 후 삭제 진행
 for f_path in raw_files:
+    is_empty_or_corrupt = False
     try:
         with open(f_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            if data: # 딕셔너리에 데이터가 존재하면 유효한 파일
-                valid_files.append(f_path)
-            else:
-                os.remove(f_path) # 비어있는 찌꺼기 파일은 즉시 물리적 삭제
-    except:
-        pass
+            if not data: # 텅 빈 파일인지 검사
+                is_empty_or_corrupt = True
+    except Exception:
+        is_empty_or_corrupt = True # 읽을 수 없는 깨진 파일
+
+    if is_empty_or_corrupt:
+        try:
+            os.remove(f_path) # 파일을 닫은 후 안전하게 영구 삭제
+        except Exception:
+            pass
+    else:
+        valid_files.append(f_path)
 
 if valid_files:
     file_names = [os.path.basename(f) for f in valid_files]
@@ -273,7 +280,6 @@ if st.session_state.portfolios:
     st.session_state.portfolios[selected_port]['cash'] = new_cash
     st.sidebar.caption(f"💵 설정 금액: **{new_cash:,.0f} 원**")
     
-    # [핵심 버그 수정 2] 삭제 시 파일 자체를 물리적으로 지우는 완벽 조치
     if st.sidebar.button(f"🗑️ '{selected_port}' 포트폴리오 지우기", key=f"del_{selected_port}"):
         del st.session_state.portfolios[selected_port]
         
@@ -281,12 +287,13 @@ if st.session_state.portfolios:
             file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
             
             if len(st.session_state.portfolios) == 0:
-                # 마지막 남은 포트폴리오를 지웠다면 껍데기 파일도 물리적으로 제거
                 if os.path.exists(file_path):
-                    os.remove(file_path)
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
                 st.session_state.current_loaded_file = None
             else:
-                # 다른 포트폴리오가 남아있다면 정상 덮어쓰기 업데이트
                 save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
                 with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -296,7 +303,7 @@ else:
     st.sidebar.info("👈 생성된 포트폴리오가 없습니다. 아래에서 새로 추가해 주세요.")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("➕ 새 포트폴리오(시트) 추가")
+st.sidebar.subheader("➕ 새 포트폴리오 추가")
 new_p_name = st.sidebar.text_input("새 포트폴리오 이름", key="new_p_name")
 new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"], key="new_p_strat")
 new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d", key="new_p_cash")
@@ -309,6 +316,14 @@ if st.sidebar.button("새 포트폴리오 추가하기", use_container_width=Tru
         }
         if not st.session_state.current_loaded_file:
             st.session_state.current_loaded_file = f"{new_p_name}.json"
+            
+        # [패치] 추가 시 파일에도 즉각 덮어쓰기 연동
+        if st.session_state.current_loaded_file:
+            file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
+            save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(save_data, f, ensure_ascii=False, indent=2)
+                
         st.rerun()
     elif new_p_name in st.session_state.portfolios:
         st.sidebar.warning("이미 존재하는 이름입니다.")
@@ -839,6 +854,7 @@ with tab2:
                         else:
                             df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
+                            stop_loss_pct = sat_stop_loss / 100.0
                             
                             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
                             is_dip = (dist_ma20 >= -2.0) & (dist_ma20 <= 2.0)
