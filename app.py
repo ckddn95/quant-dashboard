@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **매수 수수료 완벽 연동**, **가짜 반등 필터**, **트레일링 스탑 익절**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **AI 중소형주 눌림목 스캐너**, **매수 수수료 완벽 연동**, **가짜 반등 필터**, **트레일링 스탑 익절**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -39,10 +39,10 @@ def load_krx_universe():
         return df
     except Exception as e:
         st.error("종목 데이터를 불러오는데 실패했습니다.")
-        return pd.DataFrame(columns=['Code', 'Name', 'Market'])
+        return pd.DataFrame(columns=['Code', 'Name', 'Market', 'Marcap', 'Amount'])
 
 # ==========================================
-# 거시 지표(VIX 및 KOSPI 상대강도) 수집 함수
+# 거시 지표 수집 함수
 # ==========================================
 @st.cache_data(ttl=1800)
 def fetch_market_data():
@@ -67,7 +67,7 @@ def fetch_market_data():
         return 20.0, False, True, 0.0
 
 # ==========================================
-# 실시간 주가 및 200일선 장기 추세 지표 수집 함수
+# 실시간 주가 지표 수집 함수
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
@@ -104,6 +104,65 @@ def fetch_stock_status(ticker_code):
     except Exception:
         pass
     return None, None, None, None, None, None, None, None, False, False
+
+# ==========================================
+# [신규] 중소형주 눌림목 스캐너 함수
+# ==========================================
+@st.cache_data(ttl=3600)
+def run_satellite_scanner():
+    results = []
+    krx = load_krx_universe()
+    
+    # 1차 필터: KOSDAQ 종목, 시가총액 500억 이상, 거래대금 상위 100개 추출 (속도 및 유동성 확보)
+    try:
+        kosdaq = krx[(krx['Market'] == 'KOSDAQ') | (krx['Market'] == 'KOSDAQ GLOBAL')]
+        if 'Marcap' in kosdaq.columns and 'Amount' in kosdaq.columns:
+            kosdaq = kosdaq[kosdaq['Marcap'] >= 50000000000] # 시총 500억 이상
+            candidates = kosdaq.sort_values('Amount', ascending=False).head(100) # 거래대금 상위 100
+        else:
+            candidates = kosdaq.head(100)
+    except:
+        return []
+
+    # 2차 필터: 야후 파이낸스 개별 종목 데이터 분석 (최근 20일 거래량 폭발 & 20일선 근접도)
+    for idx, row in candidates.iterrows():
+        code = row['Code']
+        name = row['Name']
+        try:
+            df = yf.download(f"{code}.KQ", period="3mo", progress=False)
+            if df.empty: continue
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            
+            df['MA20'] = df['Close'].rolling(20).mean()
+            df['Vol_5MA'] = df['Volume'].rolling(5).mean().shift(1)
+            df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
+            
+            df = df.dropna()
+            if len(df) < 20: continue
+            
+            # 최근 20일 이내에 거래량 200% 이상 폭발한 적이 있는지 (수급 유입)
+            recent_20d_vol_max = df['Vol_Ratio'].tail(20).max()
+            vol_surged = recent_20d_vol_max >= 200.0
+            
+            # 현재 주가가 20일선(생명선)의 ±2% 이내로 조정을 받았는지 (눌림목 타점)
+            current_close = float(df['Close'].iloc[-1])
+            current_ma20 = float(df['MA20'].iloc[-1])
+            dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
+            is_dip_buying = -2.0 <= dist_from_ma20 <= 2.0
+            
+            if vol_surged and is_dip_buying:
+                results.append({
+                    '종목명': name,
+                    '티커': code,
+                    '현재가': f"{current_close:,.0f} 원",
+                    '20일선 이격도': f"{dist_from_ma20:+.2f}%",
+                    '최근 최대 거래량 폭발': f"{recent_20d_vol_max:,.0f}%",
+                    '진단 근거': "수급 유입 후 20일선 안착 (눌림목)"
+                })
+        except:
+            continue
+            
+    return pd.DataFrame(results)
 
 # ==========================================
 # 2. 데이터 저장소 초기화 및 트래킹
@@ -209,13 +268,13 @@ cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)",
 
 st.sidebar.markdown("**기본 리스크 관리**")
 whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5)
-sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-15, step=1)
-max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=35, step=5)
+sat_stop_loss = st.sidebar.slider("중소형주 긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=-12, step=1) # -12% 권장치로 변경
+max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=20, step=5) # 중소형주 권장 20%
 min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1)
 
 st.sidebar.markdown("**🔥 대세 추세장 셋업**")
-ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=30, step=5)
-ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=-10, step=1)
+ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=15, step=5) # 중소형주 빠른 익절 권장 15%
+ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=-5, step=1)
 bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
 # ==========================================
@@ -237,6 +296,21 @@ with tab1:
             total_cash = port_info['cash']
             st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
             
+            # [신규 추가] 중소형주 전략일 때만 스캐너 기능 노출
+            if current_strategy == '중소형주 (Satellite)':
+                st.markdown("---")
+                st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (발굴)")
+                st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 예쁘게 조정을 받은(Dip-Buying) 타점을 실시간으로 찾아냅니다.")
+                if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary"):
+                    with st.spinner("코스닥 유동성 100개 종목의 거래량 및 20일선 이격도 정밀 분석 중... (약 10초 소요)"):
+                        scan_result = run_satellite_scanner()
+                        if not scan_result.empty:
+                            st.success(f"✅ AI가 오늘 진입하기 좋은 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (아래 표의 종목명을 복사하여 추가하세요)")
+                            st.table(scan_result)
+                        else:
+                            st.warning("⚠️ 현재 조건(수급 폭발 후 20일선 눌림목)을 완벽히 만족하는 중소형 주도주가 없습니다. 시장이 과열되거나 침체된 상태입니다.")
+            
+            st.markdown("---")
             st.markdown("### 📝 포트폴리오 종목 관리 (추가 / 삭제)")
             col_manage1, col_manage2 = st.columns(2)
             
@@ -303,7 +377,7 @@ with tab1:
             st.markdown("---")
             st.subheader("🩺 실시간 매매 액션 플랜 및 증/감액 동적 리밸런싱 진단")
             
-            run_btn = st.button("수동으로 진단 실행", type="primary")
+            run_btn = st.button("수동으로 진단 실행", type="secondary")
             
             if run_btn or st.session_state.auto_diagnose:
                 st.session_state.auto_diagnose = False
@@ -354,9 +428,12 @@ with tab1:
                                     if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
                             else:
-                                if ma200_pass and ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and drawdown >= -15.0):
+                                # 중소형주: 20일선 눌림목 조건으로 진입 스코어 계산
+                                dist_ma20 = ((c_price / ma20) - 1) * 100
+                                is_dip = -2.0 <= dist_ma20 <= 2.0
+                                if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -20.0:
                                     score = 1.0
-                                    if vol_strong: score += 0.5
+                                    if vol_strong: score += 1.0 # 중소형주는 수급 비중 높임
                                     if rs_strong: score += 0.5
                                     if vix_contrarian: score += 1.0
                                     buy_scores[s_name] = score
@@ -417,7 +494,13 @@ with tab1:
 
                             ma20, ma60, ret_20, ma60_slope_positive = data['ma20'], data['ma60'], data['ret_20'], data['ma60_slope']
                             diff_ma = ((ma20 / ma60) - 1) * 100
-                            tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
+                            dist_ma20 = ((c_price / ma20) - 1) * 100
+                            
+                            if current_strategy == '대형주 (Core)':
+                                tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
+                            else:
+                                tech_text = f"20일선 이격 {dist_ma20:+.2f}% (눌림목 타점)"
+                                
                             slope_status = "60일선 우상향" if ma60_slope_positive else "60일선 횡보/우하향"
 
                             stock_weight = (buy_scores.get(s_name, 1.0) / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
@@ -467,16 +550,17 @@ with tab1:
                                     else: 
                                         action = "🟡 진입 보류 (관망)"
                                         detail = f"[{tech_text}] | [{ma200_status}]\n➔ 가짜 반등(휩소) 구간으로 진입 보류."
-                            else:
+                            else: # 중소형주 (Satellite)
                                 if is_holding: 
                                     buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
                                     user_ret = ((c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                                     tech_text_sat = f"수익률 {user_ret:+.2f}%"
                                     if user_ret <= sat_stop_loss: 
                                         action = "🔴 강제 손절 집행"
-                                        detail = f"[{tech_text_sat}]\n➔ 긴급 손절선 이탈."
+                                        detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷."
                                     elif ma20 >= ma60 * (1 - buf/2):
-                                        add_cond = (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and data['drawdown'] >= -15.0
+                                        is_dip = -2.0 <= dist_ma20 <= 2.0
+                                        add_cond = (is_dip or vix_contrarian) and data['drawdown'] >= -20.0
                                         if diff_amt > 0 and current_cash >= c_price and add_cond:
                                             add_shares = int(min(diff_amt, current_cash) // c_price)
                                             if add_shares > 0:
@@ -494,22 +578,24 @@ with tab1:
                                             detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
                                     else:
                                         action = "🔴 전량 매도"
-                                        detail = f"[{tech_text_sat}]\n➔ 데드크로스로 차익 실현/손절."
+                                        detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 완전 이탈."
                                 else: 
                                     if (use_ma200_filter and not data['is_above_ma200']):
                                         action = "🟡 진입 보류 (200일선 하회)"
                                         detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
-                                    elif ((((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian) and data['drawdown'] >= -15.0): 
-                                        rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
-                                        if rec_shares > 0:
-                                            action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 200일선 위 상승 모멘텀 진입."
-                                        else:
-                                            action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}]\n➔ 현금 부족."
-                                    else: 
-                                        action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 진입 조건 미달."
+                                    else:
+                                        is_dip = -2.0 <= dist_ma20 <= 2.0
+                                        if (is_dip or vix_contrarian) and data['drawdown'] >= -20.0: 
+                                            rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
+                                            if rec_shares > 0:
+                                                action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
+                                                detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 20일선 눌림목 타점 정확히 진입."
+                                            else:
+                                                action = "🟡 진입 보류 (현금 부족)"
+                                                detail = f"[{tech_text}]\n➔ 현금 부족."
+                                        else: 
+                                            action = "🟡 진입 보류 (타점 대기)"
+                                            detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(±2%) 도달 시까지 매수 대기."
                                     
                             results.append({
                                 '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
@@ -640,7 +726,10 @@ with tab2:
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
                             stop_loss_pct = sat_stop_loss / 100.0
                             
-                            entry_cond = (ma200_cond & (df['MA20'] >= df['MA60'] * (1 + buf)) & df['MA60_Slope'] & (df['Ret_20'] > 0) & df['VIX_Safe'] | df['VIX_Contrarian']) & (df['Drawdown'] >= -0.15)
+                            dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
+                            is_dip = (dist_ma20 >= -2.0) & (dist_ma20 <= 2.0)
+                            
+                            entry_cond = (ma200_cond & (is_dip | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.20)
                             exit_cond = (df['Drawdown'] <= stop_loss_pct) | ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
                         
                         df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
@@ -648,7 +737,7 @@ with tab2:
                         
                         rs_condition = df['Ret_60'] > df['Kospi_Ret_60']
                         df['Score'] = np.where(entry_cond, 
-                                               1.0 + np.where(df['Vol_Strong'], 0.5, 0.0) + 
+                                               1.0 + np.where(df['Vol_Strong'], 1.0 if strat != '대형주 (Core)' else 0.5, 0.0) + 
                                                np.where(rs_condition, 0.5, 0.0) + 
                                                np.where(df['VIX_Contrarian'], 1.0, 0.0), 
                                                0.0)
@@ -776,7 +865,7 @@ with tab2:
                                                     peak_price_since_buy[name] = c_price
                                                 shares[name] += added_shares
                                                 trade_stats[name]['fee'] += fee
-                                                realized_pnl[name] -= fee  # 🚨 매수 수수료 PnL 차감 (누락 복구 완벽 반영)
+                                                realized_pnl[name] -= fee 
                                                 max_invested[name] = max(max_invested[name], shares[name] * c_price)
                                             else:
                                                 cost = max(cash - (cash * 0.0025), 0)
@@ -791,7 +880,7 @@ with tab2:
                                                         peak_price_since_buy[name] = c_price
                                                     shares[name] += added_shares
                                                     trade_stats[name]['fee'] += fee
-                                                    realized_pnl[name] -= fee  # 🚨 매수 수수료 PnL 차감 (누락 복구 완벽 반영)
+                                                    realized_pnl[name] -= fee
                                                     max_invested[name] = max(max_invested[name], shares[name] * c_price)
                                         elif diff_val < 0: 
                                             proceeds = abs(diff_val)
@@ -929,12 +1018,10 @@ with tab2:
                         st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
                         summary_rows = []
                         for name in stock_dfs:
-                            # 🚨 평가가 기준일 산식 버그 수정 (정확히 공통 데이터 마지막 날짜의 가격 반영)
                             final_c_price = stock_dfs[name].loc[dates[-1], 'Close']
                             holding_val = shares[name] * final_c_price
                             
                             unrealized_pnl = shares[name] * (final_c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
-                            # 🚨 매수 수수료 차감 로직이 100% 반영된 총 순수익
                             total_profit = realized_pnl[name] + unrealized_pnl
                             
                             invested_base = max_invested[name] if max_invested[name] > 0 else (init_cash / len(stock_dfs))
@@ -1034,13 +1121,18 @@ with tab3:
     st.markdown("---")
     
     st.subheader("3. 진입 및 매수 알고리즘 (Entry Rules)")
-    st.markdown("다음 4단계의 엄격한 필터링을 **모두 통과한 종목**만 매수 대상으로 선정됩니다.")
+    st.markdown("대형주(Core)와 중소형주(Satellite)는 시장 특성에 맞춰 완전히 분리된 진입 로직을 사용합니다.")
     
     st.markdown(f"""
-    1. **대장기 하락장 차단 (200D Filter):** 주가가 200일 이동평균선 위에 위치해야 합니다. (하락 중인 주식의 데드캣 바운스 원천 차단)
-    2. **가짜 반등 차단 (Whipsaw Buffer):** 단기 20일선이 중기 60일선을 단순히 교차하는 것이 아니라, 설정된 **버퍼({whipsaw_buffer}%) 이상 확실하게 돌파**해야 합니다.
-    3. **진짜 추세 검증 (Trend Verification):** 60일선이 10일 전 대비 **우상향(Slope > 0)** 해야 하며, 최근 20일 모멘텀(수익률)이 **양수(> 0)**여야 횡보장 속임수를 피할 수 있습니다.
-    4. **거시적 승인 (Macro Approval):** VIX가 30 미만이거나, 앞서 언급한 **VIX 역발상 바닥 시그널**이 발생해야 합니다.
+    **[대형주 (Core) 전략 4대 필터]**
+    1. **대장기 하락장 차단:** 주가가 200일선 위에 위치해야 함.
+    2. **가짜 반등 차단:** 단기 20일선이 중기 60일선을 단순 교차를 넘어 **버퍼({whipsaw_buffer}%) 이상 확실하게 돌파**해야 함.
+    3. **진짜 추세 검증:** 60일선 우상향(Slope > 0) 및 최근 20일 모멘텀 양수(> 0).
+    4. **거시적 승인:** VIX가 30 미만이거나 VIX 역발상 바닥 시그널 발생.
+    
+    **[중소형주 (Satellite) 전략 전용 필터]**
+    * 코스닥의 잦은 휩소를 방지하기 위해 돌파 매매 대신 **주도주 눌림목(Dip-Buying)** 타점을 공략합니다.
+    * 수급이 폭발한 주도주가 조정을 받아 **20일선 기준 ±2% 이내로 근접했을 때만** 진입을 승인하여 승률을 극대화합니다.
     """)
     
     st.markdown("---")
@@ -1063,5 +1155,5 @@ with tab3:
     * **추세 이탈 (데드크로스):** 20일선이 60일선을 하향 이탈하되, 잦은 손절을 막기 위해 버퍼의 절반({whipsaw_buffer/2}%) 이상 뚫고 내려갈 때 전량 매도합니다.
     * **트레일링 스탑 익절 (Trailing Stop):** 수익이 **{ts_target_pct}%** 에 도달한 이후부터 룰이 켜집니다. 이후 최고점 대비 **{abs(ts_drop_pct)}%** 이상 하락하면 더 기다리지 않고 즉시 수익을 확정 짓습니다.
     * **연속 손실 쿨다운 (Cooldown):** 횡보 박스권에 갇혀 연속으로 2회 손실을 발생시킨 종목은 **{cooldown_days}일 동안 강제로 매수를 금지(격리)** 시켜 수수료 누수를 막습니다.
-    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다.
+    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다. (단, 하드 손절컷 {sat_stop_loss}% 도달 시 예외적 즉각 탈출)
     """)
