@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **완벽 연동 스캐너 & 삭제 동기화**, **매수 수수료 연동**, **가짜 반등 필터**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **단일 작업공간 UI & 파일 완전삭제**, **스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -153,7 +153,7 @@ def run_satellite_scanner(use_ma200_filter_flag):
             
             ma200_pass = (not use_ma200_filter_flag) or (current_close >= current_ma200)
             drawdown = ((current_close / recent_high) - 1) * 100
-            dd_pass = drawdown >= -30.0 # [수정] 중소형주 변동성 감안 30%까지 완화
+            dd_pass = drawdown >= -30.0 
             
             if vol_surged and is_dip_buying and ma200_pass and dd_pass:
                 results.append({
@@ -182,16 +182,30 @@ if 'show_scanner' not in st.session_state:
     st.session_state.show_scanner = False
 
 # ==========================================
-# 3. 사이드바: 포트폴리오 관리 및 퀵 세이브
+# 3. 사이드바: 퀵 세이브 및 파일 불러오기
 # ==========================================
 st.sidebar.header("📂 내 PC 포트폴리오 불러오기")
-saved_files = glob.glob(f"{SAVE_DIR}/*.json")
 
-if saved_files:
-    file_names = [os.path.basename(f) for f in saved_files]
-    selected_file = st.sidebar.selectbox("저장된 포트폴리오 선택", file_names)
+# [핵심 버그 수정 1] 찌꺼기(빈 파일) 자동 청소 및 목록에서 영구 제외 로직 추가
+raw_files = glob.glob(f"{SAVE_DIR}/*.json")
+valid_files = []
+
+for f_path in raw_files:
+    try:
+        with open(f_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if data: # 딕셔너리에 데이터가 존재하면 유효한 파일
+                valid_files.append(f_path)
+            else:
+                os.remove(f_path) # 비어있는 찌꺼기 파일은 즉시 물리적 삭제
+    except:
+        pass
+
+if valid_files:
+    file_names = [os.path.basename(f) for f in valid_files]
+    selected_file = st.sidebar.selectbox("저장된 파일 선택", file_names)
     
-    if st.sidebar.button("🚀 포트폴리오 불러오기", use_container_width=True):
+    if st.sidebar.button("🚀 포트폴리오 팩 불러오기", use_container_width=True):
         try:
             with open(os.path.join(SAVE_DIR, selected_file), 'r', encoding='utf-8') as f:
                 loaded_data = json.load(f)
@@ -209,12 +223,14 @@ if saved_files:
                 st.rerun()
         except Exception as e:
             st.sidebar.error(f"불러오기 실패: {e}")
+else:
+    st.sidebar.caption("저장된 포트폴리오 파일이 없습니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("💾 퀵 세이브 (Quick Save)")
 if st.session_state.current_loaded_file:
-    st.sidebar.markdown(f"현재 작업 파일: `{st.session_state.current_loaded_file}`")
-    if st.sidebar.button("💾 변경사항 즉시 덮어쓰기", type="primary", use_container_width=True):
+    st.sidebar.markdown(f"현재 열려있는 파일: `{st.session_state.current_loaded_file}`")
+    if st.sidebar.button("💾 모든 변경사항 덮어쓰기", type="primary", use_container_width=True):
         save_data = {}
         for p_name, p_data in st.session_state.portfolios.items():
             save_data[p_name] = {
@@ -226,56 +242,76 @@ if st.session_state.current_loaded_file:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
         st.sidebar.success("✅ 파일 덮어쓰기 완료!")
 else:
-    st.sidebar.caption("포트폴리오를 불러오거나 생성하면 활성화됩니다.")
+    st.sidebar.caption("파일을 불러오거나 생성하면 활성화됩니다.")
 
 st.sidebar.markdown("---")
-st.sidebar.header("Portfolio Capital & Settings")
 
-for p_name, p_data in list(st.session_state.portfolios.items()):
+# ==========================================
+# 단일 작업공간(포트폴리오 스위칭) 
+# ==========================================
+st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
+selected_port = None
+
+if st.session_state.portfolios:
+    port_names = list(st.session_state.portfolios.keys())
+    selected_port = st.sidebar.selectbox("포트폴리오 전환 (Switch)", port_names)
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("💰 Capital & Settings")
+    
+    p_data = st.session_state.portfolios[selected_port]
     strat = p_data['strategy']
-    st.sidebar.markdown(f"**[{strat}] {p_name}**")
+    st.sidebar.markdown(f"**현재 활성화됨:** `[{strat}] {selected_port}`")
     
     new_cash = st.sidebar.number_input(
-        f"{p_name} 총 투자 운용 자산 (증/감액)", 
+        f"총 투자 운용 자산 (증/감액)", 
         value=int(p_data['cash']), 
         step=1_000_000, 
         format="%d", 
-        key=f"cash_input_{p_name}"
+        key=f"cash_input_{selected_port}"
     )
-    st.session_state.portfolios[p_name]['cash'] = new_cash
-    st.sidebar.caption(f"💰 설정 금액: **{new_cash:,.0f} 원**")
+    st.session_state.portfolios[selected_port]['cash'] = new_cash
+    st.sidebar.caption(f"💵 설정 금액: **{new_cash:,.0f} 원**")
     
-    # [수정] 삭제 시 파일 동기화 버그 완벽 조치
-    if st.sidebar.button(f"🗑️ {p_name} 삭제", key=f"del_{p_name}"):
-        del st.session_state.portfolios[p_name]
+    # [핵심 버그 수정 2] 삭제 시 파일 자체를 물리적으로 지우는 완벽 조치
+    if st.sidebar.button(f"🗑️ '{selected_port}' 포트폴리오 지우기", key=f"del_{selected_port}"):
+        del st.session_state.portfolios[selected_port]
         
         if st.session_state.current_loaded_file:
-            save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
             file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(save_data, f, ensure_ascii=False, indent=2)
-            st.sidebar.success(f"✅ '{p_name}' 삭제 및 파일 업데이트 완료!")
-        else:
-            st.session_state.current_loaded_file = None
             
+            if len(st.session_state.portfolios) == 0:
+                # 마지막 남은 포트폴리오를 지웠다면 껍데기 파일도 물리적으로 제거
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                st.session_state.current_loaded_file = None
+            else:
+                # 다른 포트폴리오가 남아있다면 정상 덮어쓰기 업데이트
+                save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(save_data, f, ensure_ascii=False, indent=2)
+                    
         st.rerun()
-    st.sidebar.markdown("---")
+else:
+    st.sidebar.info("👈 생성된 포트폴리오가 없습니다. 아래에서 새로 추가해 주세요.")
 
-st.sidebar.subheader("➕ Add New Portfolio")
+st.sidebar.markdown("---")
+st.sidebar.subheader("➕ 새 포트폴리오(시트) 추가")
 new_p_name = st.sidebar.text_input("새 포트폴리오 이름", key="new_p_name")
 new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"], key="new_p_strat")
 new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d", key="new_p_cash")
 
-if st.sidebar.button("포트폴리오 생성하기", use_container_width=True):
+if st.sidebar.button("새 포트폴리오 추가하기", use_container_width=True):
     if new_p_name and new_p_name not in st.session_state.portfolios:
         st.session_state.portfolios[new_p_name] = {
             'strategy': new_p_strat, 'cash': new_p_cash,
             'stocks': pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
         }
-        st.session_state.current_loaded_file = f"{new_p_name}.json"
+        if not st.session_state.current_loaded_file:
+            st.session_state.current_loaded_file = f"{new_p_name}.json"
         st.rerun()
     elif new_p_name in st.session_state.portfolios:
-        st.sidebar.warning("이미 존재합니다.")
+        st.sidebar.warning("이미 존재하는 이름입니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
@@ -303,398 +339,391 @@ tab1, tab2, tab3 = st.tabs(["Portfolio Configuration & Stock Pools", "Simulation
 with tab1:
     st.header("포트폴리오 종목 구성 및 실시간 진단")
     
-    if not st.session_state.portfolios:
+    if not selected_port:
         st.info("👈 좌측 사이드바에서 포트폴리오를 먼저 생성하거나 불러오세요.")
     else:
-        selected_port = st.selectbox("관리할 포트폴리오 선택", options=list(st.session_state.portfolios.keys()), key="tab1_port")
+        port_info = st.session_state.portfolios[selected_port]
+        current_strategy = port_info['strategy']
+        total_cash = port_info['cash']
+        st.subheader(f"📂 활성 포트폴리오: `{selected_port}` (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
         
-        if selected_port:
-            port_info = st.session_state.portfolios[selected_port]
-            current_strategy = port_info['strategy']
-            total_cash = port_info['cash']
-            st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
-            
-            # [스캐너 UI]
-            if current_strategy == '중소형주 (Satellite)':
-                st.markdown("---")
-                st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
-                st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 조정을 받은(Dip-Buying) 완벽한 타점을 찾아냅니다.")
-                
-                if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary") or st.session_state.show_scanner:
-                    st.session_state.show_scanner = True
-                    
-                    with st.spinner("코스닥 유동성 100개 종목의 거래량 및 방어 필터(200일선) 동기화 분석 중... (약 10초 소요)"):
-                        scan_result = run_satellite_scanner(use_ma200_filter)
-                        
-                        if not scan_result.empty:
-                            st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 조건 완벽 일치)")
-                            
-                            hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
-                            hc1.write("**종목명 (티커)**")
-                            hc2.write("**현재가**")
-                            hc3.write("**20일선 이격도**")
-                            hc4.write("**최대 수급(거래량)**")
-                            hc5.write("**포트폴리오 관리**")
-                            st.markdown("---")
-                            
-                            for idx, row in scan_result.iterrows():
-                                c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
-                                ticker = row['티커']
-                                name = row['종목명']
-                                
-                                c1.write(f"**{name}** (`{ticker}`)")
-                                c2.write(row['현재가'])
-                                c3.write(row['20일선 이격도'])
-                                c4.write(row['최근 최대 수급'])
-                                
-                                is_exist = False
-                                if not port_info['stocks'].empty and '티커' in port_info['stocks'].columns:
-                                    is_exist = (port_info['stocks']['티커'] == ticker).any()
-                                
-                                if is_exist:
-                                    c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
-                                else:
-                                    if c5.button("➕ 포트폴리오 추가", key=f"scan_{ticker}_add"):
-                                        new_row = pd.DataFrame({'종목명': [name], '티커': [ticker], '매수단가': [0], '보유수량': [0]})
-                                        comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
-                                        st.session_state.portfolios[selected_port]['stocks'] = comb
-                                        
-                                        if st.session_state.current_loaded_file:
-                                            save_data = {}
-                                            for p_name, p_data in st.session_state.portfolios.items():
-                                                save_data[p_name] = {'strategy': p_data['strategy'], 'cash': p_data['cash'], 'stocks': p_data['stocks'].to_dict(orient='records')}
-                                            with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
-                                                json.dump(save_data, f, ensure_ascii=False, indent=2)
-                                            st.toast(f"✅ {name} 추가 및 자동 저장 완료!")
-                                        
-                                        st.rerun() 
-                        else:
-                            st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
-            
+        # [스캐너 UI]
+        if current_strategy == '중소형주 (Satellite)':
             st.markdown("---")
-            st.markdown("### 📝 수동 종목 관리 (검색 / 삭제)")
-            col_manage1, col_manage2 = st.columns(2)
+            st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
+            st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 조정을 받은(Dip-Buying) 완벽한 타점을 찾아냅니다.")
             
-            with col_manage1:
-                st.markdown("**[➕ 수동 종목 검색 추가]**")
-                search_kw = st.text_input("추가할 종목명 검색", key=f"search_{selected_port}")
-                if search_kw:
-                    krx_df = load_krx_universe()
-                    filtered_stocks = krx_df[krx_df['Name'].str.contains(search_kw, case=False, na=False)]
-                    if not filtered_stocks.empty:
-                        display_options = [f"{row['Name']} ({row['Code']})" for _, row in filtered_stocks.iterrows()]
-                        selected_option = st.selectbox("검색 결과", display_options, key=f"sel_{selected_port}")
-                        if st.button("수동 종목 추가하기", key=f"add_btn_{selected_port}", use_container_width=True):
-                            sel_name = selected_option.split(" (")[0]
-                            sel_code = selected_option.split(" (")[1].replace(")", "")
+            if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary") or st.session_state.show_scanner:
+                st.session_state.show_scanner = True
+                
+                with st.spinner("코스닥 유동성 100개 종목의 거래량 및 방어 필터(200일선) 동기화 분석 중... (약 10초 소요)"):
+                    scan_result = run_satellite_scanner(use_ma200_filter)
+                    
+                    if not scan_result.empty:
+                        st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 조건 완벽 일치)")
+                        
+                        hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                        hc1.write("**종목명 (티커)**")
+                        hc2.write("**현재가**")
+                        hc3.write("**20일선 이격도**")
+                        hc4.write("**최대 수급(거래량)**")
+                        hc5.write("**포트폴리오 관리**")
+                        st.markdown("---")
+                        
+                        for idx, row in scan_result.iterrows():
+                            c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                            ticker = row['티커']
+                            name = row['종목명']
                             
-                            new_row = pd.DataFrame({'종목명': [sel_name], '티커': [sel_code], '매수단가': [0], '보유수량': [0]})
-                            comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
-                            st.session_state.portfolios[selected_port]['stocks'] = comb
+                            c1.write(f"**{name}** (`{ticker}`)")
+                            c2.write(row['현재가'])
+                            c3.write(row['20일선 이격도'])
+                            c4.write(row['최근 최대 수급'])
                             
-                            if st.session_state.current_loaded_file:
-                                save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
-                                with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
-                                    json.dump(save_data, f, ensure_ascii=False, indent=2)
-                                st.toast(f"✅ {sel_name} 수동 추가 및 자동 저장 완료!")
-                            st.rerun()
-
-            with col_manage2:
-                st.markdown("**[🗑️ 종목 삭제]**")
-                if not port_info['stocks'].empty:
-                    del_options = port_info['stocks']['종목명'].tolist()
-                    del_selected = st.selectbox("삭제할 종목 선택", del_options, key=f"del_sel_{selected_port}")
-                    if st.button("선택 종목 삭제하기", key=f"del_btn_{selected_port}", use_container_width=True):
-                        port_info['stocks'] = port_info['stocks'][port_info['stocks']['종목명'] != del_selected].reset_index(drop=True)
-                        st.session_state.portfolios[selected_port]['stocks'] = port_info['stocks']
+                            is_exist = False
+                            if not port_info['stocks'].empty and '티커' in port_info['stocks'].columns:
+                                is_exist = (port_info['stocks']['티커'] == ticker).any()
+                            
+                            if is_exist:
+                                c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
+                            else:
+                                if c5.button("➕ 포트폴리오 추가", key=f"scan_{ticker}_add"):
+                                    new_row = pd.DataFrame({'종목명': [name], '티커': [ticker], '매수단가': [0], '보유수량': [0]})
+                                    comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
+                                    st.session_state.portfolios[selected_port]['stocks'] = comb
+                                    
+                                    if st.session_state.current_loaded_file:
+                                        save_data = {}
+                                        for p_name, p_data in st.session_state.portfolios.items():
+                                            save_data[p_name] = {'strategy': p_data['strategy'], 'cash': p_data['cash'], 'stocks': p_data['stocks'].to_dict(orient='records')}
+                                        with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
+                                            json.dump(save_data, f, ensure_ascii=False, indent=2)
+                                        st.toast(f"✅ {name} 추가 및 자동 저장 완료!")
+                                    
+                                    st.rerun() 
+                    else:
+                        st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
+        
+        st.markdown("---")
+        st.markdown("### 📝 수동 종목 관리 (검색 / 삭제)")
+        col_manage1, col_manage2 = st.columns(2)
+        
+        with col_manage1:
+            st.markdown("**[➕ 수동 종목 검색 추가]**")
+            search_kw = st.text_input("추가할 종목명 검색", key=f"search_{selected_port}")
+            if search_kw:
+                krx_df = load_krx_universe()
+                filtered_stocks = krx_df[krx_df['Name'].str.contains(search_kw, case=False, na=False)]
+                if not filtered_stocks.empty:
+                    display_options = [f"{row['Name']} ({row['Code']})" for _, row in filtered_stocks.iterrows()]
+                    selected_option = st.selectbox("검색 결과", display_options, key=f"sel_{selected_port}")
+                    if st.button("수동 종목 추가하기", key=f"add_btn_{selected_port}", use_container_width=True):
+                        sel_name = selected_option.split(" (")[0]
+                        sel_code = selected_option.split(" (")[1].replace(")", "")
+                        
+                        new_row = pd.DataFrame({'종목명': [sel_name], '티커': [sel_code], '매수단가': [0], '보유수량': [0]})
+                        comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
+                        st.session_state.portfolios[selected_port]['stocks'] = comb
                         
                         if st.session_state.current_loaded_file:
                             save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
                             with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
                                 json.dump(save_data, f, ensure_ascii=False, indent=2)
-                            st.toast(f"✅ {del_selected} 삭제 및 자동 저장 완료!")
+                            st.toast(f"✅ {sel_name} 수동 추가 및 자동 저장 완료!")
                         st.rerun()
-                else:
-                    st.caption("현재 등록된 종목이 없습니다.")
 
-            st.markdown("---")
-            st.markdown("**현재 포트폴리오 보유 내역 (보유 중이라면 '매수단가'와 '보유수량' 입력)**")
+        with col_manage2:
+            st.markdown("**[🗑️ 종목 삭제]**")
+            if not port_info['stocks'].empty:
+                del_options = port_info['stocks']['종목명'].tolist()
+                del_selected = st.selectbox("삭제할 종목 선택", del_options, key=f"del_sel_{selected_port}")
+                if st.button("선택 종목 삭제하기", key=f"del_btn_{selected_port}", use_container_width=True):
+                    port_info['stocks'] = port_info['stocks'][port_info['stocks']['종목명'] != del_selected].reset_index(drop=True)
+                    st.session_state.portfolios[selected_port]['stocks'] = port_info['stocks']
+                    
+                    if st.session_state.current_loaded_file:
+                        save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
+                        with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
+                            json.dump(save_data, f, ensure_ascii=False, indent=2)
+                        st.toast(f"✅ {del_selected} 삭제 및 자동 저장 완료!")
+                    st.rerun()
+            else:
+                st.caption("현재 등록된 종목이 없습니다.")
+
+        st.markdown("---")
+        st.markdown("**현재 포트폴리오 보유 내역 (보유 중이라면 '매수단가'와 '보유수량' 입력)**")
+        
+        edited_df = st.data_editor(
+            port_info['stocks'], num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
+        )
+        st.session_state.portfolios[selected_port]['stocks'] = edited_df
+        
+        if st.session_state.current_loaded_file:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True, type="primary"):
+                save_data = {}
+                for p_name, p_data in st.session_state.portfolios.items():
+                    save_data[p_name] = {
+                        'strategy': p_data['strategy'], 'cash': p_data['cash'],
+                        'stocks': p_data['stocks'].to_dict(orient='records')
+                    }
+                file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(save_data, f, ensure_ascii=False, indent=2)
+                st.success("✅ 포트폴리오 변경사항이 즉시 저장되었습니다!")
+
+        st.markdown("---")
+        st.subheader("🩺 실시간 매매 액션 플랜 및 증/감액 동적 리밸런싱 진단")
+        
+        run_btn = st.button("수동으로 진단 실행", type="secondary")
+        
+        if run_btn or st.session_state.auto_diagnose:
+            st.session_state.auto_diagnose = False
             
-            edited_df = st.data_editor(
-                port_info['stocks'], num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
-            )
-            st.session_state.portfolios[selected_port]['stocks'] = edited_df
-            
-            if st.session_state.current_loaded_file:
-                st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True, type="primary"):
-                    save_data = {}
-                    for p_name, p_data in st.session_state.portfolios.items():
-                        save_data[p_name] = {
-                            'strategy': p_data['strategy'], 'cash': p_data['cash'],
-                            'stocks': p_data['stocks'].to_dict(orient='records')
+            if edited_df.empty:
+                st.warning("진단할 종목이 없습니다.")
+            else:
+                with st.spinner("거시 지표 및 개별 종목 필터, 자본 증감액 룰 분석 중..."):
+                    vix_val, vix_contrarian, vix_safe, kospi_ret_60 = fetch_market_data()
+                    
+                    vix_text = f"VIX {vix_val:.1f}"
+                    if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 포착)"
+                    elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
+                    else: vix_status = f"{vix_text}(시장 경계/공포)"
+
+                    stock_data_cache = {}
+                    buy_scores = {}
+                    buf = whipsaw_buffer / 100.0
+                    
+                    for idx, row in edited_df.iterrows():
+                        s_ticker = row['티커']
+                        s_name = row['종목명']
+                        buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
+                        quantity = pd.to_numeric(row.get('보유수량', 0), errors='coerce')
+                        if pd.isna(buy_price): buy_price = 0
+                        if pd.isna(quantity): quantity = 0
+                        is_holding = (quantity > 0) and (buy_price > 0)
+                        
+                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200 = fetch_stock_status(s_ticker)
+                        if c_price is None: continue
+                        
+                        stock_data_cache[s_name] = {
+                            'price': c_price, 'ma200': ma200, 'ma60': ma60, 'ma20': ma20, 
+                            'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 'ret_20': ret_20,
+                            'ma60_slope': ma60_slope_positive, 'is_above_ma200': is_above_ma200, 'is_holding': is_holding,
+                            'qty': quantity
                         }
-                    file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        json.dump(save_data, f, ensure_ascii=False, indent=2)
-                    st.success("✅ 포트폴리오 변경사항이 즉시 저장되었습니다!")
-
-            st.markdown("---")
-            st.subheader("🩺 실시간 매매 액션 플랜 및 증/감액 동적 리밸런싱 진단")
-            
-            run_btn = st.button("수동으로 진단 실행", type="secondary")
-            
-            if run_btn or st.session_state.auto_diagnose:
-                st.session_state.auto_diagnose = False
-                
-                if edited_df.empty:
-                    st.warning("진단할 종목이 없습니다.")
-                else:
-                    with st.spinner("거시 지표 및 개별 종목 필터, 자본 증감액 룰 분석 중..."):
-                        vix_val, vix_contrarian, vix_safe, kospi_ret_60 = fetch_market_data()
                         
-                        vix_text = f"VIX {vix_val:.1f}"
-                        if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 포착)"
-                        elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
-                        else: vix_status = f"{vix_text}(시장 경계/공포)"
-
-                        stock_data_cache = {}
-                        buy_scores = {}
-                        buf = whipsaw_buffer / 100.0
+                        vol_strong = vol_ratio >= 150.0
+                        rs_strong = ret_60 > kospi_ret_60
+                        ma200_pass = (not use_ma200_filter) or is_above_ma200
                         
-                        for idx, row in edited_df.iterrows():
-                            s_ticker = row['티커']
-                            s_name = row['종목명']
-                            buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
-                            quantity = pd.to_numeric(row.get('보유수량', 0), errors='coerce')
-                            if pd.isna(buy_price): buy_price = 0
-                            if pd.isna(quantity): quantity = 0
-                            is_holding = (quantity > 0) and (buy_price > 0)
-                            
-                            c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200 = fetch_stock_status(s_ticker)
-                            if c_price is None: continue
-                            
-                            stock_data_cache[s_name] = {
-                                'price': c_price, 'ma200': ma200, 'ma60': ma60, 'ma20': ma20, 
-                                'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 'ret_20': ret_20,
-                                'ma60_slope': ma60_slope_positive, 'is_above_ma200': is_above_ma200, 'is_holding': is_holding,
-                                'qty': quantity
-                            }
-                            
-                            vol_strong = vol_ratio >= 150.0
-                            rs_strong = ret_60 > kospi_ret_60
-                            ma200_pass = (not use_ma200_filter) or is_above_ma200
-                            
-                            if current_strategy == '대형주 (Core)':
-                                if ma200_pass and (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian):
-                                    score = 1.0
-                                    if vol_strong: score += 0.5
-                                    if rs_strong: score += 0.5
-                                    if vix_contrarian: score += 1.0
-                                    buy_scores[s_name] = score
-                            else:
-                                dist_ma20 = ((c_price / ma20) - 1) * 100
-                                is_dip = -2.0 <= dist_ma20 <= 2.0
-                                # [수정] 진단 엔진에도 낙폭 허용치를 -30%로 완화 적용
-                                if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0:
-                                    score = 1.0
-                                    if vol_strong: score += 1.0
-                                    if rs_strong: score += 0.5
-                                    if vix_contrarian: score += 1.0
-                                    buy_scores[s_name] = score
-
-                        total_score = sum(buy_scores.values()) if buy_scores else 1.0
-                        
-                        current_max_alloc_ratio = max_alloc_pct / 100.0
-                        if bull_market_boost and kospi_ret_60 > 0:
-                            current_max_alloc_ratio = min(current_max_alloc_ratio * 1.5, 1.0)
-
-                        current_stock_eval = sum((data['qty'] * data['price']) for data in stock_data_cache.values() if data['is_holding'])
-                        
-                        available_cash = total_cash - current_stock_eval
-                        force_sell_plans = {}
-                        
-                        if available_cash < 0:
-                            deficit = abs(available_cash)
-                            held_stocks_info = [
-                                {'name': k, 'eval_amt': v['qty'] * v['price'], 'price': v['price'], 'score': buy_scores.get(k, 0.0), 'ret_20': v['ret_20']}
-                                for k, v in stock_data_cache.items() if v['is_holding']
-                            ]
-                            held_stocks_info.sort(key=lambda x: (x['score'], x['ret_20']))
-                            
-                            for stock in held_stocks_info:
-                                if deficit <= 0: break
-                                s_name = stock['name']
-                                eval_amt = stock['eval_amt']
-                                price = stock['price']
-                                
-                                if eval_amt <= deficit:
-                                    force_sell_plans[s_name] = "🔴 전량 매도 (설정 투자금 감액에 따른 우선 청산)"
-                                    deficit -= eval_amt
-                                else:
-                                    sell_qty = int(np.ceil(deficit / price))
-                                    force_sell_plans[s_name] = f"🟡 부분 매도 (설정 투자금 감액 맞춤: {sell_qty}주 매도)"
-                                    deficit = 0
-
-                        current_cash = max(available_cash, 0)
-
-                        results = []
-                        for idx, row in edited_df.iterrows():
-                            s_name = row['종목명']
-                            
-                            if s_name not in stock_data_cache:
-                                results.append({'종목명': s_name, '상태': '알수없음', '현재가': '-', '액션 플랜': '⚠️ 확인 불가', '상세 AI 판단 근거': '-'})
-                                continue
-                                
-                            data = stock_data_cache[s_name]
-                            c_price = data['price']
-                            is_holding = data['is_holding']
-                            holding_status = "보유중" if is_holding else "신규/관심"
-                            
-                            vol_strong = data['vol_ratio'] >= 150.0
-                            rs_strong = data['ret_60'] > kospi_ret_60
-                            vol_status = f"거래량 {data['vol_ratio']:.0f}%(수급 급증)" if vol_strong else (f"거래량 {data['vol_ratio']:.0f}%(수급 보통)" if data['vol_ratio'] >= 80 else f"거래량 {data['vol_ratio']:.0f}%(수급 침체)")
-                            rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
-                            ma200_status = "200일선 상회" if data['is_above_ma200'] else "200일선 하회"
-
-                            ma20, ma60, ret_20, ma60_slope_positive = data['ma20'], data['ma60'], data['ret_20'], data['ma60_slope']
-                            diff_ma = ((ma20 / ma60) - 1) * 100
+                        if current_strategy == '대형주 (Core)':
+                            if ma200_pass and (((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian):
+                                score = 1.0
+                                if vol_strong: score += 0.5
+                                if rs_strong: score += 0.5
+                                if vix_contrarian: score += 1.0
+                                buy_scores[s_name] = score
+                        else:
                             dist_ma20 = ((c_price / ma20) - 1) * 100
+                            is_dip = -2.0 <= dist_ma20 <= 2.0
+                            if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0:
+                                score = 1.0
+                                if vol_strong: score += 1.0
+                                if rs_strong: score += 0.5
+                                if vix_contrarian: score += 1.0
+                                buy_scores[s_name] = score
+
+                    total_score = sum(buy_scores.values()) if buy_scores else 1.0
+                    
+                    current_max_alloc_ratio = max_alloc_pct / 100.0
+                    if bull_market_boost and kospi_ret_60 > 0:
+                        current_max_alloc_ratio = min(current_max_alloc_ratio * 1.5, 1.0)
+
+                    current_stock_eval = sum((data['qty'] * data['price']) for data in stock_data_cache.values() if data['is_holding'])
+                    
+                    available_cash = total_cash - current_stock_eval
+                    force_sell_plans = {}
+                    
+                    if available_cash < 0:
+                        deficit = abs(available_cash)
+                        held_stocks_info = [
+                            {'name': k, 'eval_amt': v['qty'] * v['price'], 'price': v['price'], 'score': buy_scores.get(k, 0.0), 'ret_20': v['ret_20']}
+                            for k, v in stock_data_cache.items() if v['is_holding']
+                        ]
+                        held_stocks_info.sort(key=lambda x: (x['score'], x['ret_20']))
+                        
+                        for stock in held_stocks_info:
+                            if deficit <= 0: break
+                            s_name = stock['name']
+                            eval_amt = stock['eval_amt']
+                            price = stock['price']
                             
-                            if current_strategy == '대형주 (Core)':
-                                tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
+                            if eval_amt <= deficit:
+                                force_sell_plans[s_name] = "🔴 전량 매도 (설정 투자금 감액에 따른 우선 청산)"
+                                deficit -= eval_amt
                             else:
-                                tech_text = f"20일선 이격 {dist_ma20:+.2f}% (눌림목 타점)"
-                                
-                            slope_status = "60일선 우상향" if ma60_slope_positive else "60일선 횡보/우하향"
+                                sell_qty = int(np.ceil(deficit / price))
+                                force_sell_plans[s_name] = f"🟡 부분 매도 (설정 투자금 감액 맞춤: {sell_qty}주 매도)"
+                                deficit = 0
 
-                            stock_weight = (buy_scores.get(s_name, 1.0) / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
-                            target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio)
-                            current_val = data['qty'] * c_price
-                            diff_amt = target_amt - current_val
+                    current_cash = max(available_cash, 0)
 
-                            if is_holding and s_name in force_sell_plans:
-                                action = force_sell_plans[s_name]
-                                detail = f"[{tech_text}] | [{rs_status}]\n➔ ⚠️ 총 투자 운용 자산이 감액 설정됨에 따라, AI 모멘텀이 가장 낮은 본 종목을 우선 매도하여 현금 비중을 맞춥니다."
+                    results = []
+                    for idx, row in edited_df.iterrows():
+                        s_name = row['종목명']
+                        
+                        if s_name not in stock_data_cache:
+                            results.append({'종목명': s_name, '상태': '알수없음', '현재가': '-', '액션 플랜': '⚠️ 확인 불가', '상세 AI 판단 근거': '-'})
+                            continue
                             
-                            elif current_strategy == '대형주 (Core)':
-                                if is_holding: 
-                                    if ma20 >= ma60 * (1 - buf/2): 
-                                        add_cond = ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian
-                                        if diff_amt > 0 and current_cash >= c_price and add_cond:
-                                            add_shares = int(min(diff_amt, current_cash) // c_price)
-                                            if add_shares > 0:
-                                                action = f"🟢 추가 매수 (비중 확대: {add_shares}주 추가)"
-                                                detail = f"[{tech_text}] | [{rs_status}]\n➔ 자본 증액 또는 모멘텀 우위로 비중을 리밸런싱(확대)합니다."
-                                            else:
-                                                action = "🟢 보유 유지"
-                                                detail = f"[{tech_text}] | [{vix_status}]\n➔ 정배열 추세 지속 중."
-                                        elif diff_amt < -c_price: 
-                                            reduce_shares = int(abs(diff_amt) // c_price)
-                                            action = f"🟡 부분 매도 (비중 조절: {reduce_shares}주 매도)"
-                                            detail = f"[{tech_text}]\n➔ 목표 비중 초과로 부분 익절 리밸런싱을 진행합니다."
+                        data = stock_data_cache[s_name]
+                        c_price = data['price']
+                        is_holding = data['is_holding']
+                        holding_status = "보유중" if is_holding else "신규/관심"
+                        
+                        vol_strong = data['vol_ratio'] >= 150.0
+                        rs_strong = data['ret_60'] > kospi_ret_60
+                        vol_status = f"거래량 {data['vol_ratio']:.0f}%(수급 급증)" if vol_strong else (f"거래량 {data['vol_ratio']:.0f}%(수급 보통)" if data['vol_ratio'] >= 80 else f"거래량 {data['vol_ratio']:.0f}%(수급 침체)")
+                        rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
+                        ma200_status = "200일선 상회" if data['is_above_ma200'] else "200일선 하회"
+
+                        ma20, ma60, ret_20, ma60_slope_positive = data['ma20'], data['ma60'], data['ret_20'], data['ma60_slope']
+                        diff_ma = ((ma20 / ma60) - 1) * 100
+                        dist_ma20 = ((c_price / ma20) - 1) * 100
+                        
+                        if current_strategy == '대형주 (Core)':
+                            tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
+                        else:
+                            tech_text = f"20일선 이격 {dist_ma20:+.2f}% (눌림목 타점)"
+                            
+                        slope_status = "60일선 우상향" if ma60_slope_positive else "60일선 횡보/우하향"
+
+                        stock_weight = (buy_scores.get(s_name, 1.0) / total_score) if total_score > 0 else (1 / max(len(buy_scores), 1))
+                        target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio)
+                        current_val = data['qty'] * c_price
+                        diff_amt = target_amt - current_val
+
+                        if is_holding and s_name in force_sell_plans:
+                            action = force_sell_plans[s_name]
+                            detail = f"[{tech_text}] | [{rs_status}]\n➔ ⚠️ 총 투자 운용 자산이 감액 설정됨에 따라, AI 모멘텀이 가장 낮은 본 종목을 우선 매도하여 현금 비중을 맞춥니다."
+                        
+                        elif current_strategy == '대형주 (Core)':
+                            if is_holding: 
+                                if ma20 >= ma60 * (1 - buf/2): 
+                                    add_cond = ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian
+                                    if diff_amt > 0 and current_cash >= c_price and add_cond:
+                                        add_shares = int(min(diff_amt, current_cash) // c_price)
+                                        if add_shares > 0:
+                                            action = f"🟢 추가 매수 (비중 확대: {add_shares}주 추가)"
+                                            detail = f"[{tech_text}] | [{rs_status}]\n➔ 자본 증액 또는 모멘텀 우위로 비중을 리밸런싱(확대)합니다."
                                         else:
                                             action = "🟢 보유 유지"
-                                            detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중."
-                                    else: 
-                                        action = "🔴 전량 매도 (현금화)"
-                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
+                                            detail = f"[{tech_text}] | [{vix_status}]\n➔ 정배열 추세 지속 중."
+                                    elif diff_amt < -c_price: 
+                                        reduce_shares = int(abs(diff_amt) // c_price)
+                                        action = f"🟡 부분 매도 (비중 조절: {reduce_shares}주 매도)"
+                                        detail = f"[{tech_text}]\n➔ 목표 비중 초과로 부분 익절 리밸런싱을 진행합니다."
+                                    else:
+                                        action = "🟢 보유 유지"
+                                        detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 지속 중."
                                 else: 
-                                    if (use_ma200_filter and not data['is_above_ma200']):
-                                        action = "🟡 진입 보류 (200일선 하회)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선(200일선) 아래에 위치하여 진입 금지(하락장 방어)."
-                                    elif ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
+                                    action = "🔴 전량 매도 (현금화)"
+                                    detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
+                            else: 
+                                if (use_ma200_filter and not data['is_above_ma200']):
+                                    action = "🟡 진입 보류 (200일선 하회)"
+                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선(200일선) 아래에 위치하여 진입 금지(하락장 방어)."
+                                elif ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
+                                    rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
+                                    if rec_shares > 0:
+                                        action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
+                                        reason = "V자 반등 바닥잡기" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 및 200일선 통과"
+                                        detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}] | [{vol_status}]\n➔ {reason} 검증 완료."
+                                    else:
+                                        action = "🟡 진입 보류 (현금 부족)"
+                                        detail = f"[{tech_text}]\n➔ 가용 현금 부족."
+                                else: 
+                                    action = "🟡 진입 보류 (관망)"
+                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 가짜 반등(휩소) 구간으로 진입 보류."
+                        else: # 중소형주 (Satellite)
+                            if is_holding: 
+                                buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
+                                user_ret = ((c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                                tech_text_sat = f"수익률 {user_ret:+.2f}%"
+                                
+                                if user_ret <= (sat_stop_loss): 
+                                    action = "🔴 강제 손절 집행"
+                                    detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷."
+                                elif ma20 >= ma60 * (1 - buf/2):
+                                    is_dip = -2.0 <= dist_ma20 <= 2.0
+                                    add_cond = (is_dip or vix_contrarian) and data['drawdown'] >= -30.0
+                                    if diff_amt > 0 and current_cash >= c_price and add_cond:
+                                        add_shares = int(min(diff_amt, current_cash) // c_price)
+                                        if add_shares > 0:
+                                            action = f"🟢 추가 매수 (비중 확대: {add_shares}주 추가)"
+                                            detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 자본 증액 반영 추가 매수."
+                                        else:
+                                            action = "🟢 보유 유지"
+                                            detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩."
+                                    elif diff_amt < -c_price:
+                                        reduce_shares = int(abs(diff_amt) // c_price)
+                                        action = f"🟡 부분 매도 (비중 조절: {reduce_shares}주 매도)"
+                                        detail = f"[{tech_text_sat}]\n➔ 목표 비중 조절."
+                                    else:
+                                        action = "🟢 보유 유지"
+                                        detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
+                                else:
+                                    action = "🔴 전량 매도"
+                                    detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 완전 이탈."
+                            else: 
+                                if (use_ma200_filter and not data['is_above_ma200']):
+                                    action = "🟡 진입 보류 (200일선 하회)"
+                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
+                                else:
+                                    is_dip = -2.0 <= dist_ma20 <= 2.0
+                                    if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0: 
                                         rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            reason = "V자 반등 바닥잡기" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 및 200일선 통과"
-                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}] | [{vol_status}]\n➔ {reason} 검증 완료."
+                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 20일선 눌림목 타점 정확히 진입."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}]\n➔ 가용 현금 부족."
+                                            detail = f"[{tech_text}]\n➔ 현금 부족."
                                     else: 
-                                        action = "🟡 진입 보류 (관망)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 가짜 반등(휩소) 구간으로 진입 보류."
-                            else: # 중소형주 (Satellite)
-                                if is_holding: 
-                                    buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
-                                    user_ret = ((c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
-                                    tech_text_sat = f"수익률 {user_ret:+.2f}%"
-                                    
-                                    # [수정] 긴급 손절 기준을 '사용자 매수가 기준 수익률'로 완벽 분리
-                                    if user_ret <= (sat_stop_loss): 
-                                        action = "🔴 강제 손절 집행"
-                                        detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷."
-                                    elif ma20 >= ma60 * (1 - buf/2):
-                                        is_dip = -2.0 <= dist_ma20 <= 2.0
-                                        add_cond = (is_dip or vix_contrarian) and data['drawdown'] >= -30.0
-                                        if diff_amt > 0 and current_cash >= c_price and add_cond:
-                                            add_shares = int(min(diff_amt, current_cash) // c_price)
-                                            if add_shares > 0:
-                                                action = f"🟢 추가 매수 (비중 확대: {add_shares}주 추가)"
-                                                detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 자본 증액 반영 추가 매수."
-                                            else:
-                                                action = "🟢 보유 유지"
-                                                detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩."
-                                        elif diff_amt < -c_price:
-                                            reduce_shares = int(abs(diff_amt) // c_price)
-                                            action = f"🟡 부분 매도 (비중 조절: {reduce_shares}주 매도)"
-                                            detail = f"[{tech_text_sat}]\n➔ 목표 비중 조절."
-                                        else:
-                                            action = "🟢 보유 유지"
-                                            detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
-                                    else:
-                                        action = "🔴 전량 매도"
-                                        detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 완전 이탈."
-                                else: 
-                                    if (use_ma200_filter and not data['is_above_ma200']):
-                                        action = "🟡 진입 보류 (200일선 하회)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
-                                    else:
-                                        is_dip = -2.0 <= dist_ma20 <= 2.0
-                                        if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0: 
-                                            rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
-                                            if rec_shares > 0:
-                                                action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                                detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 20일선 눌림목 타점 정확히 진입."
-                                            else:
-                                                action = "🟡 진입 보류 (현금 부족)"
-                                                detail = f"[{tech_text}]\n➔ 현금 부족."
-                                        else: 
-                                            action = "🟡 진입 보류 (타점 대기)"
-                                            detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(±2%) 및 스캐너 조건 대기 중."
-                                    
-                            results.append({
-                                '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
-                                '액션 플랜': action, '상세 AI 판단 근거': detail
-                            })
-                        
-                        warning_msg = "⚠️ **[투자금 감액 감지]** 감액된 투자금에 맞춰 최약체 종목 우선 청산 액션 플랜이 발동되었습니다." if available_cash < 0 else ""
-                        boost_msg = f" (🔥강세장 부스터 작동 중: 한도 최대 {current_max_alloc_ratio*100:.0f}%)" if (bull_market_boost and kospi_ret_60 > 0) else ""
-                        st.info(f"📊 **[스마트 자금 리밸런싱 및 현금 현황]**\n\n"
-                                f"• **총 운용 설정 자산:** `{total_cash:,.0f} 원`\n"
-                                f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
-                                f"• **운용 특징:** 투자금을 증액하면 추가 매수를 지시하고, 감액 시 최약체부터 우선 청산하는 산식이 100% 반영되었습니다.\n"
-                                f"{warning_msg}{boost_msg}")
-                        st.table(pd.DataFrame(results))
+                                        action = "🟡 진입 보류 (타점 대기)"
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(±2%) 및 스캐너 조건 대기 중."
+                                
+                        results.append({
+                            '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
+                            '액션 플랜': action, '상세 AI 판단 근거': detail
+                        })
+                    
+                    warning_msg = "⚠️ **[투자금 감액 감지]** 감액된 투자금에 맞춰 최약체 종목 우선 청산 액션 플랜이 발동되었습니다." if available_cash < 0 else ""
+                    boost_msg = f" (🔥강세장 부스터 작동 중: 한도 최대 {current_max_alloc_ratio*100:.0f}%)" if (bull_market_boost and kospi_ret_60 > 0) else ""
+                    st.info(f"📊 **[스마트 자금 리밸런싱 및 현금 현황]**\n\n"
+                            f"• **총 운용 설정 자산:** `{total_cash:,.0f} 원`\n"
+                            f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
+                            f"• **운용 특징:** 투자금을 증액하면 추가 매수를 지시하고, 감액 시 최약체부터 우선 청산하는 산식이 100% 반영되었습니다.\n"
+                            f"{warning_msg}{boost_msg}")
+                    st.table(pd.DataFrame(results))
 
 with tab2:
     st.header("Simulation & Backtest")
     st.markdown("과거 주가 데이터를 바탕으로 **매매 수수료 누락 산식이 완벽히 보정된 초과수익 엔진**을 검증합니다.")
 
-    if not st.session_state.portfolios:
+    if not selected_port:
         st.warning("포트폴리오가 없습니다.")
     else:
-        col_sim1, col_sim2, col_sim3 = st.columns(3)
+        col_sim1, col_sim2 = st.columns(2)
         with col_sim1:
-            sim_port = st.selectbox("시뮬레이션 할 포트폴리오 선택", list(st.session_state.portfolios.keys()), key="sim_port")
-        with col_sim2:
             start_date = st.date_input("시작일", datetime.date(2023, 1, 1))
-        with col_sim3:
+        with col_sim2:
             end_date = st.date_input("종료일", datetime.date.today())
 
-        if st.button("고수익 모멘텀 시뮬레이션 및 벤치마크 비교 생성", type="primary", use_container_width=True):
-            port_data = st.session_state.portfolios[sim_port]
+        if st.button(f"'{selected_port}' 고수익 모멘텀 시뮬레이션 실행", type="primary", use_container_width=True):
+            port_data = st.session_state.portfolios[selected_port]
             stocks = port_data['stocks']
             strat = port_data['strategy']
             init_cash = port_data['cash']
@@ -814,7 +843,6 @@ with tab2:
                             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
                             is_dip = (dist_ma20 >= -2.0) & (dist_ma20 <= 2.0)
                             
-                            # [수정] 120일 기준 절대 낙폭(Drawdown) 허용을 -30%로 완화. 강제 아웃(exit_cond)에서 낙폭 룰 완전 제거.
                             entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
                             exit_cond = ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
                         
@@ -900,7 +928,6 @@ with tab2:
                                     if curr_ret >= ts_target and drop_from_peak <= ts_drop:
                                         trailing_stop_exit = True
                                 
-                                # [수정] 긴급 손절을 오직 사용자 매수가 기준 수익률(user_ret)로만 발동되도록 완벽 교정
                                 force_exit = False
                                 if strat != '대형주 (Core)' and shares[name] > 0 and avg_buy_price[name] > 0:
                                     user_ret = (c_price / avg_buy_price[name]) - 1
