@@ -8,6 +8,7 @@ import json
 import os
 import glob
 import datetime
+import re
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -19,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **단일 작업공간 UI & 좀비 파일 완전삭제**, **스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **1:1 직관적 파일 관리**, **스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -29,7 +30,33 @@ if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 
 # ==========================================
-# 1. 한국 시장 전 종목 데이터베이스 로드 
+# [핵심] 구버전 좀비 파일 청소 및 마이그레이션 로직 (최초 1회 자동 실행)
+# ==========================================
+raw_files = glob.glob(f"{SAVE_DIR}/*.json")
+for f_path in raw_files:
+    try:
+        with open(f_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 1. 속이 텅 빈 찌꺼기 파일이면 삭제
+        if not data:
+            os.remove(f_path)
+            continue
+            
+        # 2. 구버전 포맷(파일 하나에 여러 포트폴리오가 묶인 형태) 감지 및 분리
+        if 'strategy' not in data:
+            for p_name, p_data in data.items():
+                safe_name = re.sub(r'[\\/*?:"<>|]', "", p_name) # 윈도우 파일명 오류 방지
+                new_path = os.path.join(SAVE_DIR, f"{safe_name}.json")
+                with open(new_path, 'w', encoding='utf-8') as out_f:
+                    json.dump(p_data, out_f, ensure_ascii=False, indent=2)
+            os.remove(f_path) # 분리 완료 후 기존 묶음 파일은 폐기
+    except Exception:
+        try: os.remove(f_path) # 읽을 수 없는 깨진 파일 폐기
+        except: pass
+
+# ==========================================
+# 1. 데이터 수집 함수 모음
 # ==========================================
 @st.cache_data(ttl=86400)
 def load_krx_universe():
@@ -37,13 +64,9 @@ def load_krx_universe():
         df = fdr.StockListing('KRX')
         df = df.dropna(subset=['Code', 'Name'])
         return df
-    except Exception as e:
-        st.error("종목 데이터를 불러오는데 실패했습니다.")
+    except Exception:
         return pd.DataFrame(columns=['Code', 'Name', 'Market', 'Marcap', 'Amount'])
 
-# ==========================================
-# 거시 지표 수집 함수
-# ==========================================
 @st.cache_data(ttl=1800)
 def fetch_market_data():
     try:
@@ -61,23 +84,17 @@ def fetch_market_data():
             kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100
         else:
             kospi_ret_60 = 0.0
-            
         return vix_val, vix_contrarian, vix_safe, kospi_ret_60
     except:
         return 20.0, False, True, 0.0
 
-# ==========================================
-# 실시간 주가 지표 수집 함수
-# ==========================================
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
     try:
         for suffix in ['.KS', '.KQ']:
             df = yf.download(f"{ticker_code}{suffix}", period="2y", progress=False)
             if not df.empty and len(df) > 0:
-                if isinstance(df.columns, pd.MultiIndex): 
-                    df.columns = df.columns.get_level_values(0)
-                
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 close_prices = df['Close'].dropna()
                 volumes = df['Volume'].dropna()
                 if len(close_prices) == 0: continue
@@ -96,23 +113,16 @@ def fetch_stock_status(ticker_code):
                 
                 ret_60 = ((current_price / float(close_prices.iloc[-60])) - 1) * 100 if len(close_prices) >= 60 else 0.0
                 ret_20 = ((current_price / float(close_prices.iloc[-20])) - 1) * 100 if len(close_prices) >= 20 else 0.0
-                
                 ma60_slope_positive = (ma60 > ma60_10d_ago) 
                 is_above_ma200 = (current_price >= ma200) 
-                
                 return current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200
-    except Exception:
-        pass
+    except Exception: pass
     return None, None, None, None, None, None, None, None, False, False
 
-# ==========================================
-# 진단 로직과 동기화된 중소형주 눌림목 스캐너 
-# ==========================================
 @st.cache_data(ttl=3600)
 def run_satellite_scanner(use_ma200_filter_flag):
     results = []
     krx = load_krx_universe()
-    
     try:
         kosdaq = krx[(krx['Market'] == 'KOSDAQ') | (krx['Market'] == 'KOSDAQ GLOBAL')]
         if 'Marcap' in kosdaq.columns and 'Amount' in kosdaq.columns:
@@ -120,8 +130,7 @@ def run_satellite_scanner(use_ma200_filter_flag):
             candidates = kosdaq.sort_values('Amount', ascending=False).head(100)
         else:
             candidates = kosdaq.head(100)
-    except:
-        return []
+    except: return []
 
     for idx, row in candidates.iterrows():
         code = row['Code']
@@ -147,7 +156,6 @@ def run_satellite_scanner(use_ma200_filter_flag):
             
             recent_20d_vol_max = df['Vol_Ratio'].tail(20).max()
             vol_surged = recent_20d_vol_max >= 200.0
-            
             dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
             is_dip_buying = -2.0 <= dist_from_ma20 <= 2.0
             
@@ -157,176 +165,105 @@ def run_satellite_scanner(use_ma200_filter_flag):
             
             if vol_surged and is_dip_buying and ma200_pass and dd_pass:
                 results.append({
-                    '종목명': name,
-                    '티커': code,
-                    '현재가': f"{current_close:,.0f} 원",
-                    '20일선 이격도': f"{dist_from_ma20:+.2f}%",
-                    '최근 최대 수급': f"{recent_20d_vol_max:,.0f}%",
+                    '종목명': name, '티커': code, '현재가': f"{current_close:,.0f} 원",
+                    '20일선 이격도': f"{dist_from_ma20:+.2f}%", '최근 최대 수급': f"{recent_20d_vol_max:,.0f}%",
                     '진단 근거': "수급 유입 후 20일선 안착"
                 })
-        except:
-            continue
-            
+        except: continue
     return pd.DataFrame(results)
 
 # ==========================================
-# 2. 데이터 저장소 초기화 및 트래킹
+# 2. 세션 트래킹 초기화
 # ==========================================
-if 'portfolios' not in st.session_state:
-    st.session_state.portfolios = {}
 if 'auto_diagnose' not in st.session_state:
     st.session_state.auto_diagnose = False
-if 'current_loaded_file' not in st.session_state:
-    st.session_state.current_loaded_file = None
 if 'show_scanner' not in st.session_state:
     st.session_state.show_scanner = False
 
 # ==========================================
-# 3. 사이드바: 퀵 세이브 및 찌꺼기 파일 클린업 (중요 버그 패치)
-# ==========================================
-st.sidebar.header("📂 내 PC 포트폴리오 불러오기")
-
-raw_files = glob.glob(f"{SAVE_DIR}/*.json")
-valid_files = []
-
-# [버그 패치] 윈도우 파일 잠금(Lock)을 피하기 위해 파일을 닫은 후 삭제 진행
-for f_path in raw_files:
-    is_empty_or_corrupt = False
-    try:
-        with open(f_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            if not data: # 텅 빈 파일인지 검사
-                is_empty_or_corrupt = True
-    except Exception:
-        is_empty_or_corrupt = True # 읽을 수 없는 깨진 파일
-
-    if is_empty_or_corrupt:
-        try:
-            os.remove(f_path) # 파일을 닫은 후 안전하게 영구 삭제
-        except Exception:
-            pass
-    else:
-        valid_files.append(f_path)
-
-if valid_files:
-    file_names = [os.path.basename(f) for f in valid_files]
-    selected_file = st.sidebar.selectbox("저장된 파일 선택", file_names)
-    
-    if st.sidebar.button("🚀 포트폴리오 팩 불러오기", use_container_width=True):
-        try:
-            with open(os.path.join(SAVE_DIR, selected_file), 'r', encoding='utf-8') as f:
-                loaded_data = json.load(f)
-                new_portfolios = {}
-                for p_name, p_data in loaded_data.items():
-                    new_portfolios[p_name] = {
-                        'strategy': p_data['strategy'],
-                        'cash': p_data['cash'],
-                        'stocks': pd.DataFrame(p_data['stocks'])
-                    }
-                st.session_state.portfolios = new_portfolios
-                st.session_state.current_loaded_file = selected_file
-                st.session_state.auto_diagnose = True
-                st.session_state.show_scanner = False
-                st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"불러오기 실패: {e}")
-else:
-    st.sidebar.caption("저장된 포트폴리오 파일이 없습니다.")
-
-st.sidebar.markdown("---")
-st.sidebar.header("💾 퀵 세이브 (Quick Save)")
-if st.session_state.current_loaded_file:
-    st.sidebar.markdown(f"현재 열려있는 파일: `{st.session_state.current_loaded_file}`")
-    if st.sidebar.button("💾 모든 변경사항 덮어쓰기", type="primary", use_container_width=True):
-        save_data = {}
-        for p_name, p_data in st.session_state.portfolios.items():
-            save_data[p_name] = {
-                'strategy': p_data['strategy'], 'cash': p_data['cash'],
-                'stocks': p_data['stocks'].to_dict(orient='records')
-            }
-        file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(save_data, f, ensure_ascii=False, indent=2)
-        st.sidebar.success("✅ 파일 덮어쓰기 완료!")
-else:
-    st.sidebar.caption("파일을 불러오거나 생성하면 활성화됩니다.")
-
-st.sidebar.markdown("---")
-
-# ==========================================
-# 단일 작업공간(포트폴리오 스위칭) 
+# 3. 사이드바: 단일 작업공간(포트폴리오 스위칭)
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
-selected_port = None
 
-if st.session_state.portfolios:
-    port_names = list(st.session_state.portfolios.keys())
-    selected_port = st.sidebar.selectbox("포트폴리오 전환 (Switch)", port_names)
+# 디스크에 있는 파일 목록을 실시간으로 읽어와서 표시 (가장 깔끔한 1:1 동기화)
+valid_files = glob.glob(f"{SAVE_DIR}/*.json")
+port_names = [os.path.basename(f).replace('.json', '') for f in valid_files]
+
+selected_port = None
+p_data = None
+file_path = None
+
+if port_names:
+    selected_port = st.sidebar.selectbox("포트폴리오(파일) 목록", port_names)
+    file_path = os.path.join(SAVE_DIR, f"{selected_port}.json")
     
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("💰 Capital & Settings")
-    
-    p_data = st.session_state.portfolios[selected_port]
-    strat = p_data['strategy']
-    st.sidebar.markdown(f"**현재 활성화됨:** `[{strat}] {selected_port}`")
-    
-    new_cash = st.sidebar.number_input(
-        f"총 투자 운용 자산 (증/감액)", 
-        value=int(p_data['cash']), 
-        step=1_000_000, 
-        format="%d", 
-        key=f"cash_input_{selected_port}"
-    )
-    st.session_state.portfolios[selected_port]['cash'] = new_cash
-    st.sidebar.caption(f"💵 설정 금액: **{new_cash:,.0f} 원**")
-    
-    if st.sidebar.button(f"🗑️ '{selected_port}' 포트폴리오 지우기", key=f"del_{selected_port}"):
-        del st.session_state.portfolios[selected_port]
+    # 선택된 포트폴리오 파일 로드
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            p_data = json.load(f)
+            # 빈 딕셔너리 예방 기본값 주입
+            if 'strategy' not in p_data: p_data['strategy'] = '대형주 (Core)'
+            if 'cash' not in p_data: p_data['cash'] = 10000000
+            if 'stocks' not in p_data: p_data['stocks'] = []
+    except Exception:
+        st.sidebar.error("파일을 읽는 데 실패했습니다.")
+        p_data = None
+
+    if p_data:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("💰 Capital & Settings")
         
-        if st.session_state.current_loaded_file:
-            file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
-            
-            if len(st.session_state.portfolios) == 0:
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                    except Exception:
-                        pass
-                st.session_state.current_loaded_file = None
-            else:
-                save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(save_data, f, ensure_ascii=False, indent=2)
-                    
-        st.rerun()
+        strat = p_data['strategy']
+        st.sidebar.markdown(f"**현재 전략:** `{strat}`")
+        
+        new_cash = st.sidebar.number_input(
+            f"총 투자 운용 자산 (증/감액)", 
+            value=int(p_data['cash']), 
+            step=1_000_000, 
+            format="%d"
+        )
+        
+        # 금액 변경 시 즉시 파일에 덮어쓰기
+        if new_cash != int(p_data['cash']):
+            p_data['cash'] = new_cash
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(p_data, f, ensure_ascii=False, indent=2)
+                
+        st.sidebar.caption(f"💵 설정 금액: **{new_cash:,.0f} 원**")
+        
+        # 완전 영구 삭제 버튼
+        if st.sidebar.button(f"🗑️ '{selected_port}' 포트폴리오 영구 삭제", type="primary"):
+            try:
+                os.remove(file_path)
+                st.sidebar.success(f"✅ 완전히 삭제되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"삭제 실패: {e}")
 else:
     st.sidebar.info("👈 생성된 포트폴리오가 없습니다. 아래에서 새로 추가해 주세요.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 새 포트폴리오 추가")
-new_p_name = st.sidebar.text_input("새 포트폴리오 이름", key="new_p_name")
-new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"], key="new_p_strat")
-new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d", key="new_p_cash")
+new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (특수문자 제외)")
+new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"])
+new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d")
 
-if st.sidebar.button("새 포트폴리오 추가하기", use_container_width=True):
-    if new_p_name and new_p_name not in st.session_state.portfolios:
-        st.session_state.portfolios[new_p_name] = {
-            'strategy': new_p_strat, 'cash': new_p_cash,
-            'stocks': pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
-        }
-        if not st.session_state.current_loaded_file:
-            st.session_state.current_loaded_file = f"{new_p_name}.json"
-            
-        # [패치] 추가 시 파일에도 즉각 덮어쓰기 연동
-        if st.session_state.current_loaded_file:
-            file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
-            save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(save_data, f, ensure_ascii=False, indent=2)
-                
-        st.rerun()
-    elif new_p_name in st.session_state.portfolios:
-        st.sidebar.warning("이미 존재하는 이름입니다.")
+if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=True):
+    if new_p_name:
+        safe_name = re.sub(r'[\\/*?:"<>|]', "", new_p_name)
+        new_file_path = os.path.join(SAVE_DIR, f"{safe_name}.json")
+        
+        if os.path.exists(new_file_path):
+            st.sidebar.warning("이미 존재하는 이름입니다.")
+        else:
+            new_data = {
+                'strategy': new_p_strat, 
+                'cash': new_p_cash,
+                'stocks': []
+            }
+            with open(new_file_path, 'w', encoding='utf-8') as f:
+                json.dump(new_data, f, ensure_ascii=False, indent=2)
+            st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
@@ -354,12 +291,15 @@ tab1, tab2, tab3 = st.tabs(["Portfolio Configuration & Stock Pools", "Simulation
 with tab1:
     st.header("포트폴리오 종목 구성 및 실시간 진단")
     
-    if not selected_port:
-        st.info("👈 좌측 사이드바에서 포트폴리오를 먼저 생성하거나 불러오세요.")
+    if not p_data or not selected_port:
+        st.info("👈 좌측 사이드바에서 포트폴리오를 먼저 생성하거나 선택하세요.")
     else:
-        port_info = st.session_state.portfolios[selected_port]
-        current_strategy = port_info['strategy']
-        total_cash = port_info['cash']
+        current_strategy = p_data['strategy']
+        total_cash = p_data['cash']
+        stocks_df = pd.DataFrame(p_data['stocks'])
+        if stocks_df.empty:
+            stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
+            
         st.subheader(f"📂 활성 포트폴리오: `{selected_port}` (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
         
         # [스캐너 UI]
@@ -396,25 +336,21 @@ with tab1:
                             c4.write(row['최근 최대 수급'])
                             
                             is_exist = False
-                            if not port_info['stocks'].empty and '티커' in port_info['stocks'].columns:
-                                is_exist = (port_info['stocks']['티커'] == ticker).any()
+                            if not stocks_df.empty and '티커' in stocks_df.columns:
+                                is_exist = (stocks_df['티커'] == ticker).any()
                             
                             if is_exist:
                                 c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
                             else:
                                 if c5.button("➕ 포트폴리오 추가", key=f"scan_{ticker}_add"):
-                                    new_row = pd.DataFrame({'종목명': [name], '티커': [ticker], '매수단가': [0], '보유수량': [0]})
-                                    comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
-                                    st.session_state.portfolios[selected_port]['stocks'] = comb
+                                    new_row = {'종목명': name, '티커': ticker, '매수단가': 0, '보유수량': 0}
+                                    p_data['stocks'].append(new_row)
+                                    # 중복 티커 제거 방어
+                                    temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
+                                    p_data['stocks'] = temp_df.to_dict(orient='records')
                                     
-                                    if st.session_state.current_loaded_file:
-                                        save_data = {}
-                                        for p_name, p_data in st.session_state.portfolios.items():
-                                            save_data[p_name] = {'strategy': p_data['strategy'], 'cash': p_data['cash'], 'stocks': p_data['stocks'].to_dict(orient='records')}
-                                        with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
-                                            json.dump(save_data, f, ensure_ascii=False, indent=2)
-                                        st.toast(f"✅ {name} 추가 및 자동 저장 완료!")
-                                    
+                                    with open(file_path, 'w', encoding='utf-8') as f:
+                                        json.dump(p_data, f, ensure_ascii=False, indent=2)
                                     st.rerun() 
                     else:
                         st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
@@ -436,31 +372,26 @@ with tab1:
                         sel_name = selected_option.split(" (")[0]
                         sel_code = selected_option.split(" (")[1].replace(")", "")
                         
-                        new_row = pd.DataFrame({'종목명': [sel_name], '티커': [sel_code], '매수단가': [0], '보유수량': [0]})
-                        comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
-                        st.session_state.portfolios[selected_port]['stocks'] = comb
+                        new_row = {'종목명': sel_name, '티커': sel_code, '매수단가': 0, '보유수량': 0}
+                        p_data['stocks'].append(new_row)
+                        temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
+                        p_data['stocks'] = temp_df.to_dict(orient='records')
                         
-                        if st.session_state.current_loaded_file:
-                            save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
-                            with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
-                                json.dump(save_data, f, ensure_ascii=False, indent=2)
-                            st.toast(f"✅ {sel_name} 수동 추가 및 자동 저장 완료!")
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            json.dump(p_data, f, ensure_ascii=False, indent=2)
                         st.rerun()
 
         with col_manage2:
             st.markdown("**[🗑️ 종목 삭제]**")
-            if not port_info['stocks'].empty:
-                del_options = port_info['stocks']['종목명'].tolist()
+            if not stocks_df.empty:
+                del_options = stocks_df['종목명'].tolist()
                 del_selected = st.selectbox("삭제할 종목 선택", del_options, key=f"del_sel_{selected_port}")
                 if st.button("선택 종목 삭제하기", key=f"del_btn_{selected_port}", use_container_width=True):
-                    port_info['stocks'] = port_info['stocks'][port_info['stocks']['종목명'] != del_selected].reset_index(drop=True)
-                    st.session_state.portfolios[selected_port]['stocks'] = port_info['stocks']
+                    stocks_df = stocks_df[stocks_df['종목명'] != del_selected]
+                    p_data['stocks'] = stocks_df.to_dict(orient='records')
                     
-                    if st.session_state.current_loaded_file:
-                        save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
-                        with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
-                            json.dump(save_data, f, ensure_ascii=False, indent=2)
-                        st.toast(f"✅ {del_selected} 삭제 및 자동 저장 완료!")
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(p_data, f, ensure_ascii=False, indent=2)
                     st.rerun()
             else:
                 st.caption("현재 등록된 종목이 없습니다.")
@@ -469,23 +400,28 @@ with tab1:
         st.markdown("**현재 포트폴리오 보유 내역 (보유 중이라면 '매수단가'와 '보유수량' 입력)**")
         
         edited_df = st.data_editor(
-            port_info['stocks'], num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
+            stocks_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
         )
-        st.session_state.portfolios[selected_port]['stocks'] = edited_df
         
-        if st.session_state.current_loaded_file:
-            st.markdown("<br>", unsafe_allow_html=True)
+        col_qsave1, col_qsave2 = st.columns([1, 1])
+        with col_qsave1:
             if st.button("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True, type="primary"):
-                save_data = {}
-                for p_name, p_data in st.session_state.portfolios.items():
-                    save_data[p_name] = {
-                        'strategy': p_data['strategy'], 'cash': p_data['cash'],
-                        'stocks': p_data['stocks'].to_dict(orient='records')
-                    }
-                file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
+                p_data['stocks'] = edited_df.to_dict(orient='records')
                 with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(save_data, f, ensure_ascii=False, indent=2)
+                    json.dump(p_data, f, ensure_ascii=False, indent=2)
                 st.success("✅ 포트폴리오 변경사항이 즉시 저장되었습니다!")
+        with col_qsave2:
+            st.markdown("""<style>
+                [data-testid="stPopover"] { width: 100%; }
+                </style>""", unsafe_allow_html=True)
+            with st.popover("📄 새 이름으로 복사/저장하기 (Save As)", use_container_width=True):
+                save_filename = st.text_input("새 파일명", value=f"{selected_port}_복사본")
+                if st.button("복사본 생성"):
+                    safe_new_name = re.sub(r'[\\/*?:"<>|]', "", save_filename)
+                    new_file_path = os.path.join(SAVE_DIR, f"{safe_new_name}.json")
+                    with open(new_file_path, "w", encoding="utf-8") as f:
+                         json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    st.rerun()
 
         st.markdown("---")
         st.subheader("🩺 실시간 매매 액션 플랜 및 증/감액 동적 리밸런싱 진단")
@@ -728,7 +664,7 @@ with tab2:
     st.header("Simulation & Backtest")
     st.markdown("과거 주가 데이터를 바탕으로 **매매 수수료 누락 산식이 완벽히 보정된 초과수익 엔진**을 검증합니다.")
 
-    if not selected_port:
+    if not p_data or not selected_port:
         st.warning("포트폴리오가 없습니다.")
     else:
         col_sim1, col_sim2 = st.columns(2)
@@ -738,10 +674,9 @@ with tab2:
             end_date = st.date_input("종료일", datetime.date.today())
 
         if st.button(f"'{selected_port}' 고수익 모멘텀 시뮬레이션 실행", type="primary", use_container_width=True):
-            port_data = st.session_state.portfolios[selected_port]
-            stocks = port_data['stocks']
-            strat = port_data['strategy']
-            init_cash = port_data['cash']
+            stocks = pd.DataFrame(p_data['stocks'])
+            strat = p_data['strategy']
+            init_cash = p_data['cash']
 
             if strat == '중소형주 (Satellite)':
                 kosdaq_top30 = [
