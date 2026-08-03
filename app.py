@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **완벽 연동 스캐너 & 오토세이브**, **매수 수수료 연동**, **가짜 반등 필터**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **유망주 30선 원클릭 생성**, **눌림목 스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -106,7 +106,7 @@ def fetch_stock_status(ticker_code):
     return None, None, None, None, None, None, None, None, False, False
 
 # ==========================================
-# [개선] 진단 로직과 100% 동기화된 중소형주 눌림목 스캐너 
+# 진단 로직과 동기화된 중소형주 눌림목 스캐너 
 # ==========================================
 @st.cache_data(ttl=3600)
 def run_satellite_scanner(use_ma200_filter_flag):
@@ -127,7 +127,6 @@ def run_satellite_scanner(use_ma200_filter_flag):
         code = row['Code']
         name = row['Name']
         try:
-            # 200일선 추적을 위해 2년 치 데이터 확보
             df = yf.download(f"{code}.KQ", period="2y", progress=False)
             if df.empty: continue
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
@@ -152,7 +151,6 @@ def run_satellite_scanner(use_ma200_filter_flag):
             dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
             is_dip_buying = -2.0 <= dist_from_ma20 <= 2.0
             
-            # [수정됨] 진단 엔진과 완벽히 동일한 방어 룰 탑재
             ma200_pass = (not use_ma200_filter_flag) or (current_close >= current_ma200)
             drawdown = ((current_close / recent_high) - 1) * 100
             dd_pass = drawdown >= -20.0
@@ -229,6 +227,40 @@ if st.session_state.current_loaded_file:
         st.sidebar.success("✅ 파일 덮어쓰기 완료!")
 else:
     st.sidebar.caption("포트폴리오를 불러오거나 생성하면 활성화됩니다.")
+
+st.sidebar.markdown("---")
+
+# ==========================================
+# [신규] 유망 중소형주 30선 팩 자동 생성 버튼
+# ==========================================
+st.sidebar.subheader("🎁 시뮬레이션 전용 팩 (Watchlist)")
+if st.sidebar.button("KOSDAQ 유망 주도주 30선 팩 만들기", use_container_width=True):
+    pack_name = f"중소형주_시뮬레이션_{datetime.date.today().strftime('%m%d')}"
+    kosdaq_top30 = [
+        ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
+        ("리가켐바이오", "141080"), ("휴젤", "145020"), ("클래시스", "214150"), ("삼천당제약", "000250"),
+        ("셀트리온제약", "068760"), ("실리콘투", "257720"), ("HPSP", "403870"), ("레인보우로보틱스", "277810"),
+        ("이오테크닉스", "039030"), ("솔브레인", "357780"), ("JYP Ent.", "035900"), ("에스엠", "041510"),
+        ("동진쎄미켐", "052710"), ("파마리서치", "214450"), ("피에스케이", "319660"), ("원익IPS", "240810"),
+        ("테크윙", "089030"), ("주성엔지니어링", "036930"), ("심텍", "222800"), ("에스티팜", "237690"),
+        ("브이티", "018290"), ("티씨케이", "064760"), ("윤성에프앤씨", "372170"), ("워트", "396470"),
+        ("하나마이크론", "067310"), ("루닛", "328130")
+    ]
+    df_top30 = pd.DataFrame([{'종목명': name, '티커': code, '매수단가': 0, '보유수량': 0} for name, code in kosdaq_top30])
+    st.session_state.portfolios[pack_name] = {
+        'strategy': "중소형주 (Satellite)",
+        'cash': 20_000_000,
+        'stocks': df_top30
+    }
+    st.session_state.current_loaded_file = f"{pack_name}.json"
+    
+    # 자동 1회 저장
+    save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
+    with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
+        json.dump(save_data, f, ensure_ascii=False, indent=2)
+        
+    st.sidebar.success(f"✅ 유망주 30선 포트폴리오 생성 완료!")
+    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.header("Portfolio Capital & Settings")
@@ -309,14 +341,13 @@ with tab1:
             # [스캐너 UI]
             if current_strategy == '중소형주 (Satellite)':
                 st.markdown("---")
-                st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (발굴)")
+                st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
                 st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 조정을 받은(Dip-Buying) 완벽한 타점을 찾아냅니다.")
                 
                 if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary") or st.session_state.show_scanner:
                     st.session_state.show_scanner = True
                     
                     with st.spinner("코스닥 유동성 100개 종목의 거래량 및 방어 필터(200일선) 동기화 분석 중... (약 10초 소요)"):
-                        # 스캐너에 200일선 적용 여부를 전달하여 진단 룰과 일치시킴
                         scan_result = run_satellite_scanner(use_ma200_filter)
                         
                         if not scan_result.empty:
@@ -352,7 +383,7 @@ with tab1:
                                         comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
                                         st.session_state.portfolios[selected_port]['stocks'] = comb
                                         
-                                        # [신규] 스캐너에서 추가 즉시 Auto-Save 기능
+                                        # Auto-Save
                                         if st.session_state.current_loaded_file:
                                             save_data = {}
                                             for p_name, p_data in st.session_state.portfolios.items():
@@ -386,7 +417,6 @@ with tab1:
                             comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
                             st.session_state.portfolios[selected_port]['stocks'] = comb
                             
-                            # Auto-Save
                             if st.session_state.current_loaded_file:
                                 save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
                                 with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
@@ -403,7 +433,6 @@ with tab1:
                         port_info['stocks'] = port_info['stocks'][port_info['stocks']['종목명'] != del_selected].reset_index(drop=True)
                         st.session_state.portfolios[selected_port]['stocks'] = port_info['stocks']
                         
-                        # Auto-Save
                         if st.session_state.current_loaded_file:
                             save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
                             with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
@@ -421,7 +450,6 @@ with tab1:
             )
             st.session_state.portfolios[selected_port]['stocks'] = edited_df
             
-            # [신규] 표 수정 후 즉시 저장 버튼 (Quick Save)
             if st.session_state.current_loaded_file:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True, type="primary"):
@@ -656,7 +684,7 @@ with tab1:
                                                 detail = f"[{tech_text}]\n➔ 현금 부족."
                                         else: 
                                             action = "🟡 진입 보류 (타점 대기)"
-                                            detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(±2%) 도달 시까지 매수 대기."
+                                            detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(±2%) 및 스캐너 조건 대기 중."
                                     
                             results.append({
                                 '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
@@ -696,7 +724,7 @@ with tab2:
             if stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("산식 보정된 KOSPI 벤치마크 및 동적 백테스트 구동 중..."):
+                with st.spinner("산식 보정된 KOSPI 벤치마크 및 스캐너 동기화 백테스트 구동 중... (종목이 많을 시 수 분 소요)"):
                     fetch_start = start_date - datetime.timedelta(days=300)
                     
                     market_df = pd.DataFrame()
@@ -768,6 +796,10 @@ with tab2:
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
                         df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
                         
+                        # [신규] 스캐너 백테스트 조건식 완벽 이식 (최근 20일 거래량 200% 돌파 이력)
+                        df['Recent_Vol_Max'] = df['Vol_Ratio'].rolling(window=20, min_periods=1).max()
+                        df['Vol_Surged'] = df['Recent_Vol_Max'] >= 200.0
+                        
                         if df.index.tz is not None:
                             df.index = df.index.tz_localize(None)
                             
@@ -790,7 +822,8 @@ with tab2:
                             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
                             is_dip = (dist_ma20 >= -2.0) & (dist_ma20 <= 2.0)
                             
-                            entry_cond = (ma200_cond & (is_dip | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.20)
+                            # [핵심] 중소형주 백테스트 진입 조건: 스캐너 결과와 동일하게 수급폭발 + 눌림목 동시 만족 시 진입
+                            entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.20)
                             exit_cond = (df['Drawdown'] <= stop_loss_pct) | ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
                         
                         df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
@@ -1191,9 +1224,10 @@ with tab3:
     3. **진짜 추세 검증:** 60일선 우상향(Slope > 0) 및 최근 20일 모멘텀 양수(> 0).
     4. **거시적 승인:** VIX가 30 미만이거나 VIX 역발상 바닥 시그널 발생.
     
-    **[중소형주 (Satellite) 전략 전용 필터]**
-    * 코스닥의 잦은 휩소를 방지하기 위해 돌파 매매 대신 **주도주 눌림목(Dip-Buying)** 타점을 공략합니다.
-    * 수급이 폭발한 주도주가 조정을 받아 **20일선 기준 ±2% 이내로 근접했을 때만** 진입을 승인하여 승률을 극대화합니다.
+    **[중소형주 (Satellite) 전략 전용 필터: 1+2+3 동시 만족 시 진입]**
+    1. **유동성 및 수급 폭발 이력:** KOSDAQ 시가총액 500억 이상 유동성 종목 중, 최근 20일 내 거래량이 평소 대비 200% 이상 폭발한 이력이 있어야 함.
+    2. **눌림목(Dip-Buying) 타점:** 수급이 터진 주도주가 조정을 받아 주가가 **20일선 기준 ±2% 이내로 근접했을 때만** 진입을 승인.
+    3. **하락장 및 투매 방어:** 200일선(옵션)을 상회해야 하며, 최근 단기 고점 대비 -20% 이상 무너진 폭락 종목은 제외.
     """)
     
     st.markdown("---")
