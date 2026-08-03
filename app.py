@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **유망주 30선 원클릭 생성**, **눌림목 스캐너 백테스트 이식**, **매수 수수료 연동**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **중소형주 자동 디폴트 시뮬레이션**, **매수 수수료 연동**, **가짜 반등 필터**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -229,40 +229,6 @@ else:
     st.sidebar.caption("포트폴리오를 불러오거나 생성하면 활성화됩니다.")
 
 st.sidebar.markdown("---")
-
-# ==========================================
-# [신규] 유망 중소형주 30선 팩 자동 생성 버튼
-# ==========================================
-st.sidebar.subheader("🎁 시뮬레이션 전용 팩 (Watchlist)")
-if st.sidebar.button("KOSDAQ 유망 주도주 30선 팩 만들기", use_container_width=True):
-    pack_name = f"중소형주_시뮬레이션_{datetime.date.today().strftime('%m%d')}"
-    kosdaq_top30 = [
-        ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
-        ("리가켐바이오", "141080"), ("휴젤", "145020"), ("클래시스", "214150"), ("삼천당제약", "000250"),
-        ("셀트리온제약", "068760"), ("실리콘투", "257720"), ("HPSP", "403870"), ("레인보우로보틱스", "277810"),
-        ("이오테크닉스", "039030"), ("솔브레인", "357780"), ("JYP Ent.", "035900"), ("에스엠", "041510"),
-        ("동진쎄미켐", "052710"), ("파마리서치", "214450"), ("피에스케이", "319660"), ("원익IPS", "240810"),
-        ("테크윙", "089030"), ("주성엔지니어링", "036930"), ("심텍", "222800"), ("에스티팜", "237690"),
-        ("브이티", "018290"), ("티씨케이", "064760"), ("윤성에프앤씨", "372170"), ("워트", "396470"),
-        ("하나마이크론", "067310"), ("루닛", "328130")
-    ]
-    df_top30 = pd.DataFrame([{'종목명': name, '티커': code, '매수단가': 0, '보유수량': 0} for name, code in kosdaq_top30])
-    st.session_state.portfolios[pack_name] = {
-        'strategy': "중소형주 (Satellite)",
-        'cash': 20_000_000,
-        'stocks': df_top30
-    }
-    st.session_state.current_loaded_file = f"{pack_name}.json"
-    
-    # 자동 1회 저장
-    save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
-    with open(os.path.join(SAVE_DIR, st.session_state.current_loaded_file), "w", encoding="utf-8") as f:
-        json.dump(save_data, f, ensure_ascii=False, indent=2)
-        
-    st.sidebar.success(f"✅ 유망주 30선 포트폴리오 생성 완료!")
-    st.rerun()
-
-st.sidebar.markdown("---")
 st.sidebar.header("Portfolio Capital & Settings")
 
 for p_name, p_data in list(st.session_state.portfolios.items()):
@@ -338,7 +304,6 @@ with tab1:
             total_cash = port_info['cash']
             st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
             
-            # [스캐너 UI]
             if current_strategy == '중소형주 (Satellite)':
                 st.markdown("---")
                 st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
@@ -383,7 +348,6 @@ with tab1:
                                         comb = pd.concat([port_info['stocks'], new_row]).drop_duplicates(subset=['티커']).reset_index(drop=True)
                                         st.session_state.portfolios[selected_port]['stocks'] = comb
                                         
-                                        # Auto-Save
                                         if st.session_state.current_loaded_file:
                                             save_data = {}
                                             for p_name, p_data in st.session_state.portfolios.items():
@@ -721,7 +685,24 @@ with tab2:
             strat = port_data['strategy']
             init_cash = port_data['cash']
 
-            if stocks.empty:
+            # [신규] 중소형주 전략 시뮬레이션용 디폴트 30선 자동 주입 로직
+            if strat == '중소형주 (Satellite)':
+                kosdaq_top30 = [
+                    ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
+                    ("리가켐바이오", "141080"), ("휴젤", "145020"), ("클래시스", "214150"), ("삼천당제약", "000250"),
+                    ("셀트리온제약", "068760"), ("실리콘투", "257720"), ("HPSP", "403870"), ("레인보우로보틱스", "277810"),
+                    ("이오테크닉스", "039030"), ("솔브레인", "357780"), ("JYP Ent.", "035900"), ("에스엠", "041510"),
+                    ("동진쎄미켐", "052710"), ("파마리서치", "214450"), ("피에스케이", "319660"), ("원익IPS", "240810"),
+                    ("테크윙", "089030"), ("주성엔지니어링", "036930"), ("심텍", "222800"), ("에스티팜", "237690"),
+                    ("브이티", "018290"), ("티씨케이", "064760"), ("윤성에프앤씨", "372170"), ("워트", "396470"),
+                    ("하나마이크론", "067310"), ("루닛", "328130")
+                ]
+                sim_stocks = pd.DataFrame([{'종목명': name, '티커': code} for name, code in kosdaq_top30])
+                st.info("💡 **[AI 스캐너 시뮬레이션 모드]** 중소형주 전략은 특정 종목에 얽매이지 않으므로, 백테스트 시 **코스닥 유망 주도주 30선**이 유니버스(검색 풀)로 자동 적용됩니다.")
+            else:
+                sim_stocks = stocks.copy()
+
+            if sim_stocks.empty:
                 st.error("종목이 없습니다.")
             else:
                 with st.spinner("산식 보정된 KOSPI 벤치마크 및 스캐너 동기화 백테스트 구동 중... (종목이 많을 시 수 분 소요)"):
@@ -765,7 +746,7 @@ with tab2:
                     buf = whipsaw_buffer / 100.0
                     start_dt = pd.to_datetime(start_date)
                     
-                    for idx, row in stocks.iterrows():
+                    for idx, row in sim_stocks.iterrows():
                         ticker = row['티커']
                         name = row['종목명']
                         
@@ -796,7 +777,6 @@ with tab2:
                         df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
                         df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
                         
-                        # [신규] 스캐너 백테스트 조건식 완벽 이식 (최근 20일 거래량 200% 돌파 이력)
                         df['Recent_Vol_Max'] = df['Vol_Ratio'].rolling(window=20, min_periods=1).max()
                         df['Vol_Surged'] = df['Recent_Vol_Max'] >= 200.0
                         
@@ -822,7 +802,6 @@ with tab2:
                             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
                             is_dip = (dist_ma20 >= -2.0) & (dist_ma20 <= 2.0)
                             
-                            # [핵심] 중소형주 백테스트 진입 조건: 스캐너 결과와 동일하게 수급폭발 + 눌림목 동시 만족 시 진입
                             entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.20)
                             exit_cond = (df['Drawdown'] <= stop_loss_pct) | ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
                         
