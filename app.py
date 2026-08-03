@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **중소형주 자동 디폴트 시뮬레이션**, **매수 수수료 연동**, **가짜 반등 필터**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **완벽 연동 스캐너 & 삭제 동기화**, **매수 수수료 연동**, **가짜 반등 필터**, **동적 누적 비중 차트**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -153,7 +153,7 @@ def run_satellite_scanner(use_ma200_filter_flag):
             
             ma200_pass = (not use_ma200_filter_flag) or (current_close >= current_ma200)
             drawdown = ((current_close / recent_high) - 1) * 100
-            dd_pass = drawdown >= -20.0
+            dd_pass = drawdown >= -30.0 # [수정] 중소형주 변동성 감안 30%까지 완화
             
             if vol_surged and is_dip_buying and ma200_pass and dd_pass:
                 results.append({
@@ -245,9 +245,19 @@ for p_name, p_data in list(st.session_state.portfolios.items()):
     st.session_state.portfolios[p_name]['cash'] = new_cash
     st.sidebar.caption(f"💰 설정 금액: **{new_cash:,.0f} 원**")
     
+    # [수정] 삭제 시 파일 동기화 버그 완벽 조치
     if st.sidebar.button(f"🗑️ {p_name} 삭제", key=f"del_{p_name}"):
         del st.session_state.portfolios[p_name]
-        st.session_state.current_loaded_file = None
+        
+        if st.session_state.current_loaded_file:
+            save_data = {p: {'strategy': d['strategy'], 'cash': d['cash'], 'stocks': d['stocks'].to_dict(orient='records')} for p, d in st.session_state.portfolios.items()}
+            file_path = os.path.join(SAVE_DIR, st.session_state.current_loaded_file)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(save_data, f, ensure_ascii=False, indent=2)
+            st.sidebar.success(f"✅ '{p_name}' 삭제 및 파일 업데이트 완료!")
+        else:
+            st.session_state.current_loaded_file = None
+            
         st.rerun()
     st.sidebar.markdown("---")
 
@@ -304,6 +314,7 @@ with tab1:
             total_cash = port_info['cash']
             st.subheader(f"📂 {selected_port} (전략: {current_strategy} | 총 자산 풀: {total_cash:,.0f}원)")
             
+            # [스캐너 UI]
             if current_strategy == '중소형주 (Satellite)':
                 st.markdown("---")
                 st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
@@ -484,7 +495,8 @@ with tab1:
                             else:
                                 dist_ma20 = ((c_price / ma20) - 1) * 100
                                 is_dip = -2.0 <= dist_ma20 <= 2.0
-                                if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -20.0:
+                                # [수정] 진단 엔진에도 낙폭 허용치를 -30%로 완화 적용
+                                if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0:
                                     score = 1.0
                                     if vol_strong: score += 1.0
                                     if rs_strong: score += 0.5
@@ -608,12 +620,14 @@ with tab1:
                                     buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
                                     user_ret = ((c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                                     tech_text_sat = f"수익률 {user_ret:+.2f}%"
-                                    if user_ret <= sat_stop_loss: 
+                                    
+                                    # [수정] 긴급 손절 기준을 '사용자 매수가 기준 수익률'로 완벽 분리
+                                    if user_ret <= (sat_stop_loss): 
                                         action = "🔴 강제 손절 집행"
                                         detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷."
                                     elif ma20 >= ma60 * (1 - buf/2):
                                         is_dip = -2.0 <= dist_ma20 <= 2.0
-                                        add_cond = (is_dip or vix_contrarian) and data['drawdown'] >= -20.0
+                                        add_cond = (is_dip or vix_contrarian) and data['drawdown'] >= -30.0
                                         if diff_amt > 0 and current_cash >= c_price and add_cond:
                                             add_shares = int(min(diff_amt, current_cash) // c_price)
                                             if add_shares > 0:
@@ -638,7 +652,7 @@ with tab1:
                                         detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
                                     else:
                                         is_dip = -2.0 <= dist_ma20 <= 2.0
-                                        if (is_dip or vix_contrarian) and data['drawdown'] >= -20.0: 
+                                        if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0: 
                                             rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                             if rec_shares > 0:
                                                 action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
@@ -685,7 +699,6 @@ with tab2:
             strat = port_data['strategy']
             init_cash = port_data['cash']
 
-            # [신규] 중소형주 전략 시뮬레이션용 디폴트 30선 자동 주입 로직
             if strat == '중소형주 (Satellite)':
                 kosdaq_top30 = [
                     ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
@@ -797,13 +810,13 @@ with tab2:
                         else:
                             df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
                             df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
-                            stop_loss_pct = sat_stop_loss / 100.0
                             
                             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
                             is_dip = (dist_ma20 >= -2.0) & (dist_ma20 <= 2.0)
                             
-                            entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.20)
-                            exit_cond = (df['Drawdown'] <= stop_loss_pct) | ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
+                            # [수정] 120일 기준 절대 낙폭(Drawdown) 허용을 -30%로 완화. 강제 아웃(exit_cond)에서 낙폭 룰 완전 제거.
+                            entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
+                            exit_cond = ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
                         
                         df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
                         df['Signal'] = df['Signal'].ffill().fillna(0)
@@ -887,9 +900,12 @@ with tab2:
                                     if curr_ret >= ts_target and drop_from_peak <= ts_drop:
                                         trailing_stop_exit = True
                                 
+                                # [수정] 긴급 손절을 오직 사용자 매수가 기준 수익률(user_ret)로만 발동되도록 완벽 교정
                                 force_exit = False
-                                if strat != '대형주 (Core)' and df.loc[date_val, 'Drawdown'] <= (sat_stop_loss / 100.0):
-                                    force_exit = True
+                                if strat != '대형주 (Core)' and shares[name] > 0 and avg_buy_price[name] > 0:
+                                    user_ret = (c_price / avg_buy_price[name]) - 1
+                                    if user_ret <= (sat_stop_loss / 100.0):
+                                        force_exit = True
                                     
                                 if trailing_stop_exit or force_exit:
                                     sig = 0.0
@@ -1049,7 +1065,7 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 매수 수수료 오류 산식 완벽 교정 및 백테스트 완료!")
+                        st.success(f"✅ 매매 타점 동기화 및 버그 교정 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
@@ -1069,7 +1085,7 @@ with tab2:
                                 '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
                                 '최종 기말 자산': f"{final_kospi_asset:,.0f} 원",
                                 '총 수익률': f"{kospi_ret_val:+.2f}%",
-                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종 (버그 수정 완료)'
+                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
@@ -1206,7 +1222,7 @@ with tab3:
     **[중소형주 (Satellite) 전략 전용 필터: 1+2+3 동시 만족 시 진입]**
     1. **유동성 및 수급 폭발 이력:** KOSDAQ 시가총액 500억 이상 유동성 종목 중, 최근 20일 내 거래량이 평소 대비 200% 이상 폭발한 이력이 있어야 함.
     2. **눌림목(Dip-Buying) 타점:** 수급이 터진 주도주가 조정을 받아 주가가 **20일선 기준 ±2% 이내로 근접했을 때만** 진입을 승인.
-    3. **하락장 및 투매 방어:** 200일선(옵션)을 상회해야 하며, 최근 단기 고점 대비 -20% 이상 무너진 폭락 종목은 제외.
+    3. **하락장 및 투매 방어:** 200일선(옵션)을 상회해야 하며, 최근 단기 고점 대비 -30% 이상 무너진 폭락 종목은 제외.
     """)
     
     st.markdown("---")
@@ -1229,5 +1245,5 @@ with tab3:
     * **추세 이탈 (데드크로스):** 20일선이 60일선을 하향 이탈하되, 잦은 손절을 막기 위해 버퍼의 절반({whipsaw_buffer/2}%) 이상 뚫고 내려갈 때 전량 매도합니다.
     * **트레일링 스탑 익절 (Trailing Stop):** 수익이 **{ts_target_pct}%** 에 도달한 이후부터 룰이 켜집니다. 이후 최고점 대비 **{abs(ts_drop_pct)}%** 이상 하락하면 더 기다리지 않고 즉시 수익을 확정 짓습니다.
     * **연속 손실 쿨다운 (Cooldown):** 횡보 박스권에 갇혀 연속으로 2회 손실을 발생시킨 종목은 **{cooldown_days}일 동안 강제로 매수를 금지(격리)** 시켜 수수료 누수를 막습니다.
-    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다. (단, 하드 손절컷 {sat_stop_loss}% 도달 시 예외적 즉각 탈출)
+    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 최소 **{min_hold_days}일** 간은 강제로 홀딩합니다. (단, 매수가 대비 손절컷 **{sat_stop_loss}%** 도달 시 즉각 전량 매도 탈출)
     """)
