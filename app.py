@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가상/실계좌 탭 분리 운영**, **전략별 벤치마크 스위칭**, **안전 확인 팝업**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가상/실계좌 탭 분리**, **통합 소싱 UI**, **전략별 벤치마크 스위칭**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -231,9 +231,6 @@ if 'auto_diagnose' not in st.session_state:
     st.session_state.auto_diagnose = False
 if 'show_scanner' not in st.session_state:
     st.session_state.show_scanner = False
-# [신규] 실계좌 데이터 저장 공간
-if 'kis_data' not in st.session_state:
-    st.session_state.kis_data = None
 
 # ==========================================
 # 3. 사이드바: 단일 작업공간(포트폴리오 스위칭)
@@ -257,6 +254,7 @@ if port_names:
             if 'strategy' not in p_data: p_data['strategy'] = '대형주 (Core)'
             if 'cash' not in p_data: p_data['cash'] = 10000000
             if 'stocks' not in p_data: p_data['stocks'] = []
+            if 'kis_config' not in p_data: p_data['kis_config'] = {}
     except Exception:
         st.sidebar.error("파일을 읽는 데 실패했습니다.")
         p_data = None
@@ -330,54 +328,71 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             new_data = {
                 'strategy': new_p_strat, 
                 'cash': new_p_cash,
-                'stocks': default_stocks
+                'stocks': default_stocks,
+                'kis_config': {}
             }
             with open(new_file_path, 'w', encoding='utf-8') as f:
                 json.dump(new_data, f, ensure_ascii=False, indent=2)
             st.rerun()
 
 # ==========================================
-# 한국투자증권(KIS) 계좌 실시간 연동 패널
+# KIS 연동 패널 (사이드바)
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("🔌 한국투자증권 실계좌 연동")
 
-with st.sidebar.popover("🔑 한투증권 API 키 입력 (메모리 로드)", use_container_width=True):
-    st.markdown("입력하신 정보는 파일에 저장되지 않으며, **'실전 계좌 연동' 탭에만 반영**되어 기존 가상 포트폴리오를 해치지 않습니다.")
-    kis_mock = st.checkbox("모의투자 계좌 사용", value=True)
-    kis_app_key = st.text_input("APP Key", type="password")
-    kis_app_secret = st.text_input("APP Secret", type="password")
-    kis_cano = st.text_input("계좌번호 8자리 (CANO)", max_chars=8)
-    kis_acnt_prdt = st.text_input("계좌상품코드 2자리 (기본 01)", value="01", max_chars=2)
+if selected_port and p_data:
+    kis_cfg = p_data.get('kis_config', {})
+    has_kis = bool(kis_cfg.get('cano') and kis_cfg.get('app_key'))
     
-    if st.button("🚀 실전 계좌 데이터 가져오기", type="primary", use_container_width=True):
-        if not (kis_app_key and kis_app_secret and kis_cano and kis_acnt_prdt):
-            st.warning("모든 API 입력란을 채워주세요.")
-        else:
-            with st.spinner("한국투자증권 서버 통신 중..."):
-                token = get_kis_access_token(kis_app_key, kis_app_secret, is_mock=kis_mock)
-                if token:
-                    holdings, summary = fetch_kis_account_balance(kis_app_key, kis_app_secret, kis_cano, kis_acnt_prdt, token, is_mock=kis_mock)
-                    if holdings is not None and summary is not None:
-                        # [핵심] 기존 파일(p_data)을 건드리지 않고, 별도 session_state에 보관
-                        tot_evlu_amt = float(summary[0].get('tot_evlu_amt', 0)) if summary else 0
-                        
-                        new_imported_stocks = []
-                        for item in holdings:
-                            qty = int(item.get('hldg_qty', 0))
-                            if qty > 0:
-                                new_imported_stocks.append({
-                                    '종목명': item.get('prdt_name', ''),
-                                    '티커': item.get('pdno', ''),
-                                    '매수단가': float(item.get('pchs_avg_pric', 0)),
-                                    '보유수량': qty
-                                })
-                        
-                        st.session_state.kis_data = {
-                            'total_eval': tot_evlu_amt,
-                            'stocks': new_imported_stocks
-                        }
-                        st.success(f"✅ 연동 성공! 본문의 '🔌 실전 계좌 연동' 탭을 확인하세요.")
+    status_label = "✅ 계좌 연동됨" if has_kis else "🔑 계좌 미연동 (설정 필요)"
+    
+    with st.sidebar.popover(f"🔌 '{selected_port}' 전용 계좌 설정 ({status_label})", use_container_width=True):
+        st.markdown(f"**`{selected_port}`** 포트폴리오에 연동할 한국투자증권 API 계좌 정보를 설정합니다.")
+        kis_mock = st.checkbox("모의투자 계좌 사용", value=kis_cfg.get('is_mock', True), key=f"kis_mock_{selected_port}")
+        kis_app_key = st.text_input("APP Key", value=kis_cfg.get('app_key', ''), type="password", key=f"kis_key_{selected_port}")
+        kis_app_secret = st.text_input("APP Secret", value=kis_cfg.get('app_secret', ''), type="password", key=f"kis_secret_{selected_port}")
+        kis_cano = st.text_input("계좌번호 8자리 (CANO)", value=kis_cfg.get('cano', ''), max_chars=8, key=f"kis_cano_{selected_port}")
+        kis_acnt_prdt = st.text_input("계좌상품코드 2자리 (기본 01)", value=kis_cfg.get('acnt_prdt', '01'), max_chars=2, key=f"kis_prdt_{selected_port}")
+        
+        col_kis_b1, col_kis_b2 = st.columns([1, 1])
+        with col_kis_b1:
+            if st.button("💾 계좌 정보 저장 및 검증", type="primary", use_container_width=True, key=f"save_kis_{selected_port}"):
+                if not (kis_app_key and kis_app_secret and kis_cano and kis_acnt_prdt):
+                    st.warning("모든 입력란을 채워주세요.")
+                else:
+                    with st.spinner("한투증권 서버 연동 검증 중..."):
+                        token = get_kis_access_token(kis_app_key, kis_app_secret, is_mock=kis_mock)
+                        if token:
+                            p_data['kis_config'] = {
+                                'is_mock': kis_mock,
+                                'app_key': kis_app_key,
+                                'app_secret': kis_app_secret,
+                                'cano': kis_cano,
+                                'acnt_prdt': kis_acnt_prdt
+                            }
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                json.dump(p_data, f, ensure_ascii=False, indent=2)
+                            
+                            holdings, summary = fetch_kis_account_balance(kis_app_key, kis_app_secret, kis_cano, kis_acnt_prdt, token, is_mock=kis_mock)
+                            if holdings is not None and summary is not None:
+                                tot_evlu = float(summary[0].get('tot_evlu_amt', 0)) if summary else 0
+                                imported = [{'종목명': item.get('prdt_name', ''), '티커': item.get('pdno', ''), '매수단가': float(item.get('pchs_avg_pric', 0)), '보유수량': int(item.get('hldg_qty', 0))} for item in holdings if int(item.get('hldg_qty', 0)) > 0]
+                                st.session_state[f"kis_cache_{selected_port}"] = {'total_eval': tot_evlu, 'stocks': imported}
+                            st.success("✅ 계좌가 성공적으로 저장 및 연동되었습니다!")
+                            st.rerun()
+        with col_kis_b2:
+            if has_kis:
+                if st.button("❌ 계좌 연동 해제", use_container_width=True, key=f"del_kis_{selected_port}"):
+                    p_data['kis_config'] = {}
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    if f"kis_cache_{selected_port}" in st.session_state:
+                        del st.session_state[f"kis_cache_{selected_port}"]
+                    st.success("연동이 해제되었습니다.")
+                    st.rerun()
+else:
+    st.sidebar.caption("포트폴리오를 선택하면 계좌 연동 메뉴가 활성화됩니다.")
 
 # ==========================================
 # 파라미터 세팅 및 테마 인디케이터 
@@ -427,12 +442,12 @@ ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min
 bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=True, key=f"boost_{active_strat}")
 
 # ==========================================
-# 4. 탭 구성 (4-Tab 체제로 변경)
+# 4. 탭 구성
 # ==========================================
-tab1, tab2, tab3, tab4 = st.tabs(["📝 가상 포트폴리오 샌드박스", "🔌 KIS 실전 계좌 연동 현황", "📊 시뮬레이션 & 백테스트", "📄 AI 운용 알고리즘 백서"])
+tab1, tab2, tab3, tab4 = st.tabs(["📝 가상 샌드박스", "🔌 KIS 실전 계좌", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
 with tab1:
-    st.header("📝 가상 포트폴리오 종목 구성 및 테스트 진단")
+    st.header("📝 가상 포트폴리오 샌드박스")
     st.caption("수동으로 종목을 관리하고 시뮬레이션 해보는 '모의 샌드박스' 공간입니다. 여기서의 수정은 실제 계좌에 영향을 주지 않습니다.")
     
     if not p_data or not selected_port:
@@ -444,86 +459,119 @@ with tab1:
         if stocks_df.empty:
             stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
             
+        # [테마 스위칭 헤더]
         if current_strategy == '대형주 (Core)':
-            st.markdown(f"<h3 style='color: #1f77b4;'>🟦 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
-            st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
+            st.markdown(f"<div style='padding: 15px; border-radius: 10px; background-color: rgba(31, 119, 180, 0.05); border: 1px solid rgba(31, 119, 180, 0.2);'><h3 style='margin-top:0; color: #1f77b4;'>🟦 📂 <code>{selected_port}</code></h3><span style='color:#555;'><b>적용 엔진:</b> {current_strategy} &nbsp;|&nbsp; <b>가상 자산 풀:</b> {total_cash:,.0f}원</span></div>", unsafe_allow_html=True)
         else:
-            st.markdown(f"<h3 style='color: #ff7f0e;'>🟧 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
-            st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
+            st.markdown(f"<div style='padding: 15px; border-radius: 10px; background-color: rgba(255, 127, 14, 0.05); border: 1px solid rgba(255, 127, 14, 0.2);'><h3 style='margin-top:0; color: #ff7f0e;'>🟧 📂 <code>{selected_port}</code></h3><span style='color:#555;'><b>적용 엔진:</b> {current_strategy} &nbsp;|&nbsp; <b>가상 자산 풀:</b> {total_cash:,.0f}원</span></div>", unsafe_allow_html=True)
         
-        if current_strategy == '대형주 (Core)':
-            st.markdown("---")
-            if st.button("➕ 대형주 섹터별 대표 13선 한번에 채우기", type="secondary"):
-                sector_core_stocks = [
-                    {'종목명': '삼성전자', '티커': '005930', '매수단가': 0, '보유수량': 0},
-                    {'종목명': 'SK하이닉스', '티커': '000660', '매수단가': 0, '보유수량': 0},
-                    {'종목명': '현대차', '티커': '005380', '매수단가': 0, '보유수량': 0},
-                    {'종목명': '삼성바이오로직스', '티커': '207940', '매수단가': 0, '보유수량': 0},
-                    {'종목명': 'LG에너지솔루션', '티커': '373220', '매수단가': 0, '보유수량': 0},
-                    {'종목명': 'KB금융', '티커': '105560', '매수단가': 0, '보유수량': 0},
-                    {'종목명': 'POSCO홀딩스', '티커': '005490', '매수단가': 0, '보유수량': 0},
-                    {'종목명': 'NAVER', '티커': '035420', '매수단가': 0, '보유수량': 0},
-                    {'종목명': 'HD한국조선해양', '티커': '009540', '매수단가': 0, '보유수량': 0},
-                    {'종목명': '한화에어로스페이스', '티커': '012450', '매수단가': 0, '보유수량': 0},
-                    {'종목명': 'HD현대일렉트릭', '티커': '267260', '매수단가': 0, '보유수량': 0},
-                    {'종목명': '하이브', '티커': '352820', '매수단가': 0, '보유수량': 0},
-                    {'종목명': '삼양식품', '티커': '003230', '매수단가': 0, '보유수량': 0}
-                ]
-                p_data['stocks'] = sector_core_stocks
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(p_data, f, ensure_ascii=False, indent=2)
-                st.rerun()
+        st.write("")
+        
+        # ==========================================
+        # [UI 개편] 💡 통합 종목 소싱 센터 (Unified Sourcing Center)
+        # ==========================================
+        st.markdown("### 💡 종목 Sourcing 센터")
+        st.caption("클릭 한 번으로 전략에 맞는 대표 종목을 채우거나, AI 스캐너로 오늘 진입 가능한 종목을 찾아냅니다.")
+        
+        col_src1, col_src2 = st.columns(2)
+        
+        # 좌측 패널: 원클릭 프리셋
+        with col_src1:
+            st.markdown("**[📦 원클릭 우량주 팩 추가]**")
+            if current_strategy == '대형주 (Core)':
+                if st.button("➕ 대형주 섹터별 13선 채우기", use_container_width=True):
+                    sector_core_stocks = [
+                        {'종목명': '삼성전자', '티커': '005930', '매수단가': 0, '보유수량': 0},
+                        {'종목명': 'SK하이닉스', '티커': '000660', '매수단가': 0, '보유수량': 0},
+                        {'종목명': '현대차', '티커': '005380', '매수단가': 0, '보유수량': 0},
+                        {'종목명': '삼성바이오로직스', '티커': '207940', '매수단가': 0, '보유수량': 0},
+                        {'종목명': 'LG에너지솔루션', '티커': '373220', '매수단가': 0, '보유수량': 0},
+                        {'종목명': 'KB금융', '티커': '105560', '매수단가': 0, '보유수량': 0},
+                        {'종목명': 'POSCO홀딩스', '티커': '005490', '매수단가': 0, '보유수량': 0},
+                        {'종목명': 'NAVER', '티커': '035420', '매수단가': 0, '보유수량': 0},
+                        {'종목명': 'HD한국조선해양', '티커': '009540', '매수단가': 0, '보유수량': 0},
+                        {'종목명': '한화에어로스페이스', '티커': '012450', '매수단가': 0, '보유수량': 0},
+                        {'종목명': 'HD현대일렉트릭', '티커': '267260', '매수단가': 0, '보유수량': 0},
+                        {'종목명': '하이브', '티커': '352820', '매수단가': 0, '보유수량': 0},
+                        {'종목명': '삼양식품', '티커': '003230', '매수단가': 0, '보유수량': 0}
+                    ]
+                    p_data['stocks'] = sector_core_stocks
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    st.rerun()
+            else:
+                if st.button("➕ KOSDAQ 우량 45선 채우기", use_container_width=True):
+                    kosdaq_top45_tuples = [
+                        ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
+                        ("리가켐바이오", "141080"), ("휴젤", "145020"), ("클래시스", "214150"), ("삼천당제약", "000250"),
+                        ("셀트리온제약", "068760"), ("실리콘투", "257720"), ("HPSP", "403870"), ("레인보우로보틱스", "277810"),
+                        ("이오테크닉스", "039030"), ("솔브레인", "357780"), ("JYP Ent.", "035900"), ("에스엠", "041510"),
+                        ("동진쎄미켐", "052710"), ("파마리서치", "214450"), ("피에스케이", "319660"), ("원익IPS", "240810"),
+                        ("테크윙", "089030"), ("주성엔지니어링", "036930"), ("심텍", "222800"), ("에스티팜", "237690"),
+                        ("브이티", "018290"), ("티씨케이", "064760"), ("윤성에프앤씨", "372170"), ("워트", "396470"),
+                        ("하나마이크론", "067310"), ("루닛", "328130"), ("리노공업", "058470"), ("펩트론", "087010"),
+                        ("에이비엘바이오", "298380"), ("에이피알", "278470"), ("제룡전기", "033100"), ("비에이치아이", "083650"),
+                        ("태광", "023160"), ("원익QnC", "074600"), ("서진시스템", "178320"), ("파두", "440110"),
+                        ("메디톡스", "086900"), ("디어유", "376300"), ("펌텍코리아", "251970"), ("하이록코리아", "013030"),
+                        ("우양", "105630")
+                    ]
+                    sat_stocks = [{'종목명': name, '티커': code, '매수단가': 0, '보유수량': 0} for name, code in kosdaq_top45_tuples]
+                    p_data['stocks'] = sat_stocks
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    st.rerun()
 
-        if current_strategy == '중소형주 (Satellite)':
-            st.markdown("---")
-            st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (발굴용)")
-            st.caption("코스닥 거래대금 상위 100종목 중, 수급이 폭발한 후 20일선 부근으로 조정을 받은(Dip-Buying) 완벽한 타점을 찾아냅니다.")
-            
-            if st.button("🚀 오늘 진입 가능한 중소형주 탐색하기", type="primary") or st.session_state.show_scanner:
-                st.session_state.show_scanner = True
-                
-                with st.spinner("코스닥 유동성 100개 종목의 거래량 및 방어 필터(200일선) 동기화 분석 중... (약 10초 소요)"):
-                    scan_result = run_satellite_scanner(use_ma200_filter)
+        # 우측 패널: 실시간 스캐너
+        with col_src2:
+            st.markdown("**[🔍 실시간 AI 타점 스캐너]**")
+            if current_strategy == '대형주 (Core)':
+                st.info("💡 대형주는 장기 추세를 추종하므로 잦은 스캐너 교체보다 우량주 '원클릭 팩'과 '비중 관리'를 권장합니다.")
+            else:
+                if st.button("🚀 오늘 진입 가능한 눌림목 탐색", type="primary", use_container_width=True):
+                    st.session_state.show_scanner = True
+
+        # 스캐너 결과창 (가로 Full Width 사용)
+        if current_strategy == '중소형주 (Satellite)' and st.session_state.show_scanner:
+            with st.spinner("코스닥 100 유동성 종목 분석 중... (약 10초 소요)"):
+                scan_result = run_satellite_scanner(use_ma200_filter)
+                if not scan_result.empty:
+                    st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 조건 완벽 일치)")
+                    hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                    hc1.write("**종목명 (티커)**")
+                    hc2.write("**현재가**")
+                    hc3.write("**20일선 이격도**")
+                    hc4.write("**최대 수급(거래량)**")
+                    hc5.write("**가상 포트 추가**")
+                    st.markdown("---")
                     
-                    if not scan_result.empty:
-                        st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 조건 완벽 일치)")
+                    for idx, row in scan_result.iterrows():
+                        c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                        ticker = row['티커']
+                        name = row['종목명']
                         
-                        hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
-                        hc1.write("**종목명 (티커)**")
-                        hc2.write("**현재가**")
-                        hc3.write("**20일선 이격도**")
-                        hc4.write("**최대 수급(거래량)**")
-                        hc5.write("**가상 포트 추가**")
-                        st.markdown("---")
+                        c1.write(f"**{name}** (`{ticker}`)")
+                        c2.write(row['현재가'])
+                        c3.write(row['20일선 이격도'])
+                        c4.write(row['최근 최대 수급'])
                         
-                        for idx, row in scan_result.iterrows():
-                            c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
-                            ticker = row['티커']
-                            name = row['종목명']
-                            
-                            c1.write(f"**{name}** (`{ticker}`)")
-                            c2.write(row['현재가'])
-                            c3.write(row['20일선 이격도'])
-                            c4.write(row['최근 최대 수급'])
-                            
-                            is_exist = False
-                            if not stocks_df.empty and '티커' in stocks_df.columns:
-                                is_exist = (stocks_df['티커'] == ticker).any()
-                            
-                            if is_exist:
-                                c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
-                            else:
-                                if c5.button("➕ 샌드박스 담기", key=f"scan_{ticker}_add"):
-                                    new_row = {'종목명': name, '티커': ticker, '매수단가': 0, '보유수량': 0}
-                                    p_data['stocks'].append(new_row)
-                                    temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
-                                    p_data['stocks'] = temp_df.to_dict(orient='records')
-                                    
-                                    with open(file_path, 'w', encoding='utf-8') as f:
-                                        json.dump(p_data, f, ensure_ascii=False, indent=2)
-                                    st.rerun() 
-                    else:
-                        st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
+                        is_exist = False
+                        if not stocks_df.empty and '티커' in stocks_df.columns:
+                            is_exist = (stocks_df['티커'] == ticker).any()
+                        
+                        if is_exist:
+                            c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
+                        else:
+                            if c5.button("➕ 샌드박스 담기", key=f"scan_{ticker}_add"):
+                                new_row = {'종목명': name, '티커': ticker, '매수단가': 0, '보유수량': 0}
+                                p_data['stocks'].append(new_row)
+                                temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
+                                p_data['stocks'] = temp_df.to_dict(orient='records')
+                                
+                                with open(file_path, 'w', encoding='utf-8') as f:
+                                    json.dump(p_data, f, ensure_ascii=False, indent=2)
+                                st.rerun() 
+                else:
+                    st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
         
         st.markdown("---")
         st.markdown("### 📝 수동 종목 관리 (검색 / 삭제)")
@@ -752,7 +800,7 @@ with tab1:
                             else: 
                                 if (use_ma200_filter and not data['is_above_ma200']):
                                     action = "🟡 진입 보류 (200일선 하회)"
-                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선(200일선) 아래에 위치하여 진입 금지(하락장 방어)."
+                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래에 위치하여 진입 금지(하락장 방어)."
                                 elif ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
                                     rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                     if rec_shares > 0:
@@ -827,102 +875,114 @@ with tab1:
                             f"{warning_msg}{boost_msg}")
                     st.table(pd.DataFrame(results))
 
-# [신규 추가] 탭 2: KIS 실계좌 전용 탭
 with tab2:
-    st.header("🔌 실전 계좌(API) 연동 및 실시간 진단")
-    st.caption("좌측 사이드바에서 한국투자증권 API를 통해 불러온 실제 '예수금'과 '내 보유 종목' 현황을 진단합니다.")
+    st.header("🔌 실전 계좌(API) 연동 현황")
+    st.caption("사이드바에서 선택된 '활성 포트폴리오'에 1:1 매핑된 한국투자증권 실계좌 정보 및 잔고를 확인합니다.")
 
-    if not st.session_state.kis_data:
-        st.warning("⚠️ 좌측 사이드바의 **[🔌 한국투자증권 실계좌 연동]** 메뉴에서 API 키를 입력하여 계좌 데이터를 먼저 불러와 주세요.")
+    if not selected_port or not p_data:
+        st.warning("선택된 포트폴리오가 없습니다.")
     else:
-        kis = st.session_state.kis_data
-        real_total_eval = kis['total_eval']
-        real_stocks_df = pd.DataFrame(kis['stocks'])
-        
-        col_m1, col_m2 = st.columns(2)
-        col_m1.metric("💰 계좌 총 평가 금액 (현금+주식)", f"{real_total_eval:,.0f} 원")
-        
-        st.markdown("### 📊 현재 보유 종목 (API 동기화 데이터)")
-        if real_stocks_df.empty:
-            st.info("현재 계좌에 보유 중인 주식이 없습니다.")
-            real_stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
+        kis_cfg = p_data.get('kis_config', {})
+        cano = kis_cfg.get('cano')
+        app_key = kis_cfg.get('app_key')
+        app_secret = kis_cfg.get('app_secret')
+        acnt_prdt = kis_cfg.get('acnt_prdt', '01')
+        is_mock = kis_cfg.get('is_mock', True)
+
+        if not (cano and app_key and app_secret):
+            st.info(f"💡 현재 **`{selected_port}`** 포트폴리오에 연동된 KIS 계좌가 없습니다.<br>좌측 사이드바의 **[🔌 한국투자증권 실계좌 연동]** 메뉴에서 계좌 정보 및 API 키를 입력해주세요.", unsafe_allow_html=True)
         else:
-            # 실계좌는 직접 수정하지 못하게 disabled 처리하여 조회 전용으로 표시
-            st.dataframe(real_stocks_df, use_container_width=True)
+            acc_type_str = "모의투자 계좌" if is_mock else "실전투자 계좌"
+            st.success(f"✅ **`{selected_port}`** 포트폴리오 연동 계좌: **`{cano[:4]}****-{acnt_prdt}`** ({acc_type_str})")
+            
+            col_ref1, col_ref2 = st.columns([2, 8])
+            with col_ref1:
+                refresh_btn = st.button("🔄 이 계좌 잔고 실시간 새로고침", type="primary", use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("🩺 실전 계좌 AI 매매 진단기")
-        st.markdown("현재 내 계좌의 종목들을 AI 퀀트 엔진 필터에 통과시켜 **'계속 홀딩해야 할지, 당장 팔아야 할지'** 점검합니다.")
-        
-        # 실계좌 진단을 위해 어떤 룰(대형/중소형)을 적용할지 선택
-        live_strat = st.radio("적용할 진단 엔진 선택", ["대형주 (Core) 필터 적용", "중소형주 (Satellite) 필터 적용"], horizontal=True)
-        live_strat_val = "대형주 (Core)" if "대형주" in live_strat else "중소형주 (Satellite)"
+            cache_key = f"kis_cache_{selected_port}"
+            
+            if refresh_btn or cache_key not in st.session_state:
+                with st.spinner("한투증권 API 서버와 통신 중..."):
+                    token = get_kis_access_token(app_key, app_secret, is_mock=is_mock)
+                    if token:
+                        holdings, summary = fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt, token, is_mock=is_mock)
+                        if holdings is not None and summary is not None:
+                            tot_evlu = float(summary[0].get('tot_evlu_amt', 0)) if summary else 0
+                            imported = [{'종목명': item.get('prdt_name', ''), '티커': item.get('pdno', ''), '매수단가': float(item.get('pchs_avg_pric', 0)), '보유수량': int(item.get('hldg_qty', 0))} for item in holdings if int(item.get('hldg_qty', 0)) > 0]
+                            st.session_state[cache_key] = {'total_eval': tot_evlu, 'stocks': imported}
+                            st.toast("✅ 계좌 잔고 새로고침 완료!")
 
-        if st.button("🚀 실전 계좌 종목 진단 실행", type="primary"):
-            if real_stocks_df.empty:
-                st.warning("진단할 보유 종목이 없습니다.")
-            else:
-                with st.spinner("거시 지표 및 실계좌 종목 필터링 분석 중..."):
-                    vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
-                    
-                    vix_text = f"VIX {vix_val:.1f}"
-                    if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 포착)"
-                    elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
-                    else: vix_status = f"{vix_text}(시장 경계/공포)"
+            kis_data = st.session_state.get(cache_key)
+            if kis_data:
+                real_total_eval = kis_data['total_eval']
+                real_stocks_df = pd.DataFrame(kis_data['stocks'])
+                
+                st.metric("💰 계좌 총 평가 금액 (현금+주식)", f"{real_total_eval:,.0f} 원")
+                
+                st.markdown("### 📊 실계좌 보유 종목 리스트")
+                if real_stocks_df.empty:
+                    st.info("현재 이 계좌에 보유 중인 주식이 없습니다.")
+                else:
+                    st.dataframe(real_stocks_df, use_container_width=True)
 
-                    market_ret_60 = kospi_ret_60 if live_strat_val == '대형주 (Core)' else kosdaq_ret_60
-                    buf = whipsaw_buffer / 100.0
+                st.markdown("---")
+                st.subheader("🩺 실전 계좌 AI 매매 진단기")
+                
+                if st.button("🚀 실전 계좌 종목 진단 실행", type="secondary"):
+                    if real_stocks_df.empty:
+                        st.warning("진단할 보유 종목이 없습니다.")
+                    else:
+                        with st.spinner("실계좌 종목 퀀트 필터링 분석 중..."):
+                            vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
+                            current_strategy = p_data['strategy']
+                            market_ret_60 = kospi_ret_60 if current_strategy == '대형주 (Core)' else kosdaq_ret_60
+                            buf = whipsaw_buffer / 100.0
 
-                    live_results = []
-                    for idx, row in real_stocks_df.iterrows():
-                        s_ticker = row['티커']
-                        s_name = row['종목명']
-                        buy_price = float(row.get('매수단가', 0))
-                        
-                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200 = fetch_stock_status(s_ticker)
-                        if c_price is None: continue
-
-                        rs_strong = ret_60 > market_ret_60
-                        rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
-                        
-                        ma20, ma60, ret_20, ma60_slope_positive = ma20, ma60, ret_20, ma60_slope_positive
-                        diff_ma = ((ma20 / ma60) - 1) * 100
-                        dist_ma20 = ((c_price / ma20) - 1) * 100
-                        
-                        if live_strat_val == '대형주 (Core)':
-                            tech_text = f"20/60선 이격 {diff_ma:+.2f}%, 20일 모멘텀 {ret_20:+.2f}%"
-                        else:
-                            tech_text = f"20일선 이격 {dist_ma20:+.2f}%"
-
-                        if live_strat_val == '대형주 (Core)':
-                            if ma20 >= ma60 * (1 - buf/2): 
-                                action = "🟢 보유 유지"
-                                detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 정배열 추세 유지 중."
-                            else: 
-                                action = "🔴 즉각 매도 (추세 이탈)"
-                                detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 추세 이탈. 현금화 권장."
-                        else: # 중소형주 진단
-                            user_ret = ((c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
-                            tech_text_sat = f"실수익률 {user_ret:+.2f}%"
-                            
-                            if user_ret <= (sat_stop_loss): 
-                                action = "🔴 강제 손절 집행"
-                                detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷 권장."
-                            elif ma20 >= ma60 * (1 - buf/2):
-                                action = "🟢 보유 유지"
-                                detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
-                            else:
-                                action = "🔴 전량 매도"
-                                detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 주도주 대열 이탈."
+                            live_results = []
+                            for idx, row in real_stocks_df.iterrows():
+                                s_ticker = row['티커']
+                                s_name = row['종목명']
+                                buy_price = float(row.get('매수단가', 0))
                                 
-                        live_results.append({
-                            '보유 종목명': s_name, '현재가': f"{c_price:,.0f} 원",
-                            '실제 매수단가': f"{buy_price:,.0f} 원" if buy_price > 0 else "-",
-                            'AI 액션 플랜 (권장)': action, '상세 판단 근거': detail
-                        })
-                    
-                    st.info("⚠️ **[주의]** 본 결과는 사이드바의 파라미터 세팅 기준을 따릅니다. 실제 매도 주문은 증권사 앱(HTS/MTS)에서 직접 실행하셔야 합니다.")
-                    st.table(pd.DataFrame(live_results))
+                                c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200 = fetch_stock_status(s_ticker)
+                                if c_price is None: continue
+
+                                rs_strong = ret_60 > market_ret_60
+                                rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
+                                
+                                diff_ma = ((ma20 / ma60) - 1) * 100
+                                dist_ma20 = ((c_price / ma20) - 1) * 100
+                                
+                                tech_text = f"20/60선 이격 {diff_ma:+.2f}%" if current_strategy == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
+
+                                if current_strategy == '대형주 (Core)':
+                                    if ma20 >= ma60 * (1 - buf/2): 
+                                        action = "🟢 보유 유지"
+                                        detail = f"[{tech_text}] | [{rs_status}]\n➔ 정배열 추세 유지 중."
+                                    else: 
+                                        action = "🔴 즉각 매도 (추세 이탈)"
+                                        detail = f"[{tech_text}] | [{rs_status}]\n➔ 데드크로스 발생으로 추세 이탈. 현금화 권장."
+                                else:
+                                    user_ret = ((c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                                    tech_text_sat = f"실수익률 {user_ret:+.2f}%"
+                                    
+                                    if user_ret <= (sat_stop_loss): 
+                                        action = "🔴 강제 손절 집행"
+                                        detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷 권장."
+                                    elif ma20 >= ma60 * (1 - buf/2):
+                                        action = "🟢 보유 유지"
+                                        detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
+                                    else:
+                                        action = "🔴 전량 매도"
+                                        detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 주도주 대열 이탈."
+                                        
+                                live_results.append({
+                                    '보유 종목명': s_name, '현재가': f"{c_price:,.0f} 원",
+                                    '실제 매수단가': f"{buy_price:,.0f} 원" if buy_price > 0 else "-",
+                                    'AI 액션 플랜 (권장)': action, '상세 판단 근거': detail
+                                })
+                            
+                            st.table(pd.DataFrame(live_results))
 
 with tab3:
     st.header("Simulation & Backtest")
