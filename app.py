@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **수수료 및 수익 종합 집계**, **가상/실계좌 탭 분리**, **통합 소싱 UI**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **스캐너-진단기 완벽 동기화**, **가상/실계좌 탭 분리**, **수수료 및 수익 종합 집계**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -165,9 +165,16 @@ def fetch_stock_status(ticker_code):
                 ret_20 = ((current_price / float(close_prices.iloc[-20])) - 1) * 100 if len(close_prices) >= 20 else 0.0
                 ma60_slope_positive = (ma60 > ma60_10d_ago) 
                 is_above_ma200 = (current_price >= ma200) 
-                return current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200
+                
+                # [핵심 수정] 진단기에서도 스캐너와 똑같이 '수급 폭발 이력(200% 이상)'을 인지하도록 산식 추가
+                df['Vol_5MA'] = volumes.rolling(5).mean().shift(1)
+                df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, volumes / df['Vol_5MA'] * 100, 100.0)
+                recent_20d_vol_max = float(df['Vol_Ratio'].tail(20).max())
+                vol_surged = recent_20d_vol_max >= 200.0
+
+                return current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged
     except Exception: pass
-    return None, None, None, None, None, None, None, None, False, False
+    return None, None, None, None, None, None, None, None, False, False, False
 
 @st.cache_data(ttl=3600)
 def run_satellite_scanner(use_ma200_filter_flag):
@@ -669,14 +676,14 @@ with tab1:
                         if pd.isna(quantity): quantity = 0
                         is_holding = (quantity > 0) and (buy_price > 0)
                         
-                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200 = fetch_stock_status(s_ticker)
+                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged = fetch_stock_status(s_ticker)
                         if c_price is None: continue
                         
                         stock_data_cache[s_name] = {
                             'price': c_price, 'ma200': ma200, 'ma60': ma60, 'ma20': ma20, 
                             'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 'ret_20': ret_20,
                             'ma60_slope': ma60_slope_positive, 'is_above_ma200': is_above_ma200, 'is_holding': is_holding,
-                            'qty': quantity
+                            'qty': quantity, 'vol_surged': vol_surged
                         }
                         
                         vol_strong = vol_ratio >= 150.0
@@ -693,7 +700,8 @@ with tab1:
                         else:
                             dist_ma20 = ((c_price / ma20) - 1) * 100
                             is_dip = -5.0 <= dist_ma20 <= 3.0
-                            if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0:
+                            # [핵심] 스캐너와 100% 동일하게 '수급 폭발 이력(vol_surged)'이 있어야만 매수 스코어 부여
+                            if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0 and vol_surged:
                                 score = 1.0
                                 if vol_strong: score += 1.0
                                 if rs_strong: score += 0.5
@@ -841,14 +849,18 @@ with tab1:
                                     detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
                                 else:
                                     is_dip = -5.0 <= dist_ma20 <= 3.0
-                                    if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0: 
+                                    # [핵심 패치] AI 진단기 신규 매수 조건에 수급 폭발(vol_surged) 강제 적용 동기화
+                                    if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0 and data['vol_surged']: 
                                         rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                         if rec_shares > 0:
                                             action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 20일선 눌림목 타점 정확히 진입."
+                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 수급 폭발(200%+) 후 20일선 눌림목 타점 정확히 진입."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
                                             detail = f"[{tech_text}]\n➔ 현금 부족."
+                                    elif (is_dip or vix_contrarian) and data['drawdown'] >= -30.0 and not data['vol_surged']:
+                                        action = "🟡 진입 보류 (수급 이력 부족)"
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 차트상 눌림목이나, 최근 20일 내 세력 수급 폭발(200% 이상) 이력이 없어 패스합니다."
                                     else: 
                                         action = "🟡 진입 보류 (타점 대기)"
                                         detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(-5%~+3%) 및 스캐너 조건 대기 중."
@@ -883,7 +895,6 @@ with tab2:
         is_mock = kis_cfg.get('is_mock', True)
 
         if not (cano and app_key and app_secret):
-            # [버그 패치] st.info 에러 수정을 위해 st.markdown으로 교체
             st.markdown(f"<div style='padding: 15px; border-radius: 8px; background-color: rgba(255, 193, 7, 0.1); border-left: 5px solid #ffc107; color: #856404;'>💡 현재 <b>{selected_port}</b> 포트폴리오에 연동된 KIS 계좌가 없습니다.<br>좌측 사이드바의 <b>[🔌 한국투자증권 실계좌 연동]</b> 메뉴에서 계좌 정보 및 API 키를 입력해주세요.</div>", unsafe_allow_html=True)
         else:
             acc_type_str = "모의투자 계좌" if is_mock else "실전투자 계좌"
@@ -938,7 +949,7 @@ with tab2:
                                 s_name = row['종목명']
                                 buy_price = float(row.get('매수단가', 0))
                                 
-                                c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200 = fetch_stock_status(s_ticker)
+                                c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged = fetch_stock_status(s_ticker)
                                 if c_price is None: continue
 
                                 rs_strong = ret_60 > market_ret_60
@@ -1415,7 +1426,6 @@ with tab3:
                         st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
                         summary_rows = []
                         
-                        # [신규] 총합 계산용 변수 선언
                         sum_holding_val = 0
                         sum_total_profit = 0
                         sum_fee = 0
@@ -1439,7 +1449,6 @@ with tab3:
                             s_cnt = trade_stats[name]['sell']
                             fee = trade_stats[name]['fee']
                             
-                            # 데이터 누적 계산
                             sum_holding_val += holding_val
                             sum_total_profit += total_profit
                             sum_fee += fee
@@ -1457,7 +1466,6 @@ with tab3:
                                 '기말 포트폴리오 비중': f"{weight:.2f}%"
                             })
                             
-                        # [신규] 전체 합계 데이터 추가
                         profit_pct_of_init = (sum_total_profit / init_cash) * 100 if init_cash > 0 else 0.0
                         fee_pct_of_init = (sum_fee / init_cash) * 100 if init_cash > 0 else 0.0
                         total_weight = (sum_holding_val / final_asset) * 100 if final_asset > 0 else 0.0
@@ -1571,7 +1579,7 @@ with tab4:
     
     st.markdown(f"""
     * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 사이드바 파라미터에 따르며, 벤치마크 지수가 60일선 위에 있는 대세 상승장에서는 최대 투입 한도를 **1.5배** 강제로 상향합니다.
-    * **알파 점수 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
+    * **알파 점 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
     * **자본 증액 리밸런싱 (Capital Inflow):** 사이드바의 설정 운용 자금이 늘어나면, **이미 보유 중인 주도주라도 새로 늘어난 한도(Target Weight)만큼 정확히 계산하여 추가 매수를 지시**합니다.
     * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
     """)
