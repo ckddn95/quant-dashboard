@@ -9,6 +9,7 @@ import os
 import glob
 import datetime
 import re
+import requests
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -20,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **섹터별 대표주 확장**, **전략별 벤치마크(KOSPI/KOSDAQ) 동적 스위칭**, **안전 확인 팝업**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **한국투자증권 API 계좌 연동**, **안전 확인 팝업**, **파라미터 초기화** 기능을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -28,6 +29,69 @@ st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성�
 SAVE_DIR = "./saved_portfolios"
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
+
+# ==========================================
+# [신규] 한국투자증권 Open API 연동 핵심 함수
+# ==========================================
+def get_kis_access_token(app_key, app_secret, is_mock=True):
+    """한국투자증권 OAuth2 접근 토큰 발급"""
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/oauth2/tokenP"
+    headers = {"content-type": "application/json"}
+    body = {
+        "grant_type": "client_credentials",
+        "appkey": app_key,
+        "appsecret": app_secret
+    }
+    try:
+        res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
+        if res.status_code == 200:
+            return res.json().get("access_token")
+    except Exception as e:
+        st.error(f"토큰 발급 통신 오류: {e}")
+    return None
+
+def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
+    """한국투자증권 주식 잔고 및 계좌 평가현황 조회"""
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-balance"
+    tr_id = "VTTC8434R" if is_mock else "TTTC8434R"
+    
+    headers = {
+        "content-type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": tr_id
+    }
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_prdt_cd,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FCDC_GOOD_YN": "N",
+        "SUM_TOT_DVSN_KEY": "01",
+        "PRCS_DVSN": "00",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": ""
+    }
+    
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('rt_cd') == '0':
+                holdings = data.get('output1', [])  # 보유 종목 내역
+                summary = data.get('output2', [])   # 계좌 잔고 요약
+                return holdings, summary
+            else:
+                st.error(f"API 응답 오류: {data.get('msg1')}")
+    except Exception as e:
+        st.error(f"잔고 조회 통신 오류: {e}")
+    return None, None
 
 # ==========================================
 # 구버전 파일 자동 청소 및 마이그레이션
@@ -74,12 +138,10 @@ def fetch_market_data():
         vix_contrarian = (vix_val >= 25.0) and (vix_val < vix_ma3)
         vix_safe = (vix_val < 30.0)
         
-        # KOSPI 지수
         kospi_df = fdr.DataReader('KS11')
         k_close = kospi_df['Close'].tail(61)
         kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100 if len(k_close) >= 60 else 0.0
         
-        # KOSDAQ 지수
         kosdaq_df = fdr.DataReader('KQ11')
         kq_close = kosdaq_df['Close'].tail(61)
         kosdaq_ret_60 = ((float(kq_close.iloc[-1]) / float(kq_close.iloc[-60])) - 1) * 100 if len(kq_close) >= 60 else 0.0
@@ -247,7 +309,6 @@ new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (특수문자 제
 new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"])
 new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d")
 
-# [확장] 포트폴리오 생성 시 섹터 대표주 자동 프리셋 주입
 if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=True):
     if new_p_name:
         safe_name = re.sub(r'[\\/*?:"<>|]', "", new_p_name)
@@ -256,7 +317,6 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
         if os.path.exists(new_file_path):
             st.sidebar.warning("이미 존재하는 이름입니다.")
         else:
-            # 대형주 선택 시 섹터별 대표주 13선 자동 구성
             if new_p_strat == "대형주 (Core)":
                 default_stocks = [
                     {'종목명': '삼성전자', '티커': '005930', '매수단가': 0, '보유수량': 0},
@@ -284,6 +344,55 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             with open(new_file_path, 'w', encoding='utf-8') as f:
                 json.dump(new_data, f, ensure_ascii=False, indent=2)
             st.rerun()
+
+# ==========================================
+# [신규] 한국투자증권(KIS) 계좌 실시간 연동 패널
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.header("🔌 한국투자증권 계좌 연동")
+
+with st.sidebar.popover("🔑 한투증권 API 키 및 잔고 불러오기", use_container_width=True):
+    st.markdown("한국투자증권 API 키를 입력하여 **현재 실계좌/모의투자 잔고 및 보유 종목**을 불러옵니다.")
+    kis_mock = st.checkbox("모의투자 계좌 사용", value=True)
+    kis_app_key = st.text_input("APP Key", type="password")
+    kis_app_secret = st.text_input("APP Secret", type="password")
+    kis_cano = st.text_input("계좌번호 8자리 (CANO)", max_chars=8)
+    kis_acnt_prdt = st.text_input("계좌상품코드 2자리 (기본 01)", value="01", max_chars=2)
+    
+    if st.button("🚀 잔고 및 보유종목 동기화", type="primary", use_container_width=True):
+        if not selected_port:
+            st.error("먼저 활성화할 포트폴리오를 선택하거나 생성하세요.")
+        elif not (kis_app_key and kis_app_secret and kis_cano and kis_acnt_prdt):
+            st.warning("모든 API 입력란을 채워주세요.")
+        else:
+            with st.spinner("한국투자증권 서버 통신 중..."):
+                token = get_kis_access_token(kis_app_key, kis_app_secret, is_mock=kis_mock)
+                if token:
+                    holdings, summary = fetch_kis_account_balance(kis_app_key, kis_app_secret, kis_cano, kis_acnt_prdt, token, is_mock=kis_mock)
+                    if holdings is not None and summary is not None:
+                        # 1. 예수금 반영
+                        tot_evlu_amt = float(summary[0].get('tot_evlu_amt', p_data['cash'])) if summary else p_data['cash']
+                        p_data['cash'] = tot_evlu_amt
+                        
+                        # 2. 보유 종목 파싱
+                        new_imported_stocks = []
+                        for item in holdings:
+                            qty = int(item.get('hldg_qty', 0))
+                            if qty > 0:
+                                new_imported_stocks.append({
+                                    '종목명': item.get('prdt_name', ''),
+                                    '티커': item.get('pdno', ''),
+                                    '매수단가': float(item.get('pchs_avg_pric', 0)),
+                                    '보유수량': qty
+                                })
+                        
+                        p_data['stocks'] = new_imported_stocks
+                        
+                        # 저장
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            json.dump(p_data, f, ensure_ascii=False, indent=2)
+                        st.success(f"✅ 동기화 완료! 보유 종목 {len(new_imported_stocks)}개 연동됨.")
+                        st.rerun()
 
 # ==========================================
 # 파라미터 세팅 및 테마 인디케이터 
@@ -356,7 +465,6 @@ with tab1:
             st.markdown(f"<h3 style='color: #ff7f0e;'>🟧 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
             st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
         
-        # 대형주 원클릭 대표 섹터 추가 버튼 기능
         if current_strategy == '대형주 (Core)':
             st.markdown("---")
             if st.button("➕ 대형주 섹터별 대표 13선 한번에 채우기", type="secondary"):
@@ -380,7 +488,6 @@ with tab1:
                     json.dump(p_data, f, ensure_ascii=False, indent=2)
                 st.rerun()
 
-        # 스캐너 UI
         if current_strategy == '중소형주 (Satellite)':
             st.markdown("---")
             st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
@@ -762,7 +869,6 @@ with tab2:
             index_sym = 'KS11' if strat == '대형주 (Core)' else 'KQ11'
             index_name = 'KOSPI' if strat == '대형주 (Core)' else 'KOSDAQ'
 
-            # [확장] 중소형주 백테스트 우량 유니버스 45선 확장
             if strat == '중소형주 (Satellite)':
                 kosdaq_top45 = [
                     ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
