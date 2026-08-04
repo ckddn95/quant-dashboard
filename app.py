@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가상/실계좌 탭 분리**, **통합 소싱 UI**, **전략별 벤치마크 스위칭**을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **포트폴리오별 KIS 계좌 개별 연동**, **안전 확인 팝업**, **파라미터 초기화**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -459,7 +459,6 @@ with tab1:
         if stocks_df.empty:
             stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
             
-        # [테마 스위칭 헤더]
         if current_strategy == '대형주 (Core)':
             st.markdown(f"<div style='padding: 15px; border-radius: 10px; background-color: rgba(31, 119, 180, 0.05); border: 1px solid rgba(31, 119, 180, 0.2);'><h3 style='margin-top:0; color: #1f77b4;'>🟦 📂 <code>{selected_port}</code></h3><span style='color:#555;'><b>적용 엔진:</b> {current_strategy} &nbsp;|&nbsp; <b>가상 자산 풀:</b> {total_cash:,.0f}원</span></div>", unsafe_allow_html=True)
         else:
@@ -467,15 +466,11 @@ with tab1:
         
         st.write("")
         
-        # ==========================================
-        # [UI 개편] 💡 통합 종목 소싱 센터 (Unified Sourcing Center)
-        # ==========================================
         st.markdown("### 💡 종목 Sourcing 센터")
         st.caption("클릭 한 번으로 전략에 맞는 대표 종목을 채우거나, AI 스캐너로 오늘 진입 가능한 종목을 찾아냅니다.")
         
         col_src1, col_src2 = st.columns(2)
         
-        # 좌측 패널: 원클릭 프리셋
         with col_src1:
             st.markdown("**[📦 원클릭 우량주 팩 추가]**")
             if current_strategy == '대형주 (Core)':
@@ -521,7 +516,6 @@ with tab1:
                         json.dump(p_data, f, ensure_ascii=False, indent=2)
                     st.rerun()
 
-        # 우측 패널: 실시간 스캐너
         with col_src2:
             st.markdown("**[🔍 실시간 AI 타점 스캐너]**")
             if current_strategy == '대형주 (Core)':
@@ -530,7 +524,6 @@ with tab1:
                 if st.button("🚀 오늘 진입 가능한 눌림목 탐색", type="primary", use_container_width=True):
                     st.session_state.show_scanner = True
 
-        # 스캐너 결과창 (가로 Full Width 사용)
         if current_strategy == '중소형주 (Satellite)' and st.session_state.show_scanner:
             with st.spinner("코스닥 100 유동성 종목 분석 중... (약 10초 소요)"):
                 scan_result = run_satellite_scanner(use_ma200_filter)
@@ -875,6 +868,7 @@ with tab1:
                             f"{warning_msg}{boost_msg}")
                     st.table(pd.DataFrame(results))
 
+# [포트폴리오별 독립 연동된 실전 계좌 탭]
 with tab2:
     st.header("🔌 실전 계좌(API) 연동 현황")
     st.caption("사이드바에서 선택된 '활성 포트폴리오'에 1:1 매핑된 한국투자증권 실계좌 정보 및 잔고를 확인합니다.")
@@ -890,7 +884,7 @@ with tab2:
         is_mock = kis_cfg.get('is_mock', True)
 
         if not (cano and app_key and app_secret):
-            st.info(f"💡 현재 **`{selected_port}`** 포트폴리오에 연동된 KIS 계좌가 없습니다.<br>좌측 사이드바의 **[🔌 한국투자증권 실계좌 연동]** 메뉴에서 계좌 정보 및 API 키를 입력해주세요.", unsafe_allow_html=True)
+            st.markdown(f"> 💡 현재 **`{selected_port}`** 포트폴리오에 연동된 KIS 계좌가 없습니다.<br>좌측 사이드바의 **[🔌 한국투자증권 실계좌 연동]** 메뉴에서 계좌 정보 및 API 키를 입력해주세요.", unsafe_allow_html=True)
         else:
             acc_type_str = "모의투자 계좌" if is_mock else "실전투자 계좌"
             st.success(f"✅ **`{selected_port}`** 포트폴리오 연동 계좌: **`{cano[:4]}****-{acnt_prdt}`** ({acc_type_str})")
