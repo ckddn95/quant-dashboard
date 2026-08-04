@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **안전 확인 팝업**, **전략별 테마 스위칭**, **파라미터 초기화** 기능을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **전략별 벤치마크(KOSPI/KOSDAQ) 동적 스위칭**, **안전 확인 팝업**, **파라미터 초기화** 기능을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -63,6 +63,7 @@ def load_krx_universe():
     except Exception:
         return pd.DataFrame(columns=['Code', 'Name', 'Market', 'Marcap', 'Amount'])
 
+# [핵심] 코스피와 코스닥 지수 상태를 모두 가져오도록 변경
 @st.cache_data(ttl=1800)
 def fetch_market_data():
     try:
@@ -74,15 +75,19 @@ def fetch_market_data():
         vix_contrarian = (vix_val >= 25.0) and (vix_val < vix_ma3)
         vix_safe = (vix_val < 30.0)
         
+        # KOSPI 지수
         kospi_df = fdr.DataReader('KS11')
         k_close = kospi_df['Close'].tail(61)
-        if len(k_close) >= 60:
-            kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100
-        else:
-            kospi_ret_60 = 0.0
-        return vix_val, vix_contrarian, vix_safe, kospi_ret_60
+        kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100 if len(k_close) >= 60 else 0.0
+        
+        # KOSDAQ 지수
+        kosdaq_df = fdr.DataReader('KQ11')
+        kq_close = kosdaq_df['Close'].tail(61)
+        kosdaq_ret_60 = ((float(kq_close.iloc[-1]) / float(kq_close.iloc[-60])) - 1) * 100 if len(kq_close) >= 60 else 0.0
+        
+        return vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60
     except:
-        return 20.0, False, True, 0.0
+        return 20.0, False, True, 0.0, 0.0
 
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
@@ -226,7 +231,6 @@ if port_names:
                 
         st.sidebar.caption(f"💵 설정 금액: **{new_cash:,.0f} 원**")
         
-        # [안전장치 1] 삭제 확인 팝오버 (Popover Double Check)
         with st.sidebar.popover(f"🗑️ '{selected_port}' 포트폴리오 삭제", use_container_width=True):
             st.markdown("⚠️ **경고: 정말 삭제하시겠습니까?**<br>하드디스크에서 영구적으로 파일이 삭제되며 복구할 수 없습니다.", unsafe_allow_html=True)
             if st.button("🚨 네, 영구 삭제합니다", key=f"del_{selected_port}", type="primary", use_container_width=True):
@@ -263,28 +267,25 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             st.rerun()
 
 # ==========================================
-# 파라미터 세팅 및 테마 인디케이터 (Theme & Reset)
+# 파라미터 세팅 및 테마 인디케이터 
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
 
 active_strat = p_data['strategy'] if p_data else "대형주 (Core)"
 
-# [테마 1] 사이드바 전략별 시각적 분리 (CSS 인젝션)
 if active_strat == '대형주 (Core)':
     st.sidebar.markdown("<div style='padding: 12px; border-radius: 8px; background-color: rgba(31, 119, 180, 0.1); border-left: 5px solid #1f77b4; color: #1f77b4;'><b>🟦 대형주 (Core) 활성화됨</b><br><span style='font-size: 0.85em; color: #a0a0a0;'>안정적 우량주 장기 추세 추종 모델</span></div>", unsafe_allow_html=True)
 else:
     st.sidebar.markdown("<div style='padding: 12px; border-radius: 8px; background-color: rgba(255, 127, 14, 0.1); border-left: 5px solid #ff7f0e; color: #ff7f0e;'><b>🟧 중소형주 (Satellite) 활성화됨</b><br><span style='font-size: 0.85em; color: #a0a0a0;'>주도주 눌림목 단기 스윙 타점 모델</span></div>", unsafe_allow_html=True)
 
-st.sidebar.write("") # 간격 띄우기
+st.sidebar.write("") 
 
-# 전략별 권장 디폴트 파라미터 변수
 def_sl = -15 if active_strat == '대형주 (Core)' else -12
 def_alloc = 35 if active_strat == '대형주 (Core)' else 20
 def_ts_target = 30 if active_strat == '대형주 (Core)' else 15
 def_ts_drop = -10 if active_strat == '대형주 (Core)' else -5
 
-# [초기화 기능] 원클릭 기본 세팅 복구
 if st.sidebar.button("🔄 초기 AI 권장 세팅으로 복구", use_container_width=True):
     st.session_state[f"ma200_{active_strat}"] = True
     st.session_state[f"cd_{active_strat}"] = 60
@@ -329,7 +330,6 @@ with tab1:
         if stocks_df.empty:
             stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
             
-        # [테마 2] 본문 상단 헤더 전략별 테마 분리
         if current_strategy == '대형주 (Core)':
             st.markdown(f"<h3 style='color: #1f77b4;'>🟦 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
             st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
@@ -337,7 +337,6 @@ with tab1:
             st.markdown(f"<h3 style='color: #ff7f0e;'>🟧 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
             st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
         
-        # [스캐너 UI]
         if current_strategy == '중소형주 (Satellite)':
             st.markdown("---")
             st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
@@ -439,7 +438,6 @@ with tab1:
         
         col_qsave1, col_qsave2 = st.columns([1, 1])
         with col_qsave1:
-            # [안전장치 2] 덮어쓰기 저장 확인 팝오버 (Double Check)
             with st.popover("💾 표 데이터 수정 후 즉시 덮어쓰기 (Quick Save)", use_container_width=True):
                 st.markdown("⚠️ **현재 입력하신 '매수 단가'와 '보유 수량'을 기존 파일에 덮어씁니다.**<br>정말 저장하시겠습니까?", unsafe_allow_html=True)
                 if st.button("✔️ 네, 덮어쓰기 저장합니다.", key=f"save_{selected_port}", type="primary", use_container_width=True):
@@ -471,12 +469,16 @@ with tab1:
                 st.warning("진단할 종목이 없습니다.")
             else:
                 with st.spinner("거시 지표 및 개별 종목 필터, 자본 증감액 룰 분석 중..."):
-                    vix_val, vix_contrarian, vix_safe, kospi_ret_60 = fetch_market_data()
+                    # [핵심] KOSPI 및 KOSDAQ 분리 지표 가져오기
+                    vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
                     
                     vix_text = f"VIX {vix_val:.1f}"
                     if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 포착)"
                     elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
                     else: vix_status = f"{vix_text}(시장 경계/공포)"
+
+                    # 전략에 따른 시장 기준치 스위칭
+                    market_ret_60 = kospi_ret_60 if current_strategy == '대형주 (Core)' else kosdaq_ret_60
 
                     stock_data_cache = {}
                     buy_scores = {}
@@ -502,7 +504,8 @@ with tab1:
                         }
                         
                         vol_strong = vol_ratio >= 150.0
-                        rs_strong = ret_60 > kospi_ret_60
+                        # 상대강도 비교 기준 스위칭 반영
+                        rs_strong = ret_60 > market_ret_60
                         ma200_pass = (not use_ma200_filter) or is_above_ma200
                         
                         if current_strategy == '대형주 (Core)':
@@ -525,7 +528,8 @@ with tab1:
                     total_score = sum(buy_scores.values()) if buy_scores else 1.0
                     
                     current_max_alloc_ratio = max_alloc_pct / 100.0
-                    if bull_market_boost and kospi_ret_60 > 0:
+                    # 강세장 부스터 기준 시장 스위칭 반영
+                    if bull_market_boost and market_ret_60 > 0:
                         current_max_alloc_ratio = min(current_max_alloc_ratio * 1.5, 1.0)
 
                     current_stock_eval = sum((data['qty'] * data['price']) for data in stock_data_cache.values() if data['is_holding'])
@@ -571,7 +575,7 @@ with tab1:
                         holding_status = "보유중" if is_holding else "신규/관심"
                         
                         vol_strong = data['vol_ratio'] >= 150.0
-                        rs_strong = data['ret_60'] > kospi_ret_60
+                        rs_strong = data['ret_60'] > market_ret_60
                         vol_status = f"거래량 {data['vol_ratio']:.0f}%(수급 급증)" if vol_strong else (f"거래량 {data['vol_ratio']:.0f}%(수급 보통)" if data['vol_ratio'] >= 80 else f"거래량 {data['vol_ratio']:.0f}%(수급 침체)")
                         rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
                         ma200_status = "200일선 상회" if data['is_above_ma200'] else "200일선 하회"
@@ -688,7 +692,8 @@ with tab1:
                         })
                     
                     warning_msg = "⚠️ **[투자금 감액 감지]** 감액된 투자금에 맞춰 최약체 종목 우선 청산 액션 플랜이 발동되었습니다." if available_cash < 0 else ""
-                    boost_msg = f" (🔥강세장 부스터 작동 중: 한도 최대 {current_max_alloc_ratio*100:.0f}%)" if (bull_market_boost and kospi_ret_60 > 0) else ""
+                    index_name = "KOSPI" if current_strategy == '대형주 (Core)' else "KOSDAQ"
+                    boost_msg = f" (🔥{index_name} 강세장 부스터 작동 중: 한도 최대 {current_max_alloc_ratio*100:.0f}%)" if (bull_market_boost and market_ret_60 > 0) else ""
                     st.info(f"📊 **[스마트 자금 리밸런싱 및 현금 현황]**\n\n"
                             f"• **총 운용 설정 자산:** `{total_cash:,.0f} 원`\n"
                             f"• **가용 현금 잔고:** `{current_cash:,.0f} 원` (보유 주식 평가액: `{current_stock_eval:,.0f} 원`)\n"
@@ -714,6 +719,10 @@ with tab2:
             strat = p_data['strategy']
             init_cash = p_data['cash']
 
+            # [핵심] 전략에 따른 시뮬레이션 벤치마크 지수 설정 스위칭
+            index_sym = 'KS11' if strat == '대형주 (Core)' else 'KQ11'
+            index_name = 'KOSPI' if strat == '대형주 (Core)' else 'KOSDAQ'
+
             if strat == '중소형주 (Satellite)':
                 kosdaq_top30 = [
                     ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
@@ -733,30 +742,30 @@ with tab2:
             if sim_stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner("산식 보정된 KOSPI 벤치마크 및 스캐너 동기화 백테스트 구동 중... (종목이 많을 시 수 분 소요)"):
+                with st.spinner(f"산식 보정된 {index_name} 벤치마크 및 스캐너 동기화 백테스트 구동 중... (종목이 많을 시 수 분 소요)"):
                     fetch_start = start_date - datetime.timedelta(days=300)
                     
                     market_df = pd.DataFrame()
-                    kospi_ret_val = 0.0
-                    final_kospi_asset = init_cash
+                    benchmark_ret_val = 0.0
+                    final_benchmark_asset = init_cash
                     
                     try:
-                        kospi_df = fdr.DataReader('KS11', fetch_start, end_date)
-                        if not kospi_df.empty:
-                            if kospi_df.index.tz is not None:
-                                kospi_df.index = kospi_df.index.tz_localize(None)
-                            kospi_df['Kospi_Ret_60'] = kospi_df['Close'] / kospi_df['Close'].shift(60) - 1
-                            kospi_df['Kospi_MA60'] = kospi_df['Close'].rolling(60).mean()
-                            market_df['Kospi_Ret_60'] = kospi_df['Kospi_Ret_60']
-                            market_df['Kospi_Bull'] = kospi_df['Close'] > kospi_df['Kospi_MA60']
+                        bm_df = fdr.DataReader(index_sym, fetch_start, end_date)
+                        if not bm_df.empty:
+                            if bm_df.index.tz is not None:
+                                bm_df.index = bm_df.index.tz_localize(None)
+                            bm_df['Bm_Ret_60'] = bm_df['Close'] / bm_df['Close'].shift(60) - 1
+                            bm_df['Bm_MA60'] = bm_df['Close'].rolling(60).mean()
+                            market_df['Bm_Ret_60'] = bm_df['Bm_Ret_60']
+                            market_df['Bm_Bull'] = bm_df['Close'] > bm_df['Bm_MA60']
                             
                             start_dt = pd.to_datetime(start_date)
-                            sim_kospi = kospi_df[kospi_df.index >= start_dt]['Close'].dropna()
-                            if len(sim_kospi) > 1:
-                                k_start = float(sim_kospi.iloc[0])
-                                k_end = float(sim_kospi.iloc[-1])
-                                kospi_ret_val = ((k_end / k_start) - 1) * 100
-                                final_kospi_asset = init_cash * (1 + kospi_ret_val / 100)
+                            sim_bm = bm_df[bm_df.index >= start_dt]['Close'].dropna()
+                            if len(sim_bm) > 1:
+                                k_start = float(sim_bm.iloc[0])
+                                k_end = float(sim_bm.iloc[-1])
+                                benchmark_ret_val = ((k_end / k_start) - 1) * 100
+                                final_benchmark_asset = init_cash * (1 + benchmark_ret_val / 100)
                     except: pass
 
                     try:
@@ -814,8 +823,8 @@ with tab2:
                         df = df.join(market_df, how='left')
                         df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
                         df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
-                        df['Kospi_Ret_60'] = df['Kospi_Ret_60'].fillna(0.0)
-                        df['Kospi_Bull'] = df['Kospi_Bull'].fillna(False)
+                        df['Bm_Ret_60'] = df['Bm_Ret_60'].fillna(0.0)
+                        df['Bm_Bull'] = df['Bm_Bull'].fillna(False)
                         
                         ma200_cond = df['Is_Above_MA200'] if use_ma200_filter else True
                         
@@ -836,7 +845,8 @@ with tab2:
                         df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
                         df['Signal'] = df['Signal'].ffill().fillna(0)
                         
-                        rs_condition = df['Ret_60'] > df['Kospi_Ret_60']
+                        # [핵심] 벤치마크 지수(KOSDAQ/KOSPI) 대비 상대강도로 가점 로직 변경
+                        rs_condition = df['Ret_60'] > df['Bm_Ret_60']
                         df['Score'] = np.where(entry_cond, 
                                                1.0 + np.where(df['Vol_Strong'], 1.0 if strat != '대형주 (Core)' else 0.5, 0.0) + 
                                                np.where(rs_condition, 0.5, 0.0) + 
@@ -888,9 +898,9 @@ with tab2:
                             
                             current_max_alloc_ratio = base_alloc_ratio
                             market_bull = False
-                            for df in stock_dfs.values():
-                                if date_val in df.index:
-                                    market_bull = df.loc[date_val, 'Kospi_Bull']
+                            for df_check in stock_dfs.values():
+                                if date_val in df_check.index:
+                                    market_bull = df_check.loc[date_val, 'Bm_Bull']
                                     break
                             
                             if bull_market_boost and market_bull:
@@ -1084,14 +1094,14 @@ with tab2:
                         final_dca_asset = dca_df.iloc[-1]
                         final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
                         
-                        st.success(f"✅ 매매 타점 동기화 및 백테스트 실행 완료!")
+                        st.success(f"✅ 벤치마크 자동 동기화 및 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
                         
                         st.markdown("---")
                         
-                        st.subheader("📊 [전략 비교] KOSPI 지수 vs 단순보유 vs 적립식 매수 vs AI 초과수익 추구 전략")
+                        st.subheader(f"📊 [전략 비교] {index_name} 지수 vs 단순보유 vs 적립식 매수 vs AI 초과수익 추구 전략")
                         
                         comparison_data = [
                             {
@@ -1101,10 +1111,10 @@ with tab2:
                                 '운용 방식 및 특징': f'200일선 아래 장기 하락 종목 매수 금지 및 연속 2회 손실 종목 {cooldown_days}일 매수 동결. 버퍼({whipsaw_buffer}%) 통과 상승 종목에 집중 배분하여 박스권 수수료 낭비 원천 차단.'
                             },
                             {
-                                '전략 구분': '📈 시장 벤치마크 (KOSPI 지수 ^KS11)',
-                                '최종 기말 자산': f"{final_kospi_asset:,.0f} 원",
-                                '총 수익률': f"{kospi_ret_val:+.2f}%",
-                                '운용 방식 및 특징': '한국 종합주가지수(KOSPI) 시장 수익률 추종'
+                                '전략 구분': f'📈 시장 벤치마크 ({index_name} 지수 ^{index_sym})',
+                                '최종 기말 자산': f"{final_benchmark_asset:,.0f} 원",
+                                '총 수익률': f"{benchmark_ret_val:+.2f}%",
+                                '운용 방식 및 특징': f'한국 종합주가지수({index_name}) 시장 수익률 추종'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
@@ -1213,7 +1223,7 @@ with tab3:
     with col1:
         st.info("**📈 거시 지표 (Macro Indicators)**")
         st.markdown(f"""
-        * **KOSPI 시장 강도:** KOSPI 지수의 최근 60일 수익률을 계산하여 강세장 여부를 판별하고, 개별 종목의 상대강도(RS)를 비교하는 벤치마크로 사용합니다.
+        * **시장 벤치마크 지수 (Market Strength):** 대형주는 KOSPI, 중소형주는 KOSDAQ 지수의 최근 60일 수익률을 계산하여 강세장 여부를 판별하고, 개별 종목의 상대강도(RS)를 비교하는 벤치마크로 사용합니다.
         * **시장 공포지수 (VIX):** 
             * `안정/경계 구간`: VIX < 30 (정상적인 매매 작동)
             * `극단적 공포 (VIX Contrarian)`: VIX $\ge$ 25 이상 고점 도달 후 3일 이동평균선을 하향 이탈할 때 (공포 절정 후 반등 시그널)
@@ -1249,7 +1259,7 @@ with tab3:
     st.subheader("4. 자산 배분 및 자본금 증감액 룰 (Capital & Weight Allocation)")
     
     st.markdown(f"""
-    * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 사이드바 파라미터에 따르며, KOSPI 지수가 60일선 위에 있는 대세 상승장에서는 최대 투입 한도를 **1.5배** 강제로 상향합니다.
+    * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 사이드바 파라미터에 따르며, 벤치마크 지수가 60일선 위에 있는 대세 상승장에서는 최대 투입 한도를 **1.5배** 강제로 상향합니다.
     * **알파 점수 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
     * **자본 증액 리밸런싱 (Capital Inflow):** 사이드바의 설정 운용 자금이 늘어나면, **이미 보유 중인 주도주라도 새로 늘어난 한도(Target Weight)만큼 정확히 계산하여 추가 매수를 지시**합니다.
     * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
