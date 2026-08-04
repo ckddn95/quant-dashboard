@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **전략별 벤치마크(KOSPI/KOSDAQ) 동적 스위칭**, **안전 확인 팝업**, **파라미터 초기화** 기능을 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **섹터별 대표주 확장**, **전략별 벤치마크(KOSPI/KOSDAQ) 동적 스위칭**, **안전 확인 팝업**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -63,7 +63,6 @@ def load_krx_universe():
     except Exception:
         return pd.DataFrame(columns=['Code', 'Name', 'Market', 'Marcap', 'Amount'])
 
-# [핵심] 코스피와 코스닥 지수 상태를 모두 가져오도록 변경
 @st.cache_data(ttl=1800)
 def fetch_market_data():
     try:
@@ -98,7 +97,6 @@ def fetch_stock_status(ticker_code):
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 close_prices = df['Close'].dropna()
                 volumes = df['Volume'].dropna()
-                low_prices = df['Low'].dropna() if 'Low' in df.columns else close_prices
                 if len(close_prices) == 0: continue
                 
                 current_price = float(close_prices.iloc[-1])
@@ -249,6 +247,7 @@ new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (특수문자 제
 new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"])
 new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d")
 
+# [확장] 포트폴리오 생성 시 섹터 대표주 자동 프리셋 주입
 if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=True):
     if new_p_name:
         safe_name = re.sub(r'[\\/*?:"<>|]', "", new_p_name)
@@ -257,10 +256,30 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
         if os.path.exists(new_file_path):
             st.sidebar.warning("이미 존재하는 이름입니다.")
         else:
+            # 대형주 선택 시 섹터별 대표주 13선 자동 구성
+            if new_p_strat == "대형주 (Core)":
+                default_stocks = [
+                    {'종목명': '삼성전자', '티커': '005930', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'SK하이닉스', '티커': '000660', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '현대차', '티커': '005380', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '삼성바이오로직스', '티커': '207940', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'LG에너지솔루션', '티커': '373220', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'KB금융', '티커': '105560', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'POSCO홀딩스', '티커': '005490', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'NAVER', '티커': '035420', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'HD한국조선해양', '티커': '009540', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '한화에어로스페이스', '티커': '012450', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'HD현대일렉트릭', '티커': '267260', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '하이브', '티커': '352820', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '삼양식품', '티커': '003230', '매수단가': 0, '보유수량': 0}
+                ]
+            else:
+                default_stocks = []
+
             new_data = {
                 'strategy': new_p_strat, 
                 'cash': new_p_cash,
-                'stocks': []
+                'stocks': default_stocks
             }
             with open(new_file_path, 'w', encoding='utf-8') as f:
                 json.dump(new_data, f, ensure_ascii=False, indent=2)
@@ -337,6 +356,31 @@ with tab1:
             st.markdown(f"<h3 style='color: #ff7f0e;'>🟧 📂 <code>{selected_port}</code></h3>", unsafe_allow_html=True)
             st.caption(f"**적용 엔진:** {current_strategy} &nbsp;|&nbsp; **현재 자산 풀:** {total_cash:,.0f}원")
         
+        # 대형주 원클릭 대표 섹터 추가 버튼 기능
+        if current_strategy == '대형주 (Core)':
+            st.markdown("---")
+            if st.button("➕ 대형주 섹터별 대표 13선 한번에 채우기", type="secondary"):
+                sector_core_stocks = [
+                    {'종목명': '삼성전자', '티커': '005930', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'SK하이닉스', '티커': '000660', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '현대차', '티커': '005380', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '삼성바이오로직스', '티커': '207940', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'LG에너지솔루션', '티커': '373220', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'KB금융', '티커': '105560', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'POSCO홀딩스', '티커': '005490', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'NAVER', '티커': '035420', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'HD한국조선해양', '티커': '009540', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '한화에어로스페이스', '티커': '012450', '매수단가': 0, '보유수량': 0},
+                    {'종목명': 'HD현대일렉트릭', '티커': '267260', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '하이브', '티커': '352820', '매수단가': 0, '보유수량': 0},
+                    {'종목명': '삼양식품', '티커': '003230', '매수단가': 0, '보유수량': 0}
+                ]
+                p_data['stocks'] = sector_core_stocks
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(p_data, f, ensure_ascii=False, indent=2)
+                st.rerun()
+
+        # 스캐너 UI
         if current_strategy == '중소형주 (Satellite)':
             st.markdown("---")
             st.markdown("### 🔍 AI 중소형주 눌림목 스캐너 (실전용)")
@@ -469,7 +513,6 @@ with tab1:
                 st.warning("진단할 종목이 없습니다.")
             else:
                 with st.spinner("거시 지표 및 개별 종목 필터, 자본 증감액 룰 분석 중..."):
-                    # [핵심] KOSPI 및 KOSDAQ 분리 지표 가져오기
                     vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
                     
                     vix_text = f"VIX {vix_val:.1f}"
@@ -477,7 +520,6 @@ with tab1:
                     elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
                     else: vix_status = f"{vix_text}(시장 경계/공포)"
 
-                    # 전략에 따른 시장 기준치 스위칭
                     market_ret_60 = kospi_ret_60 if current_strategy == '대형주 (Core)' else kosdaq_ret_60
 
                     stock_data_cache = {}
@@ -504,7 +546,6 @@ with tab1:
                         }
                         
                         vol_strong = vol_ratio >= 150.0
-                        # 상대강도 비교 기준 스위칭 반영
                         rs_strong = ret_60 > market_ret_60
                         ma200_pass = (not use_ma200_filter) or is_above_ma200
                         
@@ -528,7 +569,6 @@ with tab1:
                     total_score = sum(buy_scores.values()) if buy_scores else 1.0
                     
                     current_max_alloc_ratio = max_alloc_pct / 100.0
-                    # 강세장 부스터 기준 시장 스위칭 반영
                     if bull_market_boost and market_ret_60 > 0:
                         current_max_alloc_ratio = min(current_max_alloc_ratio * 1.5, 1.0)
 
@@ -719,12 +759,12 @@ with tab2:
             strat = p_data['strategy']
             init_cash = p_data['cash']
 
-            # [핵심] 전략에 따른 시뮬레이션 벤치마크 지수 설정 스위칭
             index_sym = 'KS11' if strat == '대형주 (Core)' else 'KQ11'
             index_name = 'KOSPI' if strat == '대형주 (Core)' else 'KOSDAQ'
 
+            # [확장] 중소형주 백테스트 우량 유니버스 45선 확장
             if strat == '중소형주 (Satellite)':
-                kosdaq_top30 = [
+                kosdaq_top45 = [
                     ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
                     ("리가켐바이오", "141080"), ("휴젤", "145020"), ("클래시스", "214150"), ("삼천당제약", "000250"),
                     ("셀트리온제약", "068760"), ("실리콘투", "257720"), ("HPSP", "403870"), ("레인보우로보틱스", "277810"),
@@ -732,10 +772,14 @@ with tab2:
                     ("동진쎄미켐", "052710"), ("파마리서치", "214450"), ("피에스케이", "319660"), ("원익IPS", "240810"),
                     ("테크윙", "089030"), ("주성엔지니어링", "036930"), ("심텍", "222800"), ("에스티팜", "237690"),
                     ("브이티", "018290"), ("티씨케이", "064760"), ("윤성에프앤씨", "372170"), ("워트", "396470"),
-                    ("하나마이크론", "067310"), ("루닛", "328130")
+                    ("하나마이크론", "067310"), ("루닛", "328130"), ("리노공업", "058470"), ("펩트론", "087010"),
+                    ("에이비엘바이오", "298380"), ("에이피알", "278470"), ("제룡전기", "033100"), ("비에이치아이", "083650"),
+                    ("태광", "023160"), ("원익QnC", "074600"), ("서진시스템", "178320"), ("파두", "440110"),
+                    ("메디톡스", "086900"), ("디어유", "376300"), ("펌텍코리아", "251970"), ("하이록코리아", "013030"),
+                    ("우양", "105630")
                 ]
-                sim_stocks = pd.DataFrame([{'종목명': name, '티커': code} for name, code in kosdaq_top30])
-                st.info("💡 **[AI 스캐너 시뮬레이션 모드]** 중소형주 전략은 특정 종목에 얽매이지 않으므로, 백테스트 시 **코스닥 유망 주도주 30선**이 유니버스(검색 풀)로 자동 적용됩니다.")
+                sim_stocks = pd.DataFrame([{'종목명': name, '티커': code} for name, code in kosdaq_top45])
+                st.info("💡 **[AI 스캐너 시뮬레이션 모드]** 중소형주 전략 백테스트 시 **섹터별 코스닥 우량주 45선**이 검색 풀로 자동 적용됩니다.")
             else:
                 sim_stocks = stocks.copy()
 
@@ -845,7 +889,6 @@ with tab2:
                         df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
                         df['Signal'] = df['Signal'].ffill().fillna(0)
                         
-                        # [핵심] 벤치마크 지수(KOSDAQ/KOSPI) 대비 상대강도로 가점 로직 변경
                         rs_condition = df['Ret_60'] > df['Bm_Ret_60']
                         df['Score'] = np.where(entry_cond, 
                                                1.0 + np.where(df['Vol_Strong'], 1.0 if strat != '대형주 (Core)' else 0.5, 0.0) + 
