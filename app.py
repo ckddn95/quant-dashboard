@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **포트폴리오별 KIS 계좌 개별 연동**, **안전 확인 팝업**, **파라미터 초기화**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **수수료 및 수익 종합 집계**, **가상/실계좌 탭 분리**, **통합 소싱 UI**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -868,7 +868,6 @@ with tab1:
                             f"{warning_msg}{boost_msg}")
                     st.table(pd.DataFrame(results))
 
-# [포트폴리오별 독립 연동된 실전 계좌 탭]
 with tab2:
     st.header("🔌 실전 계좌(API) 연동 현황")
     st.caption("사이드바에서 선택된 '활성 포트폴리오'에 1:1 매핑된 한국투자증권 실계좌 정보 및 잔고를 확인합니다.")
@@ -884,7 +883,8 @@ with tab2:
         is_mock = kis_cfg.get('is_mock', True)
 
         if not (cano and app_key and app_secret):
-            st.markdown(f"> 💡 현재 **`{selected_port}`** 포트폴리오에 연동된 KIS 계좌가 없습니다.<br>좌측 사이드바의 **[🔌 한국투자증권 실계좌 연동]** 메뉴에서 계좌 정보 및 API 키를 입력해주세요.", unsafe_allow_html=True)
+            # [버그 패치] st.info 에러 수정을 위해 st.markdown으로 교체
+            st.markdown(f"<div style='padding: 15px; border-radius: 8px; background-color: rgba(255, 193, 7, 0.1); border-left: 5px solid #ffc107; color: #856404;'>💡 현재 <b>{selected_port}</b> 포트폴리오에 연동된 KIS 계좌가 없습니다.<br>좌측 사이드바의 <b>[🔌 한국투자증권 실계좌 연동]</b> 메뉴에서 계좌 정보 및 API 키를 입력해주세요.</div>", unsafe_allow_html=True)
         else:
             acc_type_str = "모의투자 계좌" if is_mock else "실전투자 계좌"
             st.success(f"✅ **`{selected_port}`** 포트폴리오 연동 계좌: **`{cano[:4]}****-{acnt_prdt}`** ({acc_type_str})")
@@ -1414,6 +1414,14 @@ with tab3:
                         
                         st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
                         summary_rows = []
+                        
+                        # [신규] 총합 계산용 변수 선언
+                        sum_holding_val = 0
+                        sum_total_profit = 0
+                        sum_fee = 0
+                        sum_b_cnt = 0
+                        sum_s_cnt = 0
+                        
                         for name in stock_dfs:
                             last_dt = stock_dfs[name].index[-1]
                             final_c_price = stock_dfs[name].loc[last_dt, 'Close']
@@ -1431,6 +1439,13 @@ with tab3:
                             s_cnt = trade_stats[name]['sell']
                             fee = trade_stats[name]['fee']
                             
+                            # 데이터 누적 계산
+                            sum_holding_val += holding_val
+                            sum_total_profit += total_profit
+                            sum_fee += fee
+                            sum_b_cnt += b_cnt
+                            sum_s_cnt += s_cnt
+                            
                             summary_rows.append({
                                 '종목명': name,
                                 '최종 보유 주수': f"{shares[name]:.2f} 주",
@@ -1441,6 +1456,23 @@ with tab3:
                                 '총 발생 수수료': f"{fee:,.0f} 원",
                                 '기말 포트폴리오 비중': f"{weight:.2f}%"
                             })
+                            
+                        # [신규] 전체 합계 데이터 추가
+                        profit_pct_of_init = (sum_total_profit / init_cash) * 100 if init_cash > 0 else 0.0
+                        fee_pct_of_init = (sum_fee / init_cash) * 100 if init_cash > 0 else 0.0
+                        total_weight = (sum_holding_val / final_asset) * 100 if final_asset > 0 else 0.0
+
+                        summary_rows.append({
+                            '종목명': '💡 [전체 합계]',
+                            '최종 보유 주수': '-',
+                            '기말 평가금': f"{sum_holding_val:,.0f} 원",
+                            '총 순수익 (원)': f"{sum_total_profit:+,.0f} 원 (자산대비 {profit_pct_of_init:+.2f}%)",
+                            '수익률 (%)': '-',
+                            '매매 횟수': f"매수 {sum_b_cnt}회 / 매도 {sum_s_cnt}회",
+                            '총 발생 수수료': f"{sum_fee:,.0f} 원 (자산대비 {fee_pct_of_init:.2f}%)",
+                            '기말 포트폴리오 비중': f"{total_weight:.2f}%"
+                        })
+                        
                         st.table(pd.DataFrame(summary_rows))
                         
                         st.markdown("---")
