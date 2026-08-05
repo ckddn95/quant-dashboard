@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **스캐너-진단기 완벽 동기화**, **가상/실계좌 탭 분리**, **수수료 및 수익 종합 집계**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가상 매매 성과 추적기(Forward Test)**, **엔진 100% 동기화**, **가상/실계좌 탭 분리**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
 # 0. 로컬 저장소 디렉토리 세팅
@@ -147,9 +147,11 @@ def fetch_stock_status(ticker_code):
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 close_prices = df['Close'].dropna()
                 volumes = df['Volume'].dropna()
+                low_prices = df['Low'].dropna() if 'Low' in df.columns else close_prices
                 if len(close_prices) == 0: continue
                 
                 current_price = float(close_prices.iloc[-1])
+                current_low = float(low_prices.iloc[-1])
                 ma200 = float(close_prices.rolling(window=200).mean().iloc[-1]) if len(close_prices) >= 200 else current_price
                 ma60 = float(close_prices.rolling(window=60).mean().iloc[-1]) if len(close_prices) >= 60 else current_price
                 ma60_10d_ago = float(close_prices.rolling(window=60).mean().iloc[-11]) if len(close_prices) >= 70 else ma60
@@ -166,70 +168,526 @@ def fetch_stock_status(ticker_code):
                 ma60_slope_positive = (ma60 > ma60_10d_ago) 
                 is_above_ma200 = (current_price >= ma200) 
                 
-                # [핵심 수정] 진단기에서도 스캐너와 똑같이 '수급 폭발 이력(200% 이상)'을 인지하도록 산식 추가
-                df['Vol_5MA'] = volumes.rolling(5).mean().shift(1)
-                df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, volumes / df['Vol_5MA'] * 100, 100.0)
-                recent_20d_vol_max = float(df['Vol_Ratio'].tail(20).max())
+                vol_5ma_series = volumes.rolling(5).mean().shift(1)
+                vol_ratio_arr = np.where(vol_5ma_series > 0, volumes / vol_5ma_series * 100, 100.0)
+                vol_ratio_series = pd.Series(vol_ratio_arr, index=volumes.index)
+                recent_20d_vol_max = float(vol_ratio_series.tail(20).max())
                 vol_surged = recent_20d_vol_max >= 200.0
 
-                return current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged
+                return (current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, 
+                        ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_20d_vol_max)
     except Exception: pass
-    return None, None, None, None, None, None, None, None, False, False, False
+    return None, None, None, None, None, None, None, None, False, False, False, None, 0.0
+
+@st.cache_data(ttl=3600)
+def run_core_scanner(use_ma200_filter_flag, buf_pct):
+    results = []
+    krx = load_krx_universe()
+    buf = buf_pct / 100.0
+    try:
+        kospi = krx[krx['Market'] == 'KOSPI']
+        if 'Marcap' in kospi.columns:
+            candidates = kospi.sort_values('Marcap', ascending=False).head(100)
+        else:
+            candidates = kospi.head(100)
+    except: return []
+
+    for idx, row in candidates.iterrows():
+        code = row['Code']
+        name = row['Name']
+        res = fetch_stock_status(code)
+        if res[0] is None: continue
+        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = res
+        
+        ma200_pass = (not use_ma200_filter_flag) or is_above_ma200
+        trend_starting = (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0)
+        
+        if ma200_pass and trend_starting:
+            diff_ma = ((ma20 / ma60) - 1) * 100
+            results.append({
+                '종목명': name, '티커': code, '현재가': f"{c_price:,.0f} 원",
+                '20/60선 이격': f"{diff_ma:+.2f}%", '20일 모멘텀': f"{ret_20:+.2f}%",
+                '진단 근거': "장기 추세선 방어 및 골든크로스 안착"
+            })
+    return pd.DataFrame(results)
 
 @st.cache_data(ttl=3600)
 def run_satellite_scanner(use_ma200_filter_flag):
     results = []
     krx = load_krx_universe()
     try:
-        kosdaq = krx[(krx['Market'] == 'KOSDAQ') | (krx['Market'] == 'KOSDAQ GLOBAL')]
-        if 'Marcap' in kosdaq.columns and 'Amount' in kosdaq.columns:
-            kosdaq = kosdaq[kosdaq['Marcap'] >= 50000000000]
-            candidates = kosdaq.sort_values('Amount', ascending=False).head(100)
+        kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
+        if 'Marcap' in kosdaq.columns:
+            kosdaq = kosdaq[kosdaq['Marcap'] >= 100000000000]
+            candidates = kosdaq.sort_values('Marcap', ascending=False).head(150)
         else:
-            candidates = kosdaq.head(100)
+            candidates = kosdaq.head(150)
     except: return []
 
     for idx, row in candidates.iterrows():
         code = row['Code']
         name = row['Name']
-        try:
-            df = yf.download(f"{code}.KQ", period="2y", progress=False)
-            if df.empty: continue
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            
-            df['MA20'] = df['Close'].rolling(20).mean()
-            df['MA200'] = df['Close'].rolling(200).mean()
-            df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
-            df['Vol_5MA'] = df['Volume'].rolling(5).mean().shift(1)
-            df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
-            
-            df = df.dropna(subset=['Close', 'MA20', 'Volume'])
-            if len(df) < 20: continue
-            
-            current_close = float(df['Close'].iloc[-1])
-            current_low = float(df['Low'].iloc[-1]) if 'Low' in df.columns else current_close
-            current_ma20 = float(df['MA20'].iloc[-1])
-            current_ma200 = float(df['MA200'].iloc[-1]) if pd.notna(df['MA200'].iloc[-1]) else current_close
-            recent_high = float(df['Roll_Max'].iloc[-1]) if pd.notna(df['Roll_Max'].iloc[-1]) else current_close
-            
-            recent_20d_vol_max = df['Vol_Ratio'].tail(20).max()
-            vol_surged = recent_20d_vol_max >= 200.0
-            
-            dist_from_ma20 = ((current_close / current_ma20) - 1) * 100
-            is_dip_buying = (-5.0 <= dist_from_ma20 <= 3.0) or (current_low <= current_ma20 * 1.01 and current_close >= current_ma20 * 0.95)
-            
-            ma200_pass = (not use_ma200_filter_flag) or (current_close >= current_ma200)
-            drawdown = ((current_close / recent_high) - 1) * 100
-            dd_pass = drawdown >= -30.0 
-            
-            if vol_surged and is_dip_buying and ma200_pass and dd_pass:
-                results.append({
-                    '종목명': name, '티커': code, '현재가': f"{current_close:,.0f} 원",
-                    '20일선 이격도': f"{dist_from_ma20:+.2f}%", '최근 최대 수급': f"{recent_20d_vol_max:,.0f}%",
-                    '진단 근거': "수급 유입 후 20일선 안착"
-                })
-        except: continue
+        res = fetch_stock_status(code)
+        if res[0] is None: continue
+        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = res
+        
+        dist_ma20 = ((c_price / ma20) - 1) * 100
+        low_ma20_touch = (current_low <= ma20 * 1.01) and (c_price >= ma20 * 0.95)
+        is_dip = (-5.0 <= dist_ma20 <= 3.0) or low_ma20_touch
+        
+        ma200_pass = (not use_ma200_filter_flag) or is_above_ma200
+        dd_pass = drawdown >= -30.0 
+        
+        if vol_surged and is_dip and ma200_pass and dd_pass:
+            results.append({
+                '종목명': name, '티커': code, '현재가': f"{c_price:,.0f} 원",
+                '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{recent_vol_max:,.0f}%",
+                '진단 근거': "수급 폭발 후 20일선 눌림목"
+            })
     return pd.DataFrame(results)
+
+# [핵심 통합] 독립된 시뮬레이션 계산 엔진 (가상 운용/백테스트 공통 사용)
+@st.cache_data(ttl=1800)
+def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
+                         use_ma200_filter, whipsaw_buffer, sat_stop_loss,
+                         max_alloc_pct, min_hold_days, ts_target_pct,
+                         ts_drop_pct, bull_market_boost, cooldown_days):
+    
+    index_sym = 'KS11' if strat == '대형주 (Core)' else 'KQ11'
+    fetch_start = start_date - datetime.timedelta(days=300)
+    
+    market_df = pd.DataFrame()
+    benchmark_ret_val = 0.0
+    final_benchmark_asset = init_cash
+    
+    try:
+        bm_df = fdr.DataReader(index_sym, fetch_start, end_date)
+        if not bm_df.empty:
+            if bm_df.index.tz is not None:
+                bm_df.index = bm_df.index.tz_localize(None)
+            bm_df['Bm_Ret_60'] = bm_df['Close'] / bm_df['Close'].shift(60) - 1
+            bm_df['Bm_MA60'] = bm_df['Close'].rolling(60).mean()
+            market_df['Bm_Ret_60'] = bm_df['Bm_Ret_60']
+            market_df['Bm_Bull'] = bm_df['Close'] > bm_df['Bm_MA60']
+            
+            start_dt = pd.to_datetime(start_date)
+            sim_bm = bm_df[bm_df.index >= start_dt]['Close'].dropna()
+            if len(sim_bm) > 1:
+                k_start = float(sim_bm.iloc[0])
+                k_end = float(sim_bm.iloc[-1])
+                benchmark_ret_val = ((k_end / k_start) - 1) * 100
+                final_benchmark_asset = init_cash * (1 + benchmark_ret_val / 100)
+    except: pass
+
+    try:
+        vix_df = yf.download("^VIX", start=fetch_start, end=end_date, progress=False)
+        if not vix_df.empty:
+            if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
+            vix_df['VIX_MA3'] = vix_df['Close'].rolling(3).mean()
+            market_df['VIX_Contrarian'] = (vix_df['Close'] >= 25.0) & (vix_df['Close'] < vix_df['VIX_MA3'])
+            market_df['VIX_Safe'] = vix_df['Close'] < 30.0
+    except: pass
+    
+    market_df = market_df.ffill().fillna(0)
+    
+    stock_dfs = {}
+    buf = whipsaw_buffer / 100.0
+    start_dt = pd.to_datetime(start_date)
+    
+    for idx, row in sim_stocks.iterrows():
+        ticker = row['티커']
+        name = row['종목명']
+        
+        df = None
+        for suf in ['.KS', '.KQ']:
+            temp_df = yf.download(f"{ticker}{suf}", start=fetch_start, end=end_date, progress=False)
+            if not temp_df.empty:
+                if isinstance(temp_df.columns, pd.MultiIndex): temp_df.columns = temp_df.columns.get_level_values(0)
+                df = temp_df
+                break
+        
+        if df is None or df.empty: continue
+            
+        df['Close'] = df['Close'].ffill()
+        df['Volume'] = df['Volume'].ffill()
+        df['Daily_Ret'] = df['Close'].pct_change()
+        
+        df['MA200'] = df['Close'].rolling(200).mean()
+        df['Is_Above_MA200'] = df['Close'] >= df['MA200']
+        
+        df['MA60'] = df['Close'].rolling(60).mean()
+        df['MA60_Slope'] = df['MA60'] > df['MA60'].shift(10)
+        df['MA20'] = df['Close'].rolling(20).mean()
+        df['Ret_60'] = df['Close'] / df['Close'].shift(60) - 1
+        df['Ret_20'] = df['Close'] / df['Close'].shift(20) - 1
+        
+        df['Vol_5MA'] = df['Volume'].rolling(5).mean().shift(1)
+        df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
+        df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
+        
+        df['Recent_Vol_Max'] = df['Vol_Ratio'].rolling(window=20, min_periods=1).max()
+        df['Vol_Surged'] = df['Recent_Vol_Max'] >= 200.0
+        
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+            
+        df = df.join(market_df, how='left')
+        df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
+        df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
+        df['Bm_Ret_60'] = df['Bm_Ret_60'].fillna(0.0)
+        df['Bm_Bull'] = df['Bm_Bull'].fillna(False)
+        
+        ma200_cond = df['Is_Above_MA200'] if use_ma200_filter else True
+        
+        if strat == '대형주 (Core)':
+            entry_cond = (ma200_cond & (df['MA20'] >= df['MA60'] * (1 + buf)) & df['MA60_Slope'] & (df['Ret_20'] > 0) & df['VIX_Safe']) | df['VIX_Contrarian']
+            exit_cond = (df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian'])
+        else:
+            df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
+            df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
+            
+            dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
+            low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
+            is_dip = (-5.0 <= dist_ma20 <= 3.0) | low_ma20_touch
+            
+            entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
+            exit_cond = ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
+        
+        df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
+        df['Signal'] = df['Signal'].ffill().fillna(0)
+        
+        rs_condition = df['Ret_60'] > df['Bm_Ret_60']
+        df['Score'] = np.where(entry_cond, 
+                                1.0 + np.where(df['Vol_Strong'], 1.0 if strat != '대형주 (Core)' else 0.5, 0.0) + 
+                                np.where(rs_condition, 0.5, 0.0) + 
+                                np.where(df['VIX_Contrarian'], 1.0, 0.0), 
+                                0.0)
+        
+        stock_dfs[name] = df[df.index >= start_dt].copy()
+        
+    if not stock_dfs:
+        return None
+        
+    all_indices = [df.index for df in stock_dfs.values()]
+    common_index = all_indices[0]
+    for idx_df in all_indices[1:]:
+        if len(idx_df) > len(common_index):
+            common_index = idx_df 
+        
+    portfolio_history = []
+    history_records = [] 
+    
+    trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0, 'realized_pnl': 0.0} for name in stock_dfs}
+    
+    dates = common_index
+    shares = {name: 0.0 for name in stock_dfs}
+    hold_days = {name: 0 for name in stock_dfs}
+    max_invested = {name: 0.0 for name in stock_dfs}
+    peak_price_since_buy = {name: 0.0 for name in stock_dfs}
+    
+    consecutive_losses = {name: 0 for name in stock_dfs}
+    cooldown_until = {name: pd.Timestamp.min for name in stock_dfs}
+    
+    cash = init_cash
+    avg_buy_price = {name: 0.0 for name in stock_dfs}
+    realized_pnl = {name: 0.0 for name in stock_dfs}
+    
+    base_alloc_ratio = max_alloc_pct / 100.0
+    ts_target = ts_target_pct / 100.0
+    ts_drop = ts_drop_pct / 100.0
+    
+    for i, date_val in enumerate(dates):
+        if i == 0:
+            portfolio_history.append(init_cash)
+            record = {'Date': date_val, '현금(Cash)': init_cash}
+            for name in stock_dfs: record[name] = 0.0
+            history_records.append(record)
+            continue
+            
+        current_max_alloc_ratio = base_alloc_ratio
+        market_bull = False
+        for df_check in stock_dfs.values():
+            if date_val in df_check.index:
+                market_bull = df_check.loc[date_val, 'Bm_Bull']
+                break
+        
+        if bull_market_boost and market_bull:
+            current_max_alloc_ratio = min(base_alloc_ratio * 1.5, 1.0)
+        
+        for name in stock_dfs:
+            if shares[name] > 0: hold_days[name] += 1
+            else: hold_days[name] = 0
+        
+        active_stocks = []
+        scores = {}
+        for name, df in stock_dfs.items():
+            if date_val not in df.index: continue
+            sig = df.loc[date_val, 'Signal']
+            c_price = df.loc[date_val, 'Close']
+            
+            if shares[name] == 0 and date_val < cooldown_until[name]:
+                sig = 0.0
+            
+            trailing_stop_exit = False
+            if shares[name] > 0 and avg_buy_price[name] > 0:
+                peak_price_since_buy[name] = max(peak_price_since_buy[name], c_price)
+                curr_ret = (c_price / avg_buy_price[name]) - 1
+                drop_from_peak = (c_price / peak_price_since_buy[name]) - 1
+                
+                if curr_ret >= ts_target and drop_from_peak <= ts_drop:
+                    trailing_stop_exit = True
+            
+            force_exit = False
+            if strat != '대형주 (Core)' and shares[name] > 0 and avg_buy_price[name] > 0:
+                user_ret = (c_price / avg_buy_price[name]) - 1
+                if user_ret <= (sat_stop_loss / 100.0):
+                    force_exit = True
+                
+            if trailing_stop_exit or force_exit:
+                sig = 0.0
+            elif shares[name] > 0 and hold_days[name] < min_hold_days:
+                sig = 1.0
+                
+            if sig == 1:
+                active_stocks.append(name)
+                scores[name] = df.loc[date_val, 'Score'] if df.loc[date_val, 'Score'] > 0 else 1.0
+            else:
+                peak_price_since_buy[name] = 0.0
+                
+        for name, df in stock_dfs.items():
+            curr_sig = 1 if name in active_stocks else 0
+            prev_sig = 1 if shares[name] > 0 else 0
+            if curr_sig == 1 and prev_sig == 0:
+                trade_stats[name]['buy'] += 1
+            elif curr_sig == 0 and prev_sig == 1:
+                trade_stats[name]['sell'] += 1
+                
+        stock_eval_total = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
+        total_asset = cash + stock_eval_total
+        
+        n_active = len(active_stocks)
+        if n_active > 0:
+            total_score = sum(scores.values()) if sum(scores.values()) > 0 else n_active
+            for name in stock_dfs:
+                if date_val not in stock_dfs[name].index: continue
+                c_price = stock_dfs[name].loc[date_val, 'Close']
+                current_val = shares[name] * c_price
+                
+                if name in active_stocks:
+                    weight = scores.get(name, 1.0) / total_score
+                    target_alloc = min(total_asset * weight, total_asset * current_max_alloc_ratio)
+                    diff_val = target_alloc - current_val
+                    
+                    if diff_val > 0: 
+                        cost = diff_val
+                        fee = cost * 0.0025
+                        if cash >= (cost + fee):
+                            cash -= (cost + fee)
+                            added_shares = cost / c_price
+                            if shares[name] > 0:
+                                avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
+                            else:
+                                avg_buy_price[name] = c_price
+                                peak_price_since_buy[name] = c_price
+                            shares[name] += added_shares
+                            trade_stats[name]['fee'] += fee
+                            realized_pnl[name] -= fee 
+                            max_invested[name] = max(max_invested[name], shares[name] * c_price)
+                        else:
+                            cost = max(cash - (cash * 0.0025), 0)
+                            if cost > 0:
+                                fee = cost * 0.0025
+                                cash -= (cost + fee)
+                                added_shares = cost / c_price
+                                if shares[name] > 0:
+                                    avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
+                                else:
+                                    avg_buy_price[name] = c_price
+                                    peak_price_since_buy[name] = c_price
+                                shares[name] += added_shares
+                                trade_stats[name]['fee'] += fee
+                                realized_pnl[name] -= fee
+                                max_invested[name] = max(max_invested[name], shares[name] * c_price)
+                    elif diff_val < 0: 
+                        proceeds = abs(diff_val)
+                        fee = proceeds * 0.0025
+                        sold_shares = proceeds / c_price
+                        pnl = sold_shares * (c_price - avg_buy_price[name]) - fee
+                        realized_pnl[name] += pnl
+                        cash += (proceeds - fee)
+                        shares[name] -= sold_shares
+                        trade_stats[name]['fee'] += fee
+                else:
+                    if shares[name] > 0: 
+                        proceeds = shares[name] * c_price
+                        fee = proceeds * 0.0025
+                        pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
+                        
+                        if pnl < 0:
+                            consecutive_losses[name] += 1
+                            if consecutive_losses[name] >= 2 and cooldown_days > 0:
+                                cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
+                        else:
+                            consecutive_losses[name] = 0
+                            
+                        realized_pnl[name] += pnl
+                        cash += (proceeds - fee)
+                        trade_stats[name]['fee'] += fee
+                        shares[name] = 0.0
+                        avg_buy_price[name] = 0.0
+                        peak_price_since_buy[name] = 0.0
+        else:
+            for name in stock_dfs:
+                if shares[name] > 0 and date_val in stock_dfs[name].index:
+                    c_price = stock_dfs[name].loc[date_val, 'Close']
+                    proceeds = shares[name] * c_price
+                    fee = proceeds * 0.0025
+                    pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
+                    
+                    if pnl < 0:
+                        consecutive_losses[name] += 1
+                        if consecutive_losses[name] >= 2 and cooldown_days > 0:
+                            cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
+                    else:
+                        consecutive_losses[name] = 0
+                        
+                    realized_pnl[name] += pnl
+                    cash += (proceeds - fee)
+                    trade_stats[name]['fee'] += fee
+                    shares[name] = 0.0
+                    avg_buy_price[name] = 0.0
+                    peak_price_since_buy[name] = 0.0
+                    
+        final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
+        portfolio_history.append(max(cash + final_eval, 0))
+        
+        record = {'Date': date_val, '현금(Cash)': max(cash, 0)}
+        for name in stock_dfs:
+            record[name] = shares[name] * stock_dfs[name].loc[date_val, 'Close'] if date_val in stock_dfs[name].index else 0.0
+        history_records.append(record)
+        
+    ai_portfolio_series = pd.Series(portfolio_history, index=common_index)
+    
+    bh_values = {}
+    dca_values = {}
+    cash_per_stock_init = init_cash / len(stock_dfs)
+    
+    for name, df in stock_dfs.items():
+        sim_df = df.copy()
+        bh_values[name] = (sim_df['Close'] / sim_df['Close'].iloc[0]) * cash_per_stock_init
+        
+        n_months = len(sim_df.groupby(sim_df.index.to_period('M')))
+        initial_seed = (init_cash * 0.2) / len(stock_dfs)
+        shares_acc = initial_seed / sim_df['Close'].iloc[0]
+        dca_list = []
+        for date_val, row_val in sim_df.iterrows():
+            if date_val != sim_df.index[0] and date_val.day <= 3 and date_val.month != sim_df.index[sim_df.index.get_loc(date_val)-1].month:
+                if n_months > 0:
+                    add_amt = (init_cash * 0.8 / n_months) / len(stock_dfs)
+                    shares_acc += add_amt / row_val['Close']
+                dca_list.append(shares_acc * row_val['Close'])
+            else:
+                dca_list.append(shares_acc * row_val['Close'])
+        dca_values[name] = pd.Series(dca_list, index=sim_df.index)
+        
+    bh_df = pd.DataFrame(bh_values).sum(axis=1)
+    dca_df = pd.DataFrame(dca_values).sum(axis=1)
+    
+    final_asset = ai_portfolio_series.iloc[-1]
+    final_port_ret = ((final_asset / init_cash) - 1) * 100
+    final_bh_asset = bh_df.iloc[-1]
+    final_bh_ret = ((final_bh_asset / init_cash) - 1) * 100
+    final_dca_asset = dca_df.iloc[-1]
+    final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
+    
+    summary_rows = []
+    sum_holding_val = 0
+    sum_total_profit = 0
+    sum_fee = 0
+    sum_b_cnt = 0
+    sum_s_cnt = 0
+    
+    for name in stock_dfs:
+        last_dt = stock_dfs[name].index[-1]
+        final_c_price = stock_dfs[name].loc[last_dt, 'Close']
+        holding_val = shares[name] * final_c_price
+        
+        unrealized_pnl = shares[name] * (final_c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
+        total_profit = realized_pnl[name] + unrealized_pnl
+        
+        invested_base = max_invested[name] if max_invested[name] > 0 else (init_cash / len(stock_dfs))
+        ret = (total_profit / invested_base) * 100
+        ret = max(ret, -100.0) 
+        weight = (holding_val / final_asset) * 100 if final_asset > 0 else 0.0
+        
+        b_cnt = trade_stats[name]['buy']
+        s_cnt = trade_stats[name]['sell']
+        fee = trade_stats[name]['fee']
+        
+        sum_holding_val += holding_val
+        sum_total_profit += total_profit
+        sum_fee += fee
+        sum_b_cnt += b_cnt
+        sum_s_cnt += s_cnt
+        
+        summary_rows.append({
+            '종목명': name,
+            '최종 보유 주수': f"{shares[name]:.2f} 주",
+            '기말 평가금': f"{holding_val:,.0f} 원",
+            '총 순수익 (원)': f"{total_profit:+,.0f} 원",
+            '수익률 (%)': f"{ret:+.2f}%",
+            '매매 횟수': f"매수 {b_cnt}회 / 매도 {s_cnt}회",
+            '총 발생 수수료': f"{fee:,.0f} 원",
+            '기말 포트폴리오 비중': f"{weight:.2f}%"
+        })
+        
+    profit_pct_of_init = (sum_total_profit / init_cash) * 100 if init_cash > 0 else 0.0
+    fee_pct_of_init = (sum_fee / init_cash) * 100 if init_cash > 0 else 0.0
+    total_weight = (sum_holding_val / final_asset) * 100 if final_asset > 0 else 0.0
+
+    summary_rows.append({
+        '종목명': '💡 [전체 합계]',
+        '최종 보유 주수': '-',
+        '기말 평가금': f"{sum_holding_val:,.0f} 원",
+        '총 순수익 (원)': f"{sum_total_profit:+,.0f} 원 (자산대비 {profit_pct_of_init:+.2f}%)",
+        '수익률 (%)': '-',
+        '매매 횟수': f"매수 {sum_b_cnt}회 / 매도 {sum_s_cnt}회",
+        '총 발생 수수료': f"{sum_fee:,.0f} 원 (자산대비 {fee_pct_of_init:.2f}%)",
+        '기말 포트폴리오 비중': f"{total_weight:.2f}%"
+    })
+    
+    history_df = pd.DataFrame(history_records).set_index('Date')
+    try:
+        eom_val_df = history_df.resample('ME').last()
+    except ValueError:
+        eom_val_df = history_df.resample('M').last()
+        
+    eom_weights = eom_val_df.div(eom_val_df.sum(axis=1), axis=0) * 100
+    eom_weights = eom_weights.fillna(0)
+    eom_weights.index = eom_weights.index.strftime('%Y-%m')
+    
+    stock_cols = sorted([c for c in eom_weights.columns if c != '현금(Cash)'])
+    cols_ordered = stock_cols + ['현금(Cash)'] 
+    eom_weights = eom_weights[cols_ordered]
+    
+    eom_weights_reset = eom_weights.reset_index().melt('Date', var_name='Asset', value_name='Weight')
+    order_map = {name: i for i, name in enumerate(cols_ordered)}
+    eom_weights_reset['Order'] = eom_weights_reset['Asset'].map(order_map)
+    
+    return {
+        'final_asset': final_asset,
+        'final_port_ret': final_port_ret,
+        'summary_rows': summary_rows,
+        'eom_weights_reset': eom_weights_reset,
+        'benchmark_ret_val': benchmark_ret_val,
+        'final_benchmark_asset': final_benchmark_asset,
+        'final_bh_asset': final_bh_asset,
+        'final_bh_ret': final_bh_ret,
+        'final_dca_asset': final_dca_asset,
+        'final_dca_ret': final_dca_ret,
+        'cols_ordered': cols_ordered,
+        'color_range': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'] * (len(stock_cols)//10 + 1)
+    }
 
 # ==========================================
 # 2. 세션 트래킹 초기화
@@ -262,6 +720,7 @@ if port_names:
             if 'cash' not in p_data: p_data['cash'] = 10000000
             if 'stocks' not in p_data: p_data['stocks'] = []
             if 'kis_config' not in p_data: p_data['kis_config'] = {}
+            if 'created_at' not in p_data: p_data['created_at'] = (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
     except Exception:
         st.sidebar.error("파일을 읽는 데 실패했습니다.")
         p_data = None
@@ -336,7 +795,8 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
                 'strategy': new_p_strat, 
                 'cash': new_p_cash,
                 'stocks': default_stocks,
-                'kis_config': {}
+                'kis_config': {},
+                'created_at': datetime.date.today().strftime('%Y-%m-%d')
             }
             with open(new_file_path, 'w', encoding='utf-8') as f:
                 json.dump(new_data, f, ensure_ascii=False, indent=2)
@@ -434,19 +894,19 @@ if st.sidebar.button("🔄 초기 AI 권장 세팅으로 복구", use_container_
     st.rerun()
 
 st.sidebar.markdown("**횡보/하락장 방어 필터**")
-use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True, key=f"ma200_{active_strat}")
-cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=60, step=15, key=f"cd_{active_strat}")
+use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=st.session_state.get(f"ma200_{active_strat}", True), key=f"ma200_{active_strat}")
+cooldown_days = st.sidebar.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=st.session_state.get(f"cd_{active_strat}", 60), step=15, key=f"cd_{active_strat}")
 
 st.sidebar.markdown("**기본 리스크 관리**")
-whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5, key=f"wb_{active_strat}")
-sat_stop_loss = st.sidebar.slider("긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=def_sl, step=1, key=f"sl_{active_strat}")
-max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=def_alloc, step=5, key=f"alloc_{active_strat}")
-min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1, key=f"hold_{active_strat}")
+whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=st.session_state.get(f"wb_{active_strat}", 1.5), step=0.5, key=f"wb_{active_strat}")
+sat_stop_loss = st.sidebar.slider("긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=st.session_state.get(f"sl_{active_strat}", def_sl), step=1, key=f"sl_{active_strat}")
+max_alloc_pct = st.sidebar.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=st.session_state.get(f"alloc_{active_strat}", def_alloc), step=5, key=f"alloc_{active_strat}")
+min_hold_days = st.sidebar.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=st.session_state.get(f"hold_{active_strat}", 5), step=1, key=f"hold_{active_strat}")
 
 st.sidebar.markdown("**🔥 대세 추세장 셋업**")
-ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=def_ts_target, step=5, key=f"ts_t_{active_strat}")
-ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=def_ts_drop, step=1, key=f"ts_d_{active_strat}")
-bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=True, key=f"boost_{active_strat}")
+ts_target_pct = st.sidebar.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=st.session_state.get(f"ts_t_{active_strat}", def_ts_target), step=5, key=f"ts_t_{active_strat}")
+ts_drop_pct = st.sidebar.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=st.session_state.get(f"ts_d_{active_strat}", def_ts_drop), step=1, key=f"ts_d_{active_strat}")
+bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", value=st.session_state.get(f"boost_{active_strat}", True), key=f"boost_{active_strat}")
 
 # ==========================================
 # 4. 탭 구성
@@ -526,52 +986,93 @@ with tab1:
         with col_src2:
             st.markdown("**[🔍 실시간 AI 타점 스캐너]**")
             if current_strategy == '대형주 (Core)':
-                st.info("💡 대형주는 장기 추세를 추종하므로 잦은 스캐너 교체보다 우량주 '원클릭 팩'과 '비중 관리'를 권장합니다.")
+                if st.button("🚀 KOSPI 우량주 골든크로스 탐색", type="primary", use_container_width=True):
+                    st.session_state.show_scanner = True
             else:
-                if st.button("🚀 오늘 진입 가능한 눌림목 탐색", type="primary", use_container_width=True):
+                if st.button("🚀 KOSDAQ 주도주 눌림목 탐색", type="primary", use_container_width=True):
                     st.session_state.show_scanner = True
 
-        if current_strategy == '중소형주 (Satellite)' and st.session_state.show_scanner:
-            with st.spinner("코스닥 100 유동성 종목 분석 중... (약 10초 소요)"):
-                scan_result = run_satellite_scanner(use_ma200_filter)
-                if not scan_result.empty:
-                    st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 조건 완벽 일치)")
-                    hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
-                    hc1.write("**종목명 (티커)**")
-                    hc2.write("**현재가**")
-                    hc3.write("**20일선 이격도**")
-                    hc4.write("**최대 수급(거래량)**")
-                    hc5.write("**가상 포트 추가**")
-                    st.markdown("---")
-                    
-                    for idx, row in scan_result.iterrows():
-                        c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
-                        ticker = row['티커']
-                        name = row['종목명']
+        if st.session_state.show_scanner:
+            if current_strategy == '대형주 (Core)':
+                with st.spinner("KOSPI 시가총액 상위 100종목 대세 상승 전환 분석 중... (약 10초 소요)"):
+                    scan_result = run_core_scanner(use_ma200_filter, whipsaw_buffer)
+                    if not scan_result.empty:
+                        st.success(f"✅ AI가 새로운 추세를 시작한 대장주 {len(scan_result)}개를 발굴했습니다!")
+                        hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                        hc1.write("**종목명 (티커)**")
+                        hc2.write("**현재가**")
+                        hc3.write("**20/60선 이격**")
+                        hc4.write("**20일 모멘텀**")
+                        hc5.write("**가상 포트 추가**")
+                        st.markdown("---")
                         
-                        c1.write(f"**{name}** (`{ticker}`)")
-                        c2.write(row['현재가'])
-                        c3.write(row['20일선 이격도'])
-                        c4.write(row['최근 최대 수급'])
+                        for idx, row in scan_result.iterrows():
+                            c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                            ticker = row['티커']
+                            name = row['종목명']
+                            
+                            c1.write(f"**{name}** (`{ticker}`)")
+                            c2.write(row['현재가'])
+                            c3.write(row['20/60선 이격'])
+                            c4.write(row['20일 모멘텀'])
+                            
+                            is_exist = False
+                            if not stocks_df.empty and '티커' in stocks_df.columns:
+                                is_exist = (stocks_df['티커'] == ticker).any()
+                            
+                            if is_exist:
+                                c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
+                            else:
+                                if c5.button("➕ 샌드박스 담기", key=f"scan_{ticker}_add"):
+                                    new_row = {'종목명': name, '티커': ticker, '매수단가': 0, '보유수량': 0}
+                                    p_data['stocks'].append(new_row)
+                                    temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
+                                    p_data['stocks'] = temp_df.to_dict(orient='records')
+                                    with open(file_path, 'w', encoding='utf-8') as f:
+                                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                                    st.rerun() 
+                    else:
+                        st.warning("⚠️ 현재 조건(200일선 방어 및 골든크로스 전환)을 완벽히 만족하는 대형 우량주가 없습니다.")
+            else:
+                with st.spinner("코스닥 시가총액 상위 150종목 눌림목 분석 중... (약 15초 소요)"):
+                    scan_result = run_satellite_scanner(use_ma200_filter)
+                    if not scan_result.empty:
+                        st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 완벽 일치)")
+                        hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                        hc1.write("**종목명 (티커)**")
+                        hc2.write("**현재가**")
+                        hc3.write("**20일선 이격도**")
+                        hc4.write("**최대 수급(거래량)**")
+                        hc5.write("**가상 포트 추가**")
+                        st.markdown("---")
                         
-                        is_exist = False
-                        if not stocks_df.empty and '티커' in stocks_df.columns:
-                            is_exist = (stocks_df['티커'] == ticker).any()
-                        
-                        if is_exist:
-                            c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
-                        else:
-                            if c5.button("➕ 샌드박스 담기", key=f"scan_{ticker}_add"):
-                                new_row = {'종목명': name, '티커': ticker, '매수단가': 0, '보유수량': 0}
-                                p_data['stocks'].append(new_row)
-                                temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
-                                p_data['stocks'] = temp_df.to_dict(orient='records')
-                                
-                                with open(file_path, 'w', encoding='utf-8') as f:
-                                    json.dump(p_data, f, ensure_ascii=False, indent=2)
-                                st.rerun() 
-                else:
-                    st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
+                        for idx, row in scan_result.iterrows():
+                            c1, c2, c3, c4, c5 = st.columns([2.5, 1.5, 1.5, 2, 2])
+                            ticker = row['티커']
+                            name = row['종목명']
+                            
+                            c1.write(f"**{name}** (`{ticker}`)")
+                            c2.write(row['현재가'])
+                            c3.write(row['20일선 이격도'])
+                            c4.write(row['최근 최대 수급'])
+                            
+                            is_exist = False
+                            if not stocks_df.empty and '티커' in stocks_df.columns:
+                                is_exist = (stocks_df['티커'] == ticker).any()
+                            
+                            if is_exist:
+                                c5.button("✔️ 추가됨", key=f"scan_{ticker}_disabled", disabled=True)
+                            else:
+                                if c5.button("➕ 샌드박스 담기", key=f"scan_{ticker}_add"):
+                                    new_row = {'종목명': name, '티커': ticker, '매수단가': 0, '보유수량': 0}
+                                    p_data['stocks'].append(new_row)
+                                    temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
+                                    p_data['stocks'] = temp_df.to_dict(orient='records')
+                                    with open(file_path, 'w', encoding='utf-8') as f:
+                                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                                    st.rerun() 
+                    else:
+                        st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
         
         st.markdown("---")
         st.markdown("### 📝 수동 종목 관리 (검색 / 삭제)")
@@ -642,6 +1143,60 @@ with tab1:
                          json.dump(p_data, f, ensure_ascii=False, indent=2)
                     st.rerun()
 
+        # ==========================================
+        # [신규] AI 가상 자동매매 성과 (Forward Test) 모듈
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📈 AI 자동매매 가상 운용 성과 (Forward Test)")
+        st.markdown("포트폴리오 생성일(또는 종목 변경일)부터 오늘까지, **현재 편입된 종목 풀을 대상으로 AI가 수동 개입 없이 100% 자동 매매를 수행했다고 가정**했을 때의 누적 수익률입니다.")
+        
+        created_str = p_data.get('created_at', (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d'))
+        created_dt = datetime.datetime.strptime(created_str, "%Y-%m-%d").date()
+        
+        col_ft1, col_ft2 = st.columns([1, 2])
+        with col_ft1:
+            ft_start = st.date_input("가상 운용 시작일 (포트폴리오 생성/변경일)", value=created_dt)
+        with col_ft2:
+            st.write("")
+            st.write("")
+            ft_run = st.button("🚀 선택한 기간 AI 가상 매매 수익률 계산", type="primary", use_container_width=True)
+
+        if ft_run:
+            if stocks_df.empty:
+                st.error("샌드박스에 등록된 종목이 없습니다.")
+            else:
+                with st.spinner("AI 퀀트 엔진 가상 매매 추적 중... (수 초 소요)"):
+                    ft_result = run_quant_simulation(
+                        sim_stocks=stocks_df.copy(),
+                        strat=current_strategy,
+                        init_cash=total_cash,
+                        start_date=ft_start,
+                        end_date=datetime.date.today(),
+                        use_ma200_filter=use_ma200_filter,
+                        whipsaw_buffer=whipsaw_buffer,
+                        sat_stop_loss=sat_stop_loss,
+                        max_alloc_pct=max_alloc_pct,
+                        min_hold_days=min_hold_days,
+                        ts_target_pct=ts_target_pct,
+                        ts_drop_pct=ts_drop_pct,
+                        bull_market_boost=bull_market_boost,
+                        cooldown_days=cooldown_days
+                    )
+                    
+                    if ft_result:
+                        st.success(f"✅ 가상 운용 성과 도출 완료! ({ft_start.strftime('%Y-%m-%d')} ~ 현재)")
+                        col_r1, col_r2, col_r3 = st.columns(3)
+                        col_r1.metric("총 초기 투입 자산", f"{total_cash:,.0f} 원")
+                        col_r2.metric("AI 자동매매 현재 총 자산", f"{ft_result['final_asset']:,.0f} 원")
+                        
+                        ret_color = "normal" if ft_result['final_port_ret'] >= 0 else "inverse"
+                        col_r3.metric("가상 누적 수익률", f"{ft_result['final_port_ret']:+.2f}%", delta=f"{ft_result['final_port_ret']:+.2f}%", delta_color=ret_color)
+                        
+                        with st.expander("종목별 가상 매매 성과 상세 보기"):
+                            st.table(pd.DataFrame(ft_result['summary_rows']))
+                    else:
+                        st.error("계산할 수 있는 유효한 주가 데이터가 없습니다.")
+
         st.markdown("---")
         st.subheader("🩺 가상 포트폴리오 AI 진단 결과")
         
@@ -676,14 +1231,14 @@ with tab1:
                         if pd.isna(quantity): quantity = 0
                         is_holding = (quantity > 0) and (buy_price > 0)
                         
-                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged = fetch_stock_status(s_ticker)
+                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = fetch_stock_status(s_ticker)
                         if c_price is None: continue
                         
                         stock_data_cache[s_name] = {
                             'price': c_price, 'ma200': ma200, 'ma60': ma60, 'ma20': ma20, 
                             'drawdown': drawdown, 'vol_ratio': vol_ratio, 'ret_60': ret_60, 'ret_20': ret_20,
                             'ma60_slope': ma60_slope_positive, 'is_above_ma200': is_above_ma200, 'is_holding': is_holding,
-                            'qty': quantity, 'vol_surged': vol_surged
+                            'qty': quantity, 'vol_surged': vol_surged, 'low': current_low
                         }
                         
                         vol_strong = vol_ratio >= 150.0
@@ -699,9 +1254,10 @@ with tab1:
                                 buy_scores[s_name] = score
                         else:
                             dist_ma20 = ((c_price / ma20) - 1) * 100
-                            is_dip = -5.0 <= dist_ma20 <= 3.0
-                            # [핵심] 스캐너와 100% 동일하게 '수급 폭발 이력(vol_surged)'이 있어야만 매수 스코어 부여
-                            if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0 and vol_surged:
+                            low_ma20_touch = (current_low <= ma20 * 1.01) and (c_price >= ma20 * 0.95)
+                            is_dip = (-5.0 <= dist_ma20 <= 3.0) or low_ma20_touch
+                            
+                            if ma200_pass and (is_dip or vix_contrarian) and drawdown >= -30.0:
                                 score = 1.0
                                 if vol_strong: score += 1.0
                                 if rs_strong: score += 0.5
@@ -800,20 +1356,21 @@ with tab1:
                                     detail = f"[{tech_text}] | [{vix_status}] | [{rs_status}]\n➔ 데드크로스 발생으로 즉각 현금화."
                             else: 
                                 if (use_ma200_filter and not data['is_above_ma200']):
-                                    action = "🟡 진입 보류 (200일선 하회)"
-                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래에 위치하여 진입 금지(하락장 방어)."
-                                elif ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
-                                    rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
-                                    if rec_shares > 0:
-                                        action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                        reason = "V자 반등 바닥잡기" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 및 200일선 통과"
-                                        detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}] | [{vol_status}]\n➔ {reason} 검증 완료."
-                                    else:
-                                        action = "🟡 진입 보류 (현금 부족)"
-                                        detail = f"[{tech_text}]\n➔ 가용 현금 부족."
-                                else: 
-                                    action = "🟡 진입 보류 (관망)"
-                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 가짜 반등(휩소) 구간으로 진입 보류."
+                                    action = "🔴 진입 보류 (200일선 하회)"
+                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 역배열 구간 진입 금지."
+                                else:
+                                    if ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) and vix_safe) or vix_contrarian: 
+                                        rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
+                                        if rec_shares > 0:
+                                            action = f"🟢 적극 신규 진입 (추천: {rec_shares}주)"
+                                            reason = "V자 반등 바닥잡기" if vix_contrarian else f"{whipsaw_buffer}% 버퍼 및 200일선 통과"
+                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}] | [{vol_status}]\n➔ 스캐너 조건 완벽 일치! {reason} 대세 상승 진입."
+                                        else:
+                                            action = "🟡 진입 보류 (현금 부족)"
+                                            detail = f"[{tech_text}]\n➔ 타점은 좋으나 가용 현금이 부족합니다."
+                                    else: 
+                                        action = "🟡 관망 (타점 대기)"
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 아직 확실한 추세 전환(골든크로스)이 발생하지 않아 관망합니다."
                         else: # 중소형주
                             if is_holding: 
                                 buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
@@ -823,7 +1380,8 @@ with tab1:
                                     action = "🔴 강제 손절 집행"
                                     detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷."
                                 elif ma20 >= ma60 * (1 - buf/2):
-                                    is_dip = -5.0 <= dist_ma20 <= 3.0
+                                    low_ma20_touch = (data['low'] <= ma20 * 1.01) and (c_price >= ma20 * 0.95)
+                                    is_dip = (-5.0 <= dist_ma20 <= 3.0) or low_ma20_touch
                                     add_cond = (is_dip or vix_contrarian) and data['drawdown'] >= -30.0
                                     if diff_amt > 0 and current_cash >= c_price and add_cond:
                                         add_shares = int(min(diff_amt, current_cash) // c_price)
@@ -843,27 +1401,29 @@ with tab1:
                                 else:
                                     action = "🔴 전량 매도"
                                     detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 완전 이탈."
-                            else: 
+                            else: # 미보유 (관심종목 샌드박스)
                                 if (use_ma200_filter and not data['is_above_ma200']):
-                                    action = "🟡 진입 보류 (200일선 하회)"
-                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 진입 금지."
+                                    action = "🔴 진입 보류 (200일선 하회)"
+                                    detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 역배열 구간이므로 진입을 금지합니다."
                                 else:
-                                    is_dip = -5.0 <= dist_ma20 <= 3.0
-                                    # [핵심 패치] AI 진단기 신규 매수 조건에 수급 폭발(vol_surged) 강제 적용 동기화
-                                    if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0 and data['vol_surged']: 
+                                    low_ma20_touch = (data['low'] <= ma20 * 1.01) and (c_price >= ma20 * 0.95)
+                                    is_dip = (-5.0 <= dist_ma20 <= 3.0) or low_ma20_touch
+                                    
+                                    if (is_dip or vix_contrarian) and data['drawdown'] >= -30.0: 
                                         rec_shares = int(min(target_amt, current_cash) // c_price) if c_price > 0 else 0
                                         if rec_shares > 0:
-                                            action = f"🟢 신규 진입 (추천: {rec_shares}주 / 약 {rec_shares*c_price:,.0f}원)"
-                                            detail = f"[{tech_text}] | [{ma200_status}] | [{vix_status}]\n➔ 수급 폭발(200%+) 후 20일선 눌림목 타점 정확히 진입."
+                                            if data['vol_surged'] or vix_contrarian:
+                                                action = f"🟢 적극 신규 진입 (추천: {rec_shares}주)"
+                                                detail = f"[{tech_text}] | [{vix_status}]\n➔ 스캐너 조건 완벽 일치! 수급 폭발(200%+) 후 정확한 20일선 눌림목 타점입니다."
+                                            else:
+                                                action = f"🟡 분할 매수 (관심종목 타점 도달)"
+                                                detail = f"[{tech_text}] | [{vix_status}]\n➔ 20일선 타점은 도달했으나 최근 폭발적인 수급 이력이 없습니다. 샌드박스 편입 종목이므로 소액 진입을 고려해볼 수 있습니다."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
-                                            detail = f"[{tech_text}]\n➔ 현금 부족."
-                                    elif (is_dip or vix_contrarian) and data['drawdown'] >= -30.0 and not data['vol_surged']:
-                                        action = "🟡 진입 보류 (수급 이력 부족)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 차트상 눌림목이나, 최근 20일 내 세력 수급 폭발(200% 이상) 이력이 없어 패스합니다."
+                                            detail = f"[{tech_text}]\n➔ 타점은 좋으나 가용 현금이 부족합니다."
                                     else: 
-                                        action = "🟡 진입 보류 (타점 대기)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 20일선 눌림목(-5%~+3%) 및 스캐너 조건 대기 중."
+                                        action = "🟡 관망 (타점 대기)"
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 현재 가격이 20일선에서 멀리 떨어져 있습니다. 눌림목(-5%~+3%)을 기다리세요."
                                 
                         results.append({
                             '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
@@ -949,7 +1509,7 @@ with tab2:
                                 s_name = row['종목명']
                                 buy_price = float(row.get('매수단가', 0))
                                 
-                                c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged = fetch_stock_status(s_ticker)
+                                c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = fetch_stock_status(s_ticker)
                                 if c_price is None: continue
 
                                 rs_strong = ret_60 > market_ret_60
@@ -1034,360 +1594,20 @@ with tab3:
                 st.error("종목이 없습니다.")
             else:
                 with st.spinner(f"산식 보정된 {index_name} 벤치마크 및 스캐너 동기화 백테스트 구동 중... (종목이 많을 시 수 분 소요)"):
-                    fetch_start = start_date - datetime.timedelta(days=300)
                     
-                    market_df = pd.DataFrame()
-                    benchmark_ret_val = 0.0
-                    final_benchmark_asset = init_cash
+                    bt_result = run_quant_simulation(
+                        sim_stocks=sim_stocks, strat=strat, init_cash=init_cash,
+                        start_date=start_date, end_date=end_date, use_ma200_filter=use_ma200_filter,
+                        whipsaw_buffer=whipsaw_buffer, sat_stop_loss=sat_stop_loss, max_alloc_pct=max_alloc_pct,
+                        min_hold_days=min_hold_days, ts_target_pct=ts_target_pct, ts_drop_pct=ts_drop_pct,
+                        bull_market_boost=bull_market_boost, cooldown_days=cooldown_days
+                    )
                     
-                    try:
-                        bm_df = fdr.DataReader(index_sym, fetch_start, end_date)
-                        if not bm_df.empty:
-                            if bm_df.index.tz is not None:
-                                bm_df.index = bm_df.index.tz_localize(None)
-                            bm_df['Bm_Ret_60'] = bm_df['Close'] / bm_df['Close'].shift(60) - 1
-                            bm_df['Bm_MA60'] = bm_df['Close'].rolling(60).mean()
-                            market_df['Bm_Ret_60'] = bm_df['Bm_Ret_60']
-                            market_df['Bm_Bull'] = bm_df['Close'] > bm_df['Bm_MA60']
-                            
-                            start_dt = pd.to_datetime(start_date)
-                            sim_bm = bm_df[bm_df.index >= start_dt]['Close'].dropna()
-                            if len(sim_bm) > 1:
-                                k_start = float(sim_bm.iloc[0])
-                                k_end = float(sim_bm.iloc[-1])
-                                benchmark_ret_val = ((k_end / k_start) - 1) * 100
-                                final_benchmark_asset = init_cash * (1 + benchmark_ret_val / 100)
-                    except: pass
-
-                    try:
-                        vix_df = yf.download("^VIX", start=fetch_start, end=end_date, progress=False)
-                        if not vix_df.empty:
-                            if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
-                            vix_df['VIX_MA3'] = vix_df['Close'].rolling(3).mean()
-                            market_df['VIX_Contrarian'] = (vix_df['Close'] >= 25.0) & (vix_df['Close'] < vix_df['VIX_MA3'])
-                            market_df['VIX_Safe'] = vix_df['Close'] < 30.0
-                    except: pass
-                    
-                    market_df = market_df.ffill().fillna(0)
-                    
-                    stock_dfs = {}
-                    buf = whipsaw_buffer / 100.0
-                    start_dt = pd.to_datetime(start_date)
-                    
-                    for idx, row in sim_stocks.iterrows():
-                        ticker = row['티커']
-                        name = row['종목명']
-                        
-                        df = None
-                        for suf in ['.KS', '.KQ']:
-                            temp_df = yf.download(f"{ticker}{suf}", start=fetch_start, end=end_date, progress=False)
-                            if not temp_df.empty:
-                                if isinstance(temp_df.columns, pd.MultiIndex): temp_df.columns = temp_df.columns.get_level_values(0)
-                                df = temp_df
-                                break
-                        
-                        if df is None or df.empty: continue
-                            
-                        df['Close'] = df['Close'].ffill()
-                        df['Volume'] = df['Volume'].ffill()
-                        df['Daily_Ret'] = df['Close'].pct_change()
-                        
-                        df['MA200'] = df['Close'].rolling(200).mean()
-                        df['Is_Above_MA200'] = df['Close'] >= df['MA200']
-                        
-                        df['MA60'] = df['Close'].rolling(60).mean()
-                        df['MA60_Slope'] = df['MA60'] > df['MA60'].shift(10)
-                        df['MA20'] = df['Close'].rolling(20).mean()
-                        df['Ret_60'] = df['Close'] / df['Close'].shift(60) - 1
-                        df['Ret_20'] = df['Close'] / df['Close'].shift(20) - 1
-                        
-                        df['Vol_5MA'] = df['Volume'].rolling(5).mean().shift(1)
-                        df['Vol_Ratio'] = np.where(df['Vol_5MA'] > 0, df['Volume'] / df['Vol_5MA'] * 100, 100.0)
-                        df['Vol_Strong'] = df['Vol_Ratio'] >= 150.0
-                        
-                        df['Recent_Vol_Max'] = df['Vol_Ratio'].rolling(window=20, min_periods=1).max()
-                        df['Vol_Surged'] = df['Recent_Vol_Max'] >= 200.0
-                        
-                        if df.index.tz is not None:
-                            df.index = df.index.tz_localize(None)
-                            
-                        df = df.join(market_df, how='left')
-                        df['VIX_Safe'] = df['VIX_Safe'].fillna(True)
-                        df['VIX_Contrarian'] = df['VIX_Contrarian'].fillna(False)
-                        df['Bm_Ret_60'] = df['Bm_Ret_60'].fillna(0.0)
-                        df['Bm_Bull'] = df['Bm_Bull'].fillna(False)
-                        
-                        ma200_cond = df['Is_Above_MA200'] if use_ma200_filter else True
-                        
-                        if strat == '대형주 (Core)':
-                            entry_cond = (ma200_cond & (df['MA20'] >= df['MA60'] * (1 + buf)) & df['MA60_Slope'] & (df['Ret_20'] > 0) & df['VIX_Safe']) | df['VIX_Contrarian']
-                            exit_cond = (df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian'])
-                        else:
-                            df['Roll_Max'] = df['Close'].rolling(window=120, min_periods=1).max()
-                            df['Drawdown'] = (df['Close'] / df['Roll_Max']) - 1
-                            
-                            dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
-                            low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
-                            is_dip = (dist_ma20 >= -5.0) & (dist_ma20 <= 3.0) & low_ma20_touch
-                            
-                            entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
-                            exit_cond = ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
-                        
-                        df['Signal'] = np.where(entry_cond, 1, np.where(exit_cond, 0, np.nan))
-                        df['Signal'] = df['Signal'].ffill().fillna(0)
-                        
-                        rs_condition = df['Ret_60'] > df['Bm_Ret_60']
-                        df['Score'] = np.where(entry_cond, 
-                                               1.0 + np.where(df['Vol_Strong'], 1.0 if strat != '대형주 (Core)' else 0.5, 0.0) + 
-                                               np.where(rs_condition, 0.5, 0.0) + 
-                                               np.where(df['VIX_Contrarian'], 1.0, 0.0), 
-                                               0.0)
-                        
-                        stock_dfs[name] = df[df.index >= start_dt].copy()
-                        
-                    if not stock_dfs:
-                        st.warning("유효한 데이터가 없습니다.")
-                    else:
-                        all_indices = [df.index for df in stock_dfs.values()]
-                        common_index = all_indices[0]
-                        for idx_df in all_indices[1:]:
-                            if len(idx_df) > len(common_index):
-                                common_index = idx_df 
-                            
-                        portfolio_history = []
-                        history_records = [] 
-                        
-                        trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0, 'realized_pnl': 0.0} for name in stock_dfs}
-                        
-                        dates = common_index
-                        shares = {name: 0.0 for name in stock_dfs}
-                        hold_days = {name: 0 for name in stock_dfs}
-                        max_invested = {name: 0.0 for name in stock_dfs}
-                        peak_price_since_buy = {name: 0.0 for name in stock_dfs}
-                        
-                        consecutive_losses = {name: 0 for name in stock_dfs}
-                        cooldown_until = {name: pd.Timestamp.min for name in stock_dfs}
-                        
-                        cash = init_cash
-                        avg_buy_price = {name: 0.0 for name in stock_dfs}
-                        realized_pnl = {name: 0.0 for name in stock_dfs}
-                        
-                        base_alloc_ratio = max_alloc_pct / 100.0
-                        ts_target = ts_target_pct / 100.0
-                        ts_drop = ts_drop_pct / 100.0
-                        
-                        for i, date_val in enumerate(dates):
-                            if i == 0:
-                                portfolio_history.append(init_cash)
-                                record = {'Date': date_val, '현금(Cash)': init_cash}
-                                for name in stock_dfs: record[name] = 0.0
-                                history_records.append(record)
-                                continue
-                                
-                            prev_date = dates[i-1]
-                            
-                            current_max_alloc_ratio = base_alloc_ratio
-                            market_bull = False
-                            for df_check in stock_dfs.values():
-                                if date_val in df_check.index:
-                                    market_bull = df_check.loc[date_val, 'Bm_Bull']
-                                    break
-                            
-                            if bull_market_boost and market_bull:
-                                current_max_alloc_ratio = min(base_alloc_ratio * 1.5, 1.0)
-                            
-                            for name in stock_dfs:
-                                if shares[name] > 0: hold_days[name] += 1
-                                else: hold_days[name] = 0
-                            
-                            active_stocks = []
-                            scores = {}
-                            for name, df in stock_dfs.items():
-                                if date_val not in df.index: continue
-                                sig = df.loc[date_val, 'Signal']
-                                c_price = df.loc[date_val, 'Close']
-                                
-                                if shares[name] == 0 and date_val < cooldown_until[name]:
-                                    sig = 0.0
-                                
-                                trailing_stop_exit = False
-                                if shares[name] > 0 and avg_buy_price[name] > 0:
-                                    peak_price_since_buy[name] = max(peak_price_since_buy[name], c_price)
-                                    curr_ret = (c_price / avg_buy_price[name]) - 1
-                                    drop_from_peak = (c_price / peak_price_since_buy[name]) - 1
-                                    
-                                    if curr_ret >= ts_target and drop_from_peak <= ts_drop:
-                                        trailing_stop_exit = True
-                                
-                                force_exit = False
-                                if strat != '대형주 (Core)' and shares[name] > 0 and avg_buy_price[name] > 0:
-                                    user_ret = (c_price / avg_buy_price[name]) - 1
-                                    if user_ret <= (sat_stop_loss / 100.0):
-                                        force_exit = True
-                                    
-                                if trailing_stop_exit or force_exit:
-                                    sig = 0.0
-                                elif shares[name] > 0 and hold_days[name] < min_hold_days:
-                                    sig = 1.0
-                                    
-                                if sig == 1:
-                                    active_stocks.append(name)
-                                    scores[name] = df.loc[date_val, 'Score'] if df.loc[date_val, 'Score'] > 0 else 1.0
-                                else:
-                                    peak_price_since_buy[name] = 0.0
-                                    
-                            for name, df in stock_dfs.items():
-                                curr_sig = 1 if name in active_stocks else 0
-                                prev_sig = 1 if shares[name] > 0 else 0
-                                if curr_sig == 1 and prev_sig == 0:
-                                    trade_stats[name]['buy'] += 1
-                                elif curr_sig == 0 and prev_sig == 1:
-                                    trade_stats[name]['sell'] += 1
-                                    
-                            stock_eval_total = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
-                            total_asset = cash + stock_eval_total
-                            
-                            n_active = len(active_stocks)
-                            if n_active > 0:
-                                total_score = sum(scores.values()) if sum(scores.values()) > 0 else n_active
-                                for name in stock_dfs:
-                                    if date_val not in stock_dfs[name].index: continue
-                                    c_price = stock_dfs[name].loc[date_val, 'Close']
-                                    current_val = shares[name] * c_price
-                                    
-                                    if name in active_stocks:
-                                        weight = scores.get(name, 1.0) / total_score
-                                        target_alloc = min(total_asset * weight, total_asset * current_max_alloc_ratio)
-                                        diff_val = target_alloc - current_val
-                                        
-                                        if diff_val > 0: 
-                                            cost = diff_val
-                                            fee = cost * 0.0025
-                                            if cash >= (cost + fee):
-                                                cash -= (cost + fee)
-                                                added_shares = cost / c_price
-                                                if shares[name] > 0:
-                                                    avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
-                                                else:
-                                                    avg_buy_price[name] = c_price
-                                                    peak_price_since_buy[name] = c_price
-                                                shares[name] += added_shares
-                                                trade_stats[name]['fee'] += fee
-                                                realized_pnl[name] -= fee 
-                                                max_invested[name] = max(max_invested[name], shares[name] * c_price)
-                                            else:
-                                                cost = max(cash - (cash * 0.0025), 0)
-                                                if cost > 0:
-                                                    fee = cost * 0.0025
-                                                    cash -= (cost + fee)
-                                                    added_shares = cost / c_price
-                                                    if shares[name] > 0:
-                                                        avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + added_shares)
-                                                    else:
-                                                        avg_buy_price[name] = c_price
-                                                        peak_price_since_buy[name] = c_price
-                                                    shares[name] += added_shares
-                                                    trade_stats[name]['fee'] += fee
-                                                    realized_pnl[name] -= fee
-                                                    max_invested[name] = max(max_invested[name], shares[name] * c_price)
-                                        elif diff_val < 0: 
-                                            proceeds = abs(diff_val)
-                                            fee = proceeds * 0.0025
-                                            sold_shares = proceeds / c_price
-                                            pnl = sold_shares * (c_price - avg_buy_price[name]) - fee
-                                            realized_pnl[name] += pnl
-                                            cash += (proceeds - fee)
-                                            shares[name] -= sold_shares
-                                            trade_stats[name]['fee'] += fee
-                                    else:
-                                        if shares[name] > 0: 
-                                            proceeds = shares[name] * c_price
-                                            fee = proceeds * 0.0025
-                                            pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
-                                            
-                                            if pnl < 0:
-                                                consecutive_losses[name] += 1
-                                                if consecutive_losses[name] >= 2 and cooldown_days > 0:
-                                                    cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
-                                            else:
-                                                consecutive_losses[name] = 0
-                                                
-                                            realized_pnl[name] += pnl
-                                            cash += (proceeds - fee)
-                                            trade_stats[name]['fee'] += fee
-                                            shares[name] = 0.0
-                                            avg_buy_price[name] = 0.0
-                                            peak_price_since_buy[name] = 0.0
-                            else:
-                                for name in stock_dfs:
-                                    if shares[name] > 0 and date_val in stock_dfs[name].index:
-                                        c_price = stock_dfs[name].loc[date_val, 'Close']
-                                        proceeds = shares[name] * c_price
-                                        fee = proceeds * 0.0025
-                                        pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
-                                        
-                                        if pnl < 0:
-                                            consecutive_losses[name] += 1
-                                            if consecutive_losses[name] >= 2 and cooldown_days > 0:
-                                                cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
-                                        else:
-                                            consecutive_losses[name] = 0
-                                            
-                                        realized_pnl[name] += pnl
-                                        cash += (proceeds - fee)
-                                        trade_stats[name]['fee'] += fee
-                                        shares[name] = 0.0
-                                        avg_buy_price[name] = 0.0
-                                        peak_price_since_buy[name] = 0.0
-                                        
-                            final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
-                            portfolio_history.append(max(cash + final_eval, 0))
-                            
-                            record = {'Date': date_val, '현금(Cash)': max(cash, 0)}
-                            for name in stock_dfs:
-                                record[name] = shares[name] * stock_dfs[name].loc[date_val, 'Close'] if date_val in stock_dfs[name].index else 0.0
-                            history_records.append(record)
-                            
-                        ai_portfolio_series = pd.Series(portfolio_history, index=common_index)
-                        
-                        bh_values = {}
-                        dca_values = {}
-                        cash_per_stock_init = init_cash / len(stock_dfs)
-                        
-                        for name, df in stock_dfs.items():
-                            sim_df = df.copy()
-                            bh_values[name] = (sim_df['Close'] / sim_df['Close'].iloc[0]) * cash_per_stock_init
-                            
-                            n_months = len(sim_df.groupby(sim_df.index.to_period('M')))
-                            initial_seed = (init_cash * 0.2) / len(stock_dfs)
-                            shares_acc = initial_seed / sim_df['Close'].iloc[0]
-                            dca_list = []
-                            for date_val, row_val in sim_df.iterrows():
-                                if date_val != sim_df.index[0] and date_val.day <= 3 and date_val.month != sim_df.index[sim_df.index.get_loc(date_val)-1].month:
-                                    if n_months > 0:
-                                        add_amt = (init_cash * 0.8 / n_months) / len(stock_dfs)
-                                        shares_acc += add_amt / row_val['Close']
-                                    dca_list.append(shares_acc * row_val['Close'])
-                                else:
-                                    dca_list.append(shares_acc * row_val['Close'])
-                            dca_values[name] = pd.Series(dca_list, index=sim_df.index)
-                            
-                        bh_df = pd.DataFrame(bh_values).sum(axis=1)
-                        dca_df = pd.DataFrame(dca_values).sum(axis=1)
-                        
-                        final_asset = ai_portfolio_series.iloc[-1]
-                        final_port_ret = ((final_asset / init_cash) - 1) * 100
-                        
-                        final_bh_asset = bh_df.iloc[-1]
-                        final_bh_ret = ((final_bh_asset / init_cash) - 1) * 100
-                        
-                        final_dca_asset = dca_df.iloc[-1]
-                        final_dca_ret = ((final_dca_asset / init_cash) - 1) * 100
-                        
+                    if bt_result:
                         st.success(f"✅ 벤치마크 자동 동기화 및 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
-                        col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{final_asset:,.0f} 원", f"{final_port_ret:+.2f}%")
+                        col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%")
                         
                         st.markdown("---")
                         
@@ -1396,26 +1616,26 @@ with tab3:
                         comparison_data = [
                             {
                                 '전략 구분': '🚀 AI 초과수익 전략 (200D Filter + Cooldown)',
-                                '최종 기말 자산': f"{final_asset:,.0f} 원",
-                                '총 수익률': f"{final_port_ret:+.2f}%",
+                                '최종 기말 자산': f"{bt_result['final_asset']:,.0f} 원",
+                                '총 수익률': f"{bt_result['final_port_ret']:+.2f}%",
                                 '운용 방식 및 특징': f'200일선 아래 장기 하락 종목 매수 금지 및 연속 2회 손실 종목 {cooldown_days}일 매수 동결. 버퍼({whipsaw_buffer}%) 통과 상승 종목에 집중 배분하여 박스권 수수료 낭비 원천 차단.'
                             },
                             {
                                 '전략 구분': f'📈 시장 벤치마크 ({index_name} 지수 ^{index_sym})',
-                                '최종 기말 자산': f"{final_benchmark_asset:,.0f} 원",
-                                '총 수익률': f"{benchmark_ret_val:+.2f}%",
+                                '최종 기말 자산': f"{bt_result['final_benchmark_asset']:,.0f} 원",
+                                '총 수익률': f"{bt_result['benchmark_ret_val']:+.2f}%",
                                 '운용 방식 및 특징': f'한국 종합주가지수({index_name}) 시장 수익률 추종'
                             },
                             {
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
-                                '최종 기말 자산': f"{final_bh_asset:,.0f} 원",
-                                '총 수익률': f"{final_bh_ret:+.2f}%",
+                                '최종 기말 자산': f"{bt_result['final_bh_asset']:,.0f} 원",
+                                '총 수익률': f"{bt_result['final_bh_ret']:+.2f}%",
                                 '운용 방식 및 특징': '동일 종목 풀 초기 전액 동일 비중 매수 후 매도 없이 홀딩 (변동성 그대로 노출)'
                             },
                             {
                                 '전략 구분': '💰 적립식 매수 (DCA)',
-                                '최종 기말 자산': f"{final_dca_asset:,.0f} 원",
-                                '총 수익률': f"{final_dca_ret:+.2f}%",
+                                '최종 기말 자산': f"{bt_result['final_dca_asset']:,.0f} 원",
+                                '총 수익률': f"{bt_result['final_dca_ret']:+.2f}%",
                                 '운용 방식 및 특징': '동일 종목 풀 시드 분할 후 매월 정기 추가 투입으로 매입단가 분산'
                             }
                         ]
@@ -1424,99 +1644,22 @@ with tab3:
                         st.markdown("---")
                         
                         st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
-                        summary_rows = []
-                        
-                        sum_holding_val = 0
-                        sum_total_profit = 0
-                        sum_fee = 0
-                        sum_b_cnt = 0
-                        sum_s_cnt = 0
-                        
-                        for name in stock_dfs:
-                            last_dt = stock_dfs[name].index[-1]
-                            final_c_price = stock_dfs[name].loc[last_dt, 'Close']
-                            holding_val = shares[name] * final_c_price
-                            
-                            unrealized_pnl = shares[name] * (final_c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
-                            total_profit = realized_pnl[name] + unrealized_pnl
-                            
-                            invested_base = max_invested[name] if max_invested[name] > 0 else (init_cash / len(stock_dfs))
-                            ret = (total_profit / invested_base) * 100
-                            ret = max(ret, -100.0) 
-                            weight = (holding_val / final_asset) * 100 if final_asset > 0 else 0.0
-                            
-                            b_cnt = trade_stats[name]['buy']
-                            s_cnt = trade_stats[name]['sell']
-                            fee = trade_stats[name]['fee']
-                            
-                            sum_holding_val += holding_val
-                            sum_total_profit += total_profit
-                            sum_fee += fee
-                            sum_b_cnt += b_cnt
-                            sum_s_cnt += s_cnt
-                            
-                            summary_rows.append({
-                                '종목명': name,
-                                '최종 보유 주수': f"{shares[name]:.2f} 주",
-                                '기말 평가금': f"{holding_val:,.0f} 원",
-                                '총 순수익 (원)': f"{total_profit:+,.0f} 원",
-                                '수익률 (%)': f"{ret:+.2f}%",
-                                '매매 횟수': f"매수 {b_cnt}회 / 매도 {s_cnt}회",
-                                '총 발생 수수료': f"{fee:,.0f} 원",
-                                '기말 포트폴리오 비중': f"{weight:.2f}%"
-                            })
-                            
-                        profit_pct_of_init = (sum_total_profit / init_cash) * 100 if init_cash > 0 else 0.0
-                        fee_pct_of_init = (sum_fee / init_cash) * 100 if init_cash > 0 else 0.0
-                        total_weight = (sum_holding_val / final_asset) * 100 if final_asset > 0 else 0.0
-
-                        summary_rows.append({
-                            '종목명': '💡 [전체 합계]',
-                            '최종 보유 주수': '-',
-                            '기말 평가금': f"{sum_holding_val:,.0f} 원",
-                            '총 순수익 (원)': f"{sum_total_profit:+,.0f} 원 (자산대비 {profit_pct_of_init:+.2f}%)",
-                            '수익률 (%)': '-',
-                            '매매 횟수': f"매수 {sum_b_cnt}회 / 매도 {sum_s_cnt}회",
-                            '총 발생 수수료': f"{sum_fee:,.0f} 원 (자산대비 {fee_pct_of_init:.2f}%)",
-                            '기말 포트폴리오 비중': f"{total_weight:.2f}%"
-                        })
-                        
-                        st.table(pd.DataFrame(summary_rows))
+                        st.table(pd.DataFrame(bt_result['summary_rows']))
                         
                         st.markdown("---")
                         
-                        history_df = pd.DataFrame(history_records).set_index('Date')
-                        try:
-                            eom_val_df = history_df.resample('ME').last()
-                        except ValueError:
-                            eom_val_df = history_df.resample('M').last()
-                            
-                        eom_weights = eom_val_df.div(eom_val_df.sum(axis=1), axis=0) * 100
-                        eom_weights = eom_weights.fillna(0)
-                        eom_weights.index = eom_weights.index.strftime('%Y-%m')
-                        
-                        stock_cols = sorted([c for c in eom_weights.columns if c != '현금(Cash)'])
-                        cols_ordered = stock_cols + ['현금(Cash)'] 
-                        eom_weights = eom_weights[cols_ordered]
-                        
-                        eom_weights_reset = eom_weights.reset_index().melt('Date', var_name='Asset', value_name='Weight')
-                        
-                        order_map = {name: i for i, name in enumerate(cols_ordered)}
-                        eom_weights_reset['Order'] = eom_weights_reset['Asset'].map(order_map)
-                        
-                        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-                        color_range = [base_colors[i % len(base_colors)] for i in range(len(stock_cols))] + ['#000000']
-                        
-                        chart = alt.Chart(eom_weights_reset).mark_bar().encode(
+                        chart = alt.Chart(bt_result['eom_weights_reset']).mark_bar().encode(
                             x=alt.X('Date:O', title='', axis=alt.Axis(labelAngle=-45)),
                             y=alt.Y('Weight:Q', title='비중 (%)', stack='zero'),
-                            color=alt.Color('Asset:N', scale=alt.Scale(domain=cols_ordered, range=color_range), title='자산 구분'),
+                            color=alt.Color('Asset:N', scale=alt.Scale(domain=bt_result['cols_ordered'], range=bt_result['color_range']), title='자산 구분'),
                             order=alt.Order('Order:Q', sort='ascending'),
                             tooltip=['Date', 'Asset', alt.Tooltip('Weight:Q', format='.2f', title='비중(%)')]
                         ).properties(height=450)
                         
                         st.subheader("📊 월말 기준 포트폴리오 비중 추이 (현금 포함, 누적 막대)")
                         st.altair_chart(chart, use_container_width=True)
+                    else:
+                        st.error("유효한 데이터가 없습니다.")
 
 with tab4:
     st.header("📄 AI 퀀트 투자 전략 및 운용 알고리즘 백서")
@@ -1568,7 +1711,7 @@ with tab4:
     4. **거시적 승인:** VIX가 30 미만이거나 VIX 역발상 바닥 시그널 발생.
     
     **[중소형주 (Satellite) 전략 전용 필터: 1+2+3 동시 만족 시 진입]**
-    1. **유동성 및 수급 폭발 이력:** KOSDAQ 시가총액 500억 이상 유동성 종목 중, 최근 20일 내 거래량이 평소 대비 200% 이상 폭발한 이력이 있어야 함.
+    1. **유동성 및 수급 폭발 이력:** KOSDAQ 시가총액 1000억 이상 유동성 종목 중, 최근 20일 내 거래량이 평소 대비 200% 이상 폭발한 이력이 있어야 함.
     2. **눌림목(Dip-Buying) 타점:** 수급이 터진 주도주가 조정을 받아 주가가 **20일선 부근(-5% ~ +3% 또는 당일 저가 20일선 터치)**에 안착했을 때 진입.
     3. **하락장 및 투매 방어:** 200일선(옵션)을 상회해야 하며, 최근 단기 고점 대비 -30% 이상 무너진 폭락 종목은 제외.
     """)
@@ -1579,7 +1722,7 @@ with tab4:
     
     st.markdown(f"""
     * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 사이드바 파라미터에 따르며, 벤치마크 지수가 60일선 위에 있는 대세 상승장에서는 최대 투입 한도를 **1.5배** 강제로 상향합니다.
-    * **알파 점 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
+    * **알파 점수 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
     * **자본 증액 리밸런싱 (Capital Inflow):** 사이드바의 설정 운용 자금이 늘어나면, **이미 보유 중인 주도주라도 새로 늘어난 한도(Target Weight)만큼 정확히 계산하여 추가 매수를 지시**합니다.
     * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
     """)
