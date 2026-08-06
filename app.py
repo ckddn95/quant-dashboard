@@ -1096,6 +1096,9 @@ with tab1:
             stocks_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
         )
         
+        # CSS 스타일을 컬럼 밖으로 빼서 버튼 높이 어긋남 현상 완벽 방어
+        st.markdown("""<style>[data-testid="stPopover"] { width: 100%; }</style>""", unsafe_allow_html=True)
+        
         col_qsave1, col_qsave2 = st.columns([1, 1])
         with col_qsave1:
             with st.popover("💾 표 데이터 수정 후 덮어쓰기 (Quick Save)", use_container_width=True):
@@ -1107,7 +1110,6 @@ with tab1:
                     st.success("✅ 포트폴리오 변경사항이 안전하게 저장되었습니다!")
                     
         with col_qsave2:
-            st.markdown("""<style>[data-testid="stPopover"] { width: 100%; }</style>""", unsafe_allow_html=True)
             with st.popover("📄 새 이름으로 복사하기 (Save As)", use_container_width=True):
                 save_filename = st.text_input("새 파일명", value=f"{selected_port}_복사본")
                 if st.button("복사본 생성하기", type="primary"):
