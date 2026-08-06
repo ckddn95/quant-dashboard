@@ -211,18 +211,19 @@ def run_core_scanner(use_ma200_filter_flag, buf_pct):
             })
     return pd.DataFrame(results)
 
+# 💡 [고도화] AI 스코어 정렬 및 Top 5 엄선 스캐너
 @st.cache_data(ttl=3600)
-def run_satellite_scanner(use_ma200_filter_flag):
+def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
     results = []
     krx = load_krx_universe()
     try:
         kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
         if 'Marcap' in kosdaq.columns:
             kosdaq = kosdaq[kosdaq['Marcap'] >= 100000000000]
-            candidates = kosdaq.sort_values('Marcap', ascending=False).head(150)
+            candidates = kosdaq.sort_values('Marcap', ascending=False).head(100)
         else:
-            candidates = kosdaq.head(150)
-    except: return []
+            candidates = kosdaq.head(100)
+    except: return pd.DataFrame()
 
     for idx, row in candidates.iterrows():
         code = row['Code']
@@ -238,13 +239,29 @@ def run_satellite_scanner(use_ma200_filter_flag):
         ma200_pass = (not use_ma200_filter_flag) or is_above_ma200
         dd_pass = drawdown >= -30.0 
         
-        if vol_surged and is_dip and ma200_pass and dd_pass:
+        # 60일선 우상향 및 최근 20일 모멘텀 긍정 필터 추가
+        trend_pass = ma60_slope_positive and (ret_20 > -3.0)
+        
+        if vol_surged and is_dip and ma200_pass and dd_pass and trend_pass:
+            # AI 스코어 = (최대 수급 비율 / 100) * 0.4 + (60일 상대강도) * 0.3 + (20일 모멘텀) * 0.3
+            score = (recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3)
+            
             results.append({
                 '종목명': name, '티커': code, '현재가': f"{c_price:,.0f} 원",
-                '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{recent_vol_max:,.0f}%",
-                '진단 근거': "수급 폭발 후 20일선 눌림목"
+                '20일선 이격도': f"{dist_ma20:+.2f}%", 
+                '최근 최대 수급': f"{recent_vol_max:,.0f}%",
+                'AI 스코어': round(score, 2),
+                '_score_num': score
             })
-    return pd.DataFrame(results)
+            
+    if not results:
+        return pd.DataFrame()
+        
+    df_res = pd.DataFrame(results)
+    # AI 스코어 높은 순으로 정렬 후 상위 top_n(5개)만 엄선
+    df_res = df_res.sort_values('_score_num', ascending=False).head(top_n)
+    df_res = df_res.drop(columns=['_score_num'])
+    return df_res
 
 # [핵심 통합] 독립된 시뮬레이션 계산 엔진 (가상 운용/백테스트 공통 사용)
 @st.cache_data(ttl=1800)
@@ -963,7 +980,7 @@ with tab1:
                 if st.button("🚀 KOSPI 우량주 골든크로스 탐색", type="primary", use_container_width=True):
                     st.session_state.show_scanner = True
             else:
-                if st.button("🚀 KOSDAQ 주도주 눌림목 탐색", type="primary", use_container_width=True):
+                if st.button("🚀 KOSDAQ 주도주 Top 5 눌림목 탐색", type="primary", use_container_width=True):
                     st.session_state.show_scanner = True
 
         if st.session_state.show_scanner:
@@ -1008,15 +1025,15 @@ with tab1:
                     else:
                         st.warning("⚠️ 현재 조건(200일선 방어 및 골든크로스 전환)을 완벽히 만족하는 대형 우량주가 없습니다.")
             else:
-                with st.spinner("코스닥 시가총액 상위 150종목 눌림목 분석 중... (약 15초 소요)"):
+                with st.spinner("코스닥 시가총액 상위 100종목 중 최상위 눌림목 5선 분석 중... (약 15초 소요)"):
                     scan_result = run_satellite_scanner(use_ma200_filter)
                     if not scan_result.empty:
-                        st.success(f"✅ AI가 오늘 진입 가능한 눌림목 종목 {len(scan_result)}개를 발굴했습니다! (200일선 방어 완벽 일치)")
+                        st.success(f"✅ AI가 스코어 기준 최상위 주도주 눌림목 {len(scan_result)}개를 엄선했습니다!")
                         hc1, hc2, hc3, hc4, hc5 = st.columns([2.5, 1.5, 1.5, 2, 2])
                         hc1.write("**종목명 (티커)**")
                         hc2.write("**현재가**")
                         hc3.write("**20일선 이격도**")
-                        hc4.write("**최대 수급(거래량)**")
+                        hc4.write("**AI 스코어 (수급/모멘텀)**")
                         hc5.write("**가상 포트 추가**")
                         st.markdown("---")
                         
@@ -1028,7 +1045,7 @@ with tab1:
                             c1.write(f"**{name}** (`{ticker}`)")
                             c2.write(row['현재가'])
                             c3.write(row['20일선 이격도'])
-                            c4.write(row['최근 최대 수급'])
+                            c4.write(f"⭐ **{row['AI 스코어']}점** (수급 {row['최근 최대 수급']})")
                             
                             is_exist = False
                             if not stocks_df.empty and '티커' in stocks_df.columns:
@@ -1046,7 +1063,7 @@ with tab1:
                                         json.dump(p_data, f, ensure_ascii=False, indent=2)
                                     st.rerun() 
                     else:
-                        st.warning("⚠️ 현재 조건(수급 폭발 후 눌림목 & 200일선 방어)을 완벽히 만족하는 주도주가 없습니다.")
+                        st.warning("⚠️ 현재 조건(수급 폭발 + 60일선 우상향 + 20일선 눌림목)을 엄격히 만족하는 최상위 주도주가 없습니다.")
         
         st.markdown("---")
         st.markdown("### 📝 수동 종목 관리 (검색 / 삭제)")
@@ -1727,7 +1744,7 @@ with tab4:
     * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 사이드바 파라미터에 따르며, 벤치마크 지수가 60일선 위에 있는 대세 상승장에서는 최대 투입 한도를 **1.5배** 강제로 상향합니다.
     * **알파 점수 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
     * **자본 증액 리밸런싱 (Capital Inflow):** 사이드바의 설정 운용 자금이 늘어나면, **이미 보유 중인 주도주라도 새로 늘어난 한도(Target Weight)만큼 정확히 계산하여 추가 매수를 지시**합니다.
-    * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
+    * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
     """)
 
     st.markdown("---")
