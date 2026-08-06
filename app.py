@@ -33,6 +33,8 @@ if not os.path.exists(SAVE_DIR):
 # ==========================================
 # 한국투자증권 Open API 연동 로직
 # ==========================================
+# 💡 [업그레이드 1] 토큰 발급 12시간(43200초) 캐싱: API 한도 초과 에러 완벽 방어 및 속도 향상
+@st.cache_data(ttl=43200, show_spinner=False)
 def get_kis_access_token(app_key, app_secret, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/oauth2/tokenP"
@@ -211,7 +213,6 @@ def run_core_scanner(use_ma200_filter_flag, buf_pct):
             })
     return pd.DataFrame(results)
 
-# 💡 [고도화] AI 스코어 정렬 및 Top 5 엄선 스캐너
 @st.cache_data(ttl=3600)
 def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
     results = []
@@ -239,11 +240,9 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
         ma200_pass = (not use_ma200_filter_flag) or is_above_ma200
         dd_pass = drawdown >= -30.0 
         
-        # 60일선 우상향 및 최근 20일 모멘텀 긍정 필터 추가
         trend_pass = ma60_slope_positive and (ret_20 > -3.0)
         
         if vol_surged and is_dip and ma200_pass and dd_pass and trend_pass:
-            # AI 스코어 = (최대 수급 비율 / 100) * 0.4 + (60일 상대강도) * 0.3 + (20일 모멘텀) * 0.3
             score = (recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3)
             
             results.append({
@@ -258,7 +257,6 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
         return pd.DataFrame()
         
     df_res = pd.DataFrame(results)
-    # AI 스코어 높은 순으로 정렬 후 상위 top_n(5개)만 엄선
     df_res = df_res.sort_values('_score_num', ascending=False).head(top_n)
     df_res = df_res.drop(columns=['_score_num'])
     return df_res
@@ -831,9 +829,7 @@ st.sidebar.header("🔌 한국투자증권 실계좌 연동")
 SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
 
 if p_data:
-    # 전략에 따른 키 결정 (core vs satellite)
     kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
-    
     try:
         kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
     except Exception:
@@ -853,6 +849,21 @@ if p_data:
         st.sidebar.warning(f"🔑 **KIS API 미연동**\n\nStreamlit Cloud 우측 하단 `Manage app` -> `Settings` -> `Secrets`에 `[kis_accounts.{kis_secret_key}]` 정보를 등록해주세요.")
 else:
      st.sidebar.info("👈 포트폴리오를 선택하면 실계좌가 자동 매칭됩니다.")
+
+# ==========================================
+# 💡 [업그레이드 2] 사이드바 시장 상황판 (신호등 UI)
+# ==========================================
+vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
+
+st.sidebar.markdown("---")
+st.sidebar.header("🚥 현재 시장 상태 (Market Status)")
+vix_color = "🟢" if vix_safe else ("🔥" if vix_contrarian else "🔴")
+kp_color = "🟢" if kospi_ret_60 > 0 else "🔴"
+kq_color = "🟢" if kosdaq_ret_60 > 0 else "🔴"
+
+st.sidebar.markdown(f"{vix_color} **VIX 공포지수:** {vix_val:.2f} ({'바닥 반등' if vix_contrarian else ('안정' if vix_safe else '경계')})")
+st.sidebar.markdown(f"{kp_color} **KOSPI (대형주):** {kospi_ret_60:+.2f}%")
+st.sidebar.markdown(f"{kq_color} **KOSDAQ (중소형):** {kosdaq_ret_60:+.2f}%")
 
 # ==========================================
 # 파라미터 세팅 및 테마 인디케이터 
@@ -1113,7 +1124,7 @@ with tab1:
             stocks_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
         )
         
-        # CSS 스타일을 컬럼 밖으로 빼서 버튼 높이 어긋남 현상 완벽 방어
+        # CSS 스타일을 컬럼 밖으로 빼서 버튼 높이 어긋남 현상 방어
         st.markdown("""<style>[data-testid="stPopover"] { width: 100%; }</style>""", unsafe_allow_html=True)
         
         col_qsave1, col_qsave2 = st.columns([1, 1])
@@ -1148,8 +1159,6 @@ with tab1:
                 st.warning("진단할 종목이 없습니다.")
             else:
                 with st.spinner("거시 지표 및 개별 종목 필터, 자본 증감액 룰 분석 중..."):
-                    vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
-                    
                     vix_text = f"VIX {vix_val:.1f}"
                     if vix_contrarian: vix_status = f"{vix_text}(🔥극단적 공포 V자 반등 포착)"
                     elif vix_safe: vix_status = f"{vix_text}(시장 안정)"
@@ -1238,7 +1247,6 @@ with tab1:
                     for idx, row in edited_df.iterrows():
                         s_name = row['종목명']
                         if s_name not in stock_data_cache:
-                            results.append({'종목명': s_name, '상태': '알수없음', '현재가': '-', '액션 플랜': '⚠️ 확인 불가', '상세 AI 판단 근거': '-'})
                             continue
                             
                         data = stock_data_cache[s_name]
@@ -1267,6 +1275,17 @@ with tab1:
                         target_amt = min(total_cash * stock_weight, total_cash * current_max_alloc_ratio)
                         current_val = data['qty'] * c_price
                         diff_amt = target_amt - current_val
+
+                        # 💡 [업그레이드 3] 권장 목표가 / 손절가 자동 계산 (표 노출용)
+                        buy_price_val = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
+                        if is_holding and buy_price_val > 0:
+                            target_p = buy_price_val * (1 + ts_target_pct / 100.0)
+                            stop_p = buy_price_val * (1 + sat_stop_loss / 100.0)
+                            target_str = f"{target_p:,.0f} 원"
+                            stop_str = f"{stop_p:,.0f} 원"
+                        else:
+                            target_str = "-"
+                            stop_str = "-"
 
                         if is_holding and s_name in force_sell_plans:
                             action = force_sell_plans[s_name]
@@ -1366,6 +1385,7 @@ with tab1:
                                 
                         results.append({
                             '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
+                            '권장 익절가': target_str, '강제 손절가': stop_str,
                             '액션 플랜': action, '상세 AI 판단 근거': detail
                         })
                     
@@ -1403,14 +1423,13 @@ with tab2:
                     if holdings is not None and summary is not None:
                         tot_evlu = float(summary[0].get('tot_evlu_amt', 0)) if summary else 0
                         
-                        # KIS API에서 실시간 현재가(prpr) 및 손익률(evlu_pfls_rt) 직접 추출
                         imported = []
                         for item in holdings:
                             qty = int(item.get('hldg_qty', 0))
                             if qty > 0:
-                                kis_prpr = float(item.get('prpr', 0)) # 실시간 현재가
-                                kis_pchs = float(item.get('pchs_avg_pric', 0)) # 매수평균가
-                                kis_profit_rt = float(item.get('evlu_pfls_rt', 0)) # 평가손익률(%)
+                                kis_prpr = float(item.get('prpr', 0)) 
+                                kis_pchs = float(item.get('pchs_avg_pric', 0)) 
+                                kis_profit_rt = float(item.get('evlu_pfls_rt', 0)) 
                                 
                                 imported.append({
                                     '종목명': item.get('prdt_name', ''),
@@ -1419,7 +1438,7 @@ with tab2:
                                     '매수평균가': f"{kis_pchs:,.0f} 원",
                                     '보유수량': f"{qty:,} 주",
                                     '평가손익률': f"{kis_profit_rt:+.2f}%",
-                                    '_raw_price': kis_prpr, # 진단기 내부 연산용
+                                    '_raw_price': kis_prpr, 
                                     '_raw_buy': kis_pchs,
                                     '_raw_qty': qty
                                 })
@@ -1437,7 +1456,6 @@ with tab2:
             if real_stocks_df.empty:
                 st.info("현재 이 계좌에 보유 중인 주식이 없습니다.")
             else:
-                # 화면 노출용 컬럼만 선택
                 display_df = real_stocks_df[['종목명', '티커', '실시간 현재가', '매수평균가', '보유수량', '평가손익률']]
                 st.dataframe(display_df, use_container_width=True)
 
@@ -1451,7 +1469,6 @@ with tab2:
                     st.error("좌측 사이드바에서 비교 기준이 될 '가상 포트폴리오(전략)'를 먼저 선택해 주세요.")
                 else:
                     with st.spinner("실계좌 종목 퀀트 필터링 분석 중..."):
-                        vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
                         current_strategy = p_data['strategy']
                         market_ret_60 = kospi_ret_60 if current_strategy == '대형주 (Core)' else kosdaq_ret_60
                         buf = whipsaw_buffer / 100.0
@@ -1462,10 +1479,8 @@ with tab2:
                             s_name = row['종목명']
                             buy_price = float(row.get('_raw_buy', 0))
                             
-                            # 기술적 지표(이동평균선) 계산용 데이터 로드
                             c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = fetch_stock_status(s_ticker)
                             
-                            # 현재가는 KIS 실시간 현재가 사용 (우선 적용)
                             live_c_price = float(row.get('_raw_price', c_price if c_price else 0))
                             if live_c_price == 0: continue
 
@@ -1498,10 +1513,21 @@ with tab2:
                                     action = "🔴 전량 매도"
                                     detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 주도주 대열 이탈."
                                     
+                            # 목표가/손절가 추가
+                            if buy_price > 0:
+                                target_p = buy_price * (1 + ts_target_pct / 100.0)
+                                stop_p = buy_price * (1 + sat_stop_loss / 100.0)
+                                target_str = f"{target_p:,.0f} 원"
+                                stop_str = f"{stop_p:,.0f} 원"
+                            else:
+                                target_str = "-"
+                                stop_str = "-"
+
                             live_results.append({
                                 '보유 종목명': s_name, 
                                 '한투 실시간 현재가': f"{live_c_price:,.0f} 원",
-                                '실제 매수단가': f"{buy_price:,.0f} 원" if buy_price > 0 else "-",
+                                '권장 익절가': target_str,
+                                '강제 손절가': stop_str,
                                 'AI 액션 플랜 (권장)': action, 
                                 '상세 판단 근거': detail
                             })
