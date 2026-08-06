@@ -1364,8 +1364,8 @@ with tab2:
     st.header("🔌 실전 계좌(API) 연동 현황")
     st.caption("아래 설정된 한국투자증권 실계좌 정보 및 잔고를 확인하고 진단합니다.")
 
-    if not kis_accounts:
-        st.markdown("<div style='padding: 15px; border-radius: 8px; background-color: rgba(255, 193, 7, 0.1); border-left: 5px solid #ffc107; color: #856404;'>💡 현재 등록된 KIS 계좌가 없습니다.<br>Streamlit Cloud <b>Secrets</b>에 API 키를 등록해주세요.</div>", unsafe_allow_html=True)
+    if not SYS_APP_KEY:
+        st.markdown("<div style='padding: 15px; border-radius: 8px; background-color: rgba(255, 193, 7, 0.1); border-left: 5px solid #ffc107; color: #856404;'>💡 현재 선택된 포트폴리오 전략에 매칭되는 KIS 계좌가 없습니다.<br>Streamlit Cloud <b>Secrets</b>에 API 키를 등록해주세요.</div>", unsafe_allow_html=True)
     else:
         acc_type_str = "모의투자 계좌" if SYS_IS_MOCK else "실전투자 계좌"
         st.success(f"✅ 연동 계좌: **`{SYS_CANO[:4]}****-{SYS_ACNT_PRDT}`** ({acc_type_str})")
