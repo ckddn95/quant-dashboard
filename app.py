@@ -1377,15 +1377,35 @@ with tab2:
         cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}"
         
         if refresh_btn or cache_key not in st.session_state:
-            with st.spinner("한투증권 API 서버와 통신 중..."):
+            with st.spinner("한투증권 API 서버와 실시간 잔고 통신 중..."):
                 token = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK)
                 if token:
                     holdings, summary = fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, token, is_mock=SYS_IS_MOCK)
                     if holdings is not None and summary is not None:
                         tot_evlu = float(summary[0].get('tot_evlu_amt', 0)) if summary else 0
-                        imported = [{'종목명': item.get('prdt_name', ''), '티커': item.get('pdno', ''), '매수단가': float(item.get('pchs_avg_pric', 0)), '보유수량': int(item.get('hldg_qty', 0))} for item in holdings if int(item.get('hldg_qty', 0)) > 0]
+                        
+                        # KIS API에서 실시간 현재가(prpr) 및 손익률(evlu_pfls_rt) 직접 추출
+                        imported = []
+                        for item in holdings:
+                            qty = int(item.get('hldg_qty', 0))
+                            if qty > 0:
+                                kis_prpr = float(item.get('prpr', 0)) # 실시간 현재가
+                                kis_pchs = float(item.get('pchs_avg_pric', 0)) # 매수평균가
+                                kis_profit_rt = float(item.get('evlu_pfls_rt', 0)) # 평가손익률(%)
+                                
+                                imported.append({
+                                    '종목명': item.get('prdt_name', ''),
+                                    '티커': item.get('pdno', ''),
+                                    '실시간 현재가': f"{kis_prpr:,.0f} 원",
+                                    '매수평균가': f"{kis_pchs:,.0f} 원",
+                                    '보유수량': f"{qty:,} 주",
+                                    '평가손익률': f"{kis_profit_rt:+.2f}%",
+                                    '_raw_price': kis_prpr, # 진단기 내부 연산용
+                                    '_raw_buy': kis_pchs,
+                                    '_raw_qty': qty
+                                })
                         st.session_state[cache_key] = {'total_eval': tot_evlu, 'stocks': imported}
-                        st.toast("✅ 계좌 잔고 새로고침 완료!")
+                        st.toast("✅ 한투증권 실시간 잔고/현재가 동기화 완료!")
 
         kis_data = st.session_state.get(cache_key)
         if kis_data:
@@ -1394,11 +1414,13 @@ with tab2:
             
             st.metric("💰 계좌 총 평가 금액 (현금+주식)", f"{real_total_eval:,.0f} 원")
             
-            st.markdown("### 📊 실계좌 보유 종목 리스트")
+            st.markdown("### 📊 실계좌 보유 종목 리스트 (한투증권 실시간 시세 기준)")
             if real_stocks_df.empty:
                 st.info("현재 이 계좌에 보유 중인 주식이 없습니다.")
             else:
-                st.dataframe(real_stocks_df, use_container_width=True)
+                # 화면 노출용 컬럼만 선택
+                display_df = real_stocks_df[['종목명', '티커', '실시간 현재가', '매수평균가', '보유수량', '평가손익률']]
+                st.dataframe(display_df, use_container_width=True)
 
             st.markdown("---")
             st.subheader("🩺 실전 계좌 AI 매매 진단기")
@@ -1419,34 +1441,38 @@ with tab2:
                         for idx, row in real_stocks_df.iterrows():
                             s_ticker = row['티커']
                             s_name = row['종목명']
-                            buy_price = float(row.get('매수단가', 0))
+                            buy_price = float(row.get('_raw_buy', 0))
                             
+                            # 기술적 지표(이동평균선) 계산용 데이터 로드
                             c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = fetch_stock_status(s_ticker)
-                            if c_price is None: continue
+                            
+                            # 현재가는 KIS 실시간 현재가 사용 (우선 적용)
+                            live_c_price = float(row.get('_raw_price', c_price if c_price else 0))
+                            if live_c_price == 0: continue
 
                             rs_strong = ret_60 > market_ret_60
                             rs_status = f"상대강도 우위" if rs_strong else "상대강도 열위"
                             
-                            diff_ma = ((ma20 / ma60) - 1) * 100
-                            dist_ma20 = ((c_price / ma20) - 1) * 100
+                            diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0.0
+                            dist_ma20 = ((live_c_price / ma20) - 1) * 100 if ma20 else 0.0
                             
                             tech_text = f"20/60선 이격 {diff_ma:+.2f}%" if current_strategy == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
 
                             if current_strategy == '대형주 (Core)':
-                                if ma20 >= ma60 * (1 - buf/2): 
+                                if ma20 and ma60 and (ma20 >= ma60 * (1 - buf/2)): 
                                     action = "🟢 보유 유지"
                                     detail = f"[{tech_text}] | [{rs_status}]\n➔ 정배열 추세 유지 중."
                                 else: 
                                     action = "🔴 즉각 매도 (추세 이탈)"
                                     detail = f"[{tech_text}] | [{rs_status}]\n➔ 데드크로스 발생으로 추세 이탈. 현금화 권장."
                             else:
-                                user_ret = ((c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                                user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                                 tech_text_sat = f"실수익률 {user_ret:+.2f}%"
                                 
                                 if user_ret <= (sat_stop_loss): 
                                     action = "🔴 강제 손절 집행"
                                     detail = f"[{tech_text_sat}]\n➔ 긴급 손절선({sat_stop_loss}%) 이탈로 하드 컷 권장."
-                                elif ma20 >= ma60 * (1 - buf/2):
+                                elif ma20 and ma60 and (ma20 >= ma60 * (1 - buf/2)):
                                     action = "🟢 보유 유지"
                                     detail = f"[{tech_text_sat}] | [{rs_status}]\n➔ 정배열 추세 홀딩 구간."
                                 else:
@@ -1454,9 +1480,11 @@ with tab2:
                                     detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 주도주 대열 이탈."
                                     
                             live_results.append({
-                                '보유 종목명': s_name, '현재가': f"{c_price:,.0f} 원",
+                                '보유 종목명': s_name, 
+                                '한투 실시간 현재가': f"{live_c_price:,.0f} 원",
                                 '실제 매수단가': f"{buy_price:,.0f} 원" if buy_price > 0 else "-",
-                                'AI 액션 플랜 (권장)': action, '상세 판단 근거': detail
+                                'AI 액션 플랜 (권장)': action, 
+                                '상세 판단 근거': detail
                             })
                         
                         st.table(pd.DataFrame(live_results))
