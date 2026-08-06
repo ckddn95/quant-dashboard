@@ -6,3 +6,5 @@ Finance-DataReader
 yfinance
 matplotlib
 tqdm
+gspread
+google-auth
