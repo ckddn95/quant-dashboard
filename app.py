@@ -31,26 +31,6 @@ if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 
 # ==========================================
-# [신규] Streamlit Secrets 기반 KIS API 로드
-# ==========================================
-# 앱이 켜질 때 Secrets에 저장된 정보를 자동으로 읽어옵니다.
-kis_keys = None
-try:
-    if "kis_config" in st.secrets:
-        kis_keys = st.secrets["kis_config"]
-except Exception:
-    pass
-
-if kis_keys:
-    SYS_APP_KEY = kis_keys.get("app_key")
-    SYS_APP_SECRET = kis_keys.get("app_secret")
-    SYS_CANO = str(kis_keys.get("cano"))
-    SYS_ACNT_PRDT = str(kis_keys.get("acnt_prdt", "01"))
-    SYS_IS_MOCK = kis_keys.get("is_mock", False) # False면 실전, True면 모의투자
-else:
-    SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
-
-# ==========================================
 # 한국투자증권 Open API 연동 로직
 # ==========================================
 def get_kis_access_token(app_key, app_secret, is_mock=True):
@@ -720,8 +700,42 @@ if 'show_scanner' not in st.session_state:
     st.session_state.show_scanner = False
 
 # ==========================================
+# [신규] Streamlit Secrets 기반 다중 KIS API 로드
+# ==========================================
+kis_accounts = {}
+try:
+    if "kis_accounts" in st.secrets:
+        kis_accounts = st.secrets["kis_accounts"]
+except Exception:
+    pass
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔌 한국투자증권 실계좌 연동")
+
+SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
+
+if kis_accounts:
+    # Secrets에 등록된 계좌들의 'name'을 추출하여 드롭다운 리스트 생성
+    acc_options = {v.get("name", k): v for k, v in kis_accounts.items()}
+    selected_acc_display = st.sidebar.selectbox("조회할 KIS 계좌 선택", list(acc_options.keys()))
+    
+    # 선택된 계좌의 정보 할당
+    selected_acc_data = acc_options[selected_acc_display]
+    SYS_APP_KEY = selected_acc_data.get("app_key")
+    SYS_APP_SECRET = selected_acc_data.get("app_secret")
+    SYS_CANO = str(selected_acc_data.get("cano"))
+    SYS_ACNT_PRDT = str(selected_acc_data.get("acnt_prdt", "01"))
+    SYS_IS_MOCK = selected_acc_data.get("is_mock", False)
+    
+    acc_type_str = "모의투자" if SYS_IS_MOCK else "실전투자"
+    st.sidebar.success(f"✅ **{selected_acc_display}** 연동됨\n\n(`{SYS_CANO[:4]}****-{SYS_ACNT_PRDT}` / {acc_type_str})")
+else:
+    st.sidebar.warning("🔑 **KIS API 미연동**\n\nStreamlit Cloud 우측 하단 `Manage app` -> `Settings` -> `Secrets`에 `[kis_accounts]` 정보를 등록해주세요.")
+
+# ==========================================
 # 3. 사이드바: 단일 작업공간(포트폴리오 스위칭)
 # ==========================================
+st.sidebar.markdown("---")
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 
 valid_files = glob.glob(f"{SAVE_DIR}/*.json")
@@ -821,18 +835,6 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             with open(new_file_path, 'w', encoding='utf-8') as f:
                 json.dump(new_data, f, ensure_ascii=False, indent=2)
             st.rerun()
-
-# ==========================================
-# KIS API 로드 (Secrets 연동 안내)
-# ==========================================
-st.sidebar.markdown("---")
-st.sidebar.header("🔌 한국투자증권 실계좌 연동")
-
-if kis_keys:
-    acc_type_str = "모의투자 계좌" if SYS_IS_MOCK else "실전투자 계좌"
-    st.sidebar.success(f"✅ **KIS API 연동 완료**\n\n(Secrets 로드 성공: `{SYS_CANO[:4]}****-{SYS_ACNT_PRDT}` / {acc_type_str})")
-else:
-    st.sidebar.warning("🔑 **KIS API 미연동**\n\nStreamlit Cloud 우측 하단 `Manage app` -> `Settings` -> `Secrets`에 `[kis_config]` 정보를 등록해주세요.")
 
 # ==========================================
 # 파라미터 세팅 및 테마 인디케이터 
