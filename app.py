@@ -348,7 +348,8 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
             
             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
             low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
-            is_dip = ((dist_ma20 >= -5.0) & (dist_ma20 <= 3.0)) | low_ma20_touch  # ✅ ValueError 해결된 부분
+            # ✅ [Fix 1] Series 단위의 불리언 연산(ValueError) 방어를 위해 비트 연산자 적용
+            is_dip = ((dist_ma20 >= -5.0) & (dist_ma20 <= 3.0)) | low_ma20_touch 
             
             entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
             exit_cond = ((df['MA20'] < df['MA60'] * (1 - buf/2)) & (~df['VIX_Contrarian']))
@@ -364,6 +365,9 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
                                 0.0)
         
         stock_dfs[name] = df[df.index >= start_dt].copy()
+        
+    # ✅ [Fix 2] 데이터가 하나도 조회되지 않은 빈 데이터프레임들을 딕셔너리에서 미리 제거하여 IndexError 방어
+    stock_dfs = {k: v for k, v in stock_dfs.items() if not v.empty}
         
     if not stock_dfs:
         return None
@@ -841,7 +845,7 @@ if selected_port and p_data:
                             with open(file_path, 'w', encoding='utf-8') as f:
                                 json.dump(p_data, f, ensure_ascii=False, indent=2)
                             
-                            holdings, summary = fetch_kis_account_balance(kis_app_key, kis_app_secret, kis_cano, kis_acnt_prdt, token, is_mock=kis_mock)
+                            holdings, summary = fetch_kis_account_balance(kis_app_key, kis_app_secret, kis_cano, kis_acnt_prdt, token, is_mock=is_mock)
                             if holdings is not None and summary is not None:
                                 tot_evlu = float(summary[0].get('tot_evlu_amt', 0)) if summary else 0
                                 imported = [{'종목명': item.get('prdt_name', ''), '티커': item.get('pdno', ''), '매수단가': float(item.get('pchs_avg_pric', 0)), '보유수량': int(item.get('hldg_qty', 0))} for item in holdings if int(item.get('hldg_qty', 0)) > 0]
@@ -1674,7 +1678,7 @@ with tab4:
     st.markdown("""
     * **추세 추종과 손익 비대칭성 (Let Winners Run, Cut Losses Short):** 확실한 상승 추세에 올라타 이익을 길게 가져가고, 횡보 및 하락장에서는 휩소(잦은 매매)를 차단하여 수수료와 원금을 철저히 방어합니다.
     * **동적 자본 관리 (Dynamic Capital Allocation):** 투자금의 증액/감액을 실시간으로 반영하며, 증액 시 즉시 비중 추가 확대 매수를 지시하고, 감액 시 최약체(모멘텀 하위) 종목부터 기계적으로 청산합니다.
-    * **공포 탐욕 지 지수 역발상 (Contrarian):** 대다수 투자자가 시장을 떠나는 극단적 공포(VIX 폭등 후 꺾임) 시점을 수리적으로 포착하여 V자 반등을 낚아챕니다.
+    * **공포 탐욕 지수 역발상 (Contrarian):** 대다수 투자자가 시장을 떠나는 극단적 공포(VIX 폭등 후 꺾임) 시점을 수리적으로 포착하여 V자 반등을 낚아챕니다.
     """)
 
     st.markdown("---")
