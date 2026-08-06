@@ -348,7 +348,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
             
             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
             low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
-            # ✅ [Fix] ValueError Series 연산 에러 방어 적용
             is_dip = ((dist_ma20 >= -5.0) & (dist_ma20 <= 3.0)) | low_ma20_touch 
             
             entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
@@ -366,7 +365,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
         
         stock_dfs[name] = df[df.index >= start_dt].copy()
         
-    # ✅ [Fix] 데이터가 아예 없는(Empty) 데이터프레임들을 딕셔너리에서 미리 제거하여 IndexError 방어
     stock_dfs = {k: v for k, v in stock_dfs.items() if not v.empty}
         
     if not stock_dfs:
@@ -701,43 +699,10 @@ if 'auto_diagnose' not in st.session_state:
 if 'show_scanner' not in st.session_state:
     st.session_state.show_scanner = False
 
-# ==========================================
-# [신규] Streamlit Secrets 기반 다중 KIS API 로드
-# ==========================================
-kis_accounts = {}
-try:
-    if "kis_accounts" in st.secrets:
-        kis_accounts = st.secrets["kis_accounts"]
-except Exception:
-    pass
-
-st.sidebar.markdown("---")
-st.sidebar.header("🔌 한국투자증권 실계좌 연동")
-
-SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
-
-if kis_accounts:
-    # Secrets에 등록된 계좌들의 'name'을 추출하여 드롭다운 리스트 생성
-    acc_options = {v.get("name", k): v for k, v in kis_accounts.items()}
-    selected_acc_display = st.sidebar.selectbox("조회할 KIS 계좌 선택", list(acc_options.keys()))
-    
-    # 선택된 계좌의 정보 할당
-    selected_acc_data = acc_options[selected_acc_display]
-    SYS_APP_KEY = selected_acc_data.get("app_key")
-    SYS_APP_SECRET = selected_acc_data.get("app_secret")
-    SYS_CANO = str(selected_acc_data.get("cano"))
-    SYS_ACNT_PRDT = str(selected_acc_data.get("acnt_prdt", "01"))
-    SYS_IS_MOCK = selected_acc_data.get("is_mock", False)
-    
-    acc_type_str = "모의투자" if SYS_IS_MOCK else "실전투자"
-    st.sidebar.success(f"✅ **{selected_acc_display}** 연동됨\n\n(`{SYS_CANO[:4]}****-{SYS_ACNT_PRDT}` / {acc_type_str})")
-else:
-    st.sidebar.warning("🔑 **KIS API 미연동**\n\nStreamlit Cloud 우측 하단 `Manage app` -> `Settings` -> `Secrets`에 `[kis_accounts]` 정보를 등록해주세요.")
 
 # ==========================================
 # 3. 사이드바: 단일 작업공간(포트폴리오 스위칭)
 # ==========================================
-st.sidebar.markdown("---")
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 
 valid_files = glob.glob(f"{SAVE_DIR}/*.json")
@@ -762,12 +727,13 @@ if port_names:
         st.sidebar.error("파일을 읽는 데 실패했습니다.")
         p_data = None
 
+    active_strat = p_data['strategy'] if p_data else "대형주 (Core)"
+
     if p_data:
         st.sidebar.markdown("---")
         st.sidebar.subheader("💰 Virtual Capital & Settings")
         
-        strat = p_data['strategy']
-        st.sidebar.markdown(f"**현재 설정 전략:** `{strat}`")
+        st.sidebar.markdown(f"**현재 설정 전략:** `{active_strat}`")
         
         new_cash = st.sidebar.number_input(
             f"총 투자 운용 자산 (증/감액)", 
@@ -794,6 +760,7 @@ if port_names:
                     st.sidebar.error(f"삭제 실패: {e}")
 else:
     st.sidebar.info("👈 생성된 포트폴리오가 없습니다. 아래에서 새로 추가해 주세요.")
+    active_strat = "대형주 (Core)"
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 새 가상 포트폴리오 추가")
@@ -839,12 +806,42 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             st.rerun()
 
 # ==========================================
+# [신규] 전략 동기화 KIS API 로드
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.header("🔌 한국투자증권 실계좌 연동")
+
+SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
+
+if p_data:
+    # 전략에 따른 키 결정 (core vs satellite)
+    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
+    
+    try:
+        kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
+    except Exception:
+        kis_account_data = None
+        
+    if kis_account_data:
+        SYS_APP_KEY = kis_account_data.get("app_key")
+        SYS_APP_SECRET = kis_account_data.get("app_secret")
+        SYS_CANO = str(kis_account_data.get("cano"))
+        SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
+        SYS_IS_MOCK = kis_account_data.get("is_mock", False)
+        
+        acc_name = kis_account_data.get("name", f"{active_strat} 계좌")
+        acc_type_str = "모의투자" if SYS_IS_MOCK else "실전투자"
+        st.sidebar.success(f"✅ **{acc_name}** 자동 매칭됨\n\n(`{SYS_CANO[:4]}****-{SYS_ACNT_PRDT}` / {acc_type_str})")
+    else:
+        st.sidebar.warning(f"🔑 **KIS API 미연동**\n\nStreamlit Cloud 우측 하단 `Manage app` -> `Settings` -> `Secrets`에 `[kis_accounts.{kis_secret_key}]` 정보를 등록해주세요.")
+else:
+     st.sidebar.info("👈 포트폴리오를 선택하면 실계좌가 자동 매칭됩니다.")
+
+# ==========================================
 # 파라미터 세팅 및 테마 인디케이터 
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
-
-active_strat = p_data['strategy'] if p_data else "대형주 (Core)"
 
 if active_strat == '대형주 (Core)':
     st.sidebar.markdown("<div style='padding: 12px; border-radius: 8px; background-color: rgba(31, 119, 180, 0.1); border-left: 5px solid #1f77b4; color: #1f77b4;'><b>🟦 대형주 (Core) 모드</b><br><span style='font-size: 0.85em; color: #a0a0a0;'>안정적 우량주 장기 추세 추종 필터</span></div>", unsafe_allow_html=True)
