@@ -348,6 +348,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
             
             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
             low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
+            # ✅ [Fix] ValueError Series 연산 에러 방어 적용
             is_dip = ((dist_ma20 >= -5.0) & (dist_ma20 <= 3.0)) | low_ma20_touch 
             
             entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
@@ -365,6 +366,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
         
         stock_dfs[name] = df[df.index >= start_dt].copy()
         
+    # ✅ [Fix] 데이터가 아예 없는(Empty) 데이터프레임들을 딕셔너리에서 미리 제거하여 IndexError 방어
     stock_dfs = {k: v for k, v in stock_dfs.items() if not v.empty}
         
     if not stock_dfs:
@@ -1365,7 +1367,7 @@ with tab2:
     st.header("🔌 실전 계좌(API) 연동 현황")
     st.caption("아래 설정된 한국투자증권 실계좌 정보 및 잔고를 확인하고 진단합니다.")
 
-    if not kis_keys:
+    if not kis_accounts:
         st.markdown("<div style='padding: 15px; border-radius: 8px; background-color: rgba(255, 193, 7, 0.1); border-left: 5px solid #ffc107; color: #856404;'>💡 현재 등록된 KIS 계좌가 없습니다.<br>Streamlit Cloud <b>Secrets</b>에 API 키를 등록해주세요.</div>", unsafe_allow_html=True)
     else:
         acc_type_str = "모의투자 계좌" if SYS_IS_MOCK else "실전투자 계좌"
@@ -1375,7 +1377,7 @@ with tab2:
         with col_ref1:
             refresh_btn = st.button("🔄 이 계좌 잔고 실시간 새로고침", type="primary", use_container_width=True)
 
-        cache_key = "kis_global_cache"
+        cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}"
         
         if refresh_btn or cache_key not in st.session_state:
             with st.spinner("한투증권 API 서버와 통신 중..."):
