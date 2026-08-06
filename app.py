@@ -348,7 +348,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
             
             dist_ma20 = ((df['Close'] / df['MA20']) - 1) * 100
             low_ma20_touch = df['Low'] <= df['MA20'] * 1.01 if 'Low' in df.columns else (dist_ma20 <= 0.0)
-            # ✅ [Fix 1] Series 단위의 불리언 연산(ValueError) 방어를 위해 비트 연산자 적용
             is_dip = ((dist_ma20 >= -5.0) & (dist_ma20 <= 3.0)) | low_ma20_touch 
             
             entry_cond = (ma200_cond & ((is_dip & df['Vol_Surged']) | df['VIX_Contrarian'])) & (df['Drawdown'] >= -0.30)
@@ -366,7 +365,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
         
         stock_dfs[name] = df[df.index >= start_dt].copy()
         
-    # ✅ [Fix 2] 데이터가 하나도 조회되지 않은 빈 데이터프레임들을 딕셔너리에서 미리 제거하여 IndexError 방어
     stock_dfs = {k: v for k, v in stock_dfs.items() if not v.empty}
         
     if not stock_dfs:
@@ -919,7 +917,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📝 가상 샌드박스", "🔌 KIS 실전 �
 
 with tab1:
     st.header("📝 가상 포트폴리오 샌드박스")
-    st.caption("수동으로 종목을 관리하고 시뮬레이션 해보는 '모의 샌드박스' 공간입니다. 여기서의 수정은 실제 계좌에 영향을 주지 않습니다.")
+    st.caption("수동으로 종목을 관리하고 진단하는 공간입니다. 여기서의 수정은 실제 계좌에 영향을 주지 않습니다.")
     
     if not p_data or not selected_port:
         st.info("👈 좌측 사이드바에서 포트폴리오를 먼저 생성하거나 선택하세요.")
@@ -1146,60 +1144,6 @@ with tab1:
                     with open(new_file_path, "w", encoding="utf-8") as f:
                          json.dump(p_data, f, ensure_ascii=False, indent=2)
                     st.rerun()
-
-        # ==========================================
-        # [신규] AI 가상 자동매매 성과 (Forward Test) 모듈
-        # ==========================================
-        st.markdown("---")
-        st.subheader("📈 AI 자동매매 가상 운용 성과 (Forward Test)")
-        st.markdown("포트폴리오 생성일(또는 종목 변경일)부터 오늘까지, **현재 편입된 종목 풀을 대상으로 AI가 수동 개입 없이 100% 자동 매매를 수행했다고 가정**했을 때의 누적 수익률입니다.")
-        
-        created_str = p_data.get('created_at', (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d'))
-        created_dt = datetime.datetime.strptime(created_str, "%Y-%m-%d").date()
-        
-        col_ft1, col_ft2 = st.columns([1, 2])
-        with col_ft1:
-            ft_start = st.date_input("가상 운용 시작일 (포트폴리오 생성/변경일)", value=created_dt)
-        with col_ft2:
-            st.write("")
-            st.write("")
-            ft_run = st.button("🚀 선택한 기간 AI 가상 매매 수익률 계산", type="primary", use_container_width=True)
-
-        if ft_run:
-            if stocks_df.empty:
-                st.error("샌드박스에 등록된 종목이 없습니다.")
-            else:
-                with st.spinner("AI 퀀트 엔진 가상 매매 추적 중... (수 초 소요)"):
-                    ft_result = run_quant_simulation(
-                        sim_stocks=stocks_df.copy(),
-                        strat=current_strategy,
-                        init_cash=total_cash,
-                        start_date=ft_start,
-                        end_date=datetime.date.today(),
-                        use_ma200_filter=use_ma200_filter,
-                        whipsaw_buffer=whipsaw_buffer,
-                        sat_stop_loss=sat_stop_loss,
-                        max_alloc_pct=max_alloc_pct,
-                        min_hold_days=min_hold_days,
-                        ts_target_pct=ts_target_pct,
-                        ts_drop_pct=ts_drop_pct,
-                        bull_market_boost=bull_market_boost,
-                        cooldown_days=cooldown_days
-                    )
-                    
-                    if ft_result:
-                        st.success(f"✅ 가상 운용 성과 도출 완료! ({ft_start.strftime('%Y-%m-%d')} ~ 현재)")
-                        col_r1, col_r2, col_r3 = st.columns(3)
-                        col_r1.metric("총 초기 투입 자산", f"{total_cash:,.0f} 원")
-                        col_r2.metric("AI 자동매매 현재 총 자산", f"{ft_result['final_asset']:,.0f} 원")
-                        
-                        ret_color = "normal" if ft_result['final_port_ret'] >= 0 else "inverse"
-                        col_r3.metric("가상 누적 수익률", f"{ft_result['final_port_ret']:+.2f}%", delta=f"{ft_result['final_port_ret']:+.2f}%", delta_color=ret_color)
-                        
-                        with st.expander("종목별 가상 매매 성과 상세 보기"):
-                            st.table(pd.DataFrame(ft_result['summary_rows']))
-                    else:
-                        st.error("계산할 수 있는 유효한 주가 데이터가 없습니다.")
 
         st.markdown("---")
         st.subheader("🩺 가상 포트폴리오 AI 진단 결과")
@@ -1555,26 +1499,87 @@ with tab2:
 
 with tab3:
     st.header("Simulation & Backtest")
-    st.markdown("과거 주가 데이터를 바탕으로 **매매 수수료 누락 산식이 완벽히 보정된 초과수익 엔진**을 검증합니다.")
+    st.markdown("현재 포트폴리오의 최근 성과를 추적하는 **Forward Test**와 과거 장기 데이터를 검증하는 **Backtest**를 수행합니다.")
 
     if not p_data or not selected_port:
         st.warning("포트폴리오가 없습니다.")
     else:
+        stocks_df = pd.DataFrame(p_data['stocks'])
+        current_strategy = p_data['strategy']
+        total_cash = p_data['cash']
+        
+        # ---------------------------------------------------------
+        # 1. Forward Test (가상 자동매매 운용 성과) 구역
+        # ---------------------------------------------------------
+        st.subheader("📈 AI 자동매매 가상 운용 성과 (Forward Test)")
+        st.markdown("포트폴리오 생성일(또는 종목 변경일)부터 오늘까지, **현재 편입된 종목 풀을 대상으로 AI가 수동 개입 없이 100% 자동 매매를 수행했다고 가정**했을 때의 누적 수익률입니다.")
+        
+        created_str = p_data.get('created_at', (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d'))
+        created_dt = datetime.datetime.strptime(created_str, "%Y-%m-%d").date()
+        
+        col_ft1, col_ft2 = st.columns([1, 2])
+        with col_ft1:
+            ft_start = st.date_input("가상 운용 시작일 (포트폴리오 생성/변경일)", value=created_dt)
+        with col_ft2:
+            st.write("")
+            st.write("")
+            ft_run = st.button("🚀 선택한 기간 AI 가상 매매 수익률 계산 (Forward Test)", type="primary", use_container_width=True)
+
+        if ft_run:
+            if stocks_df.empty:
+                st.error("샌드박스에 등록된 종목이 없습니다.")
+            else:
+                with st.spinner("AI 퀀트 엔진 가상 매매 추적 중... (수 초 소요)"):
+                    ft_result = run_quant_simulation(
+                        sim_stocks=stocks_df.copy(),
+                        strat=current_strategy,
+                        init_cash=total_cash,
+                        start_date=ft_start,
+                        end_date=datetime.date.today(),
+                        use_ma200_filter=use_ma200_filter,
+                        whipsaw_buffer=whipsaw_buffer,
+                        sat_stop_loss=sat_stop_loss,
+                        max_alloc_pct=max_alloc_pct,
+                        min_hold_days=min_hold_days,
+                        ts_target_pct=ts_target_pct,
+                        ts_drop_pct=ts_drop_pct,
+                        bull_market_boost=bull_market_boost,
+                        cooldown_days=cooldown_days
+                    )
+                    
+                    if ft_result:
+                        st.success(f"✅ 가상 운용 성과 도출 완료! ({ft_start.strftime('%Y-%m-%d')} ~ 현재)")
+                        col_r1, col_r2, col_r3 = st.columns(3)
+                        col_r1.metric("총 초기 투입 자산", f"{total_cash:,.0f} 원")
+                        col_r2.metric("AI 자동매매 현재 총 자산", f"{ft_result['final_asset']:,.0f} 원")
+                        
+                        ret_color = "normal" if ft_result['final_port_ret'] >= 0 else "inverse"
+                        col_r3.metric("가상 누적 수익률", f"{ft_result['final_port_ret']:+.2f}%", delta=f"{ft_result['final_port_ret']:+.2f}%", delta_color=ret_color)
+                        
+                        with st.expander("종목별 가상 매매 성과 상세 보기"):
+                            st.table(pd.DataFrame(ft_result['summary_rows']))
+                    else:
+                        st.error("계산할 수 있는 유효한 주가 데이터가 없습니다.")
+
+        st.markdown("---")
+        
+        # ---------------------------------------------------------
+        # 2. Backtest (장기 과거 성과 시뮬레이션) 구역
+        # ---------------------------------------------------------
+        st.subheader("📊 장기 시뮬레이션 및 초과수익 검증 (Backtest)")
+        st.markdown("과거 장기 주가 데이터를 바탕으로 매매 수수료 누락 산식이 완벽히 보정된 초과수익 엔진을 검증합니다.")
+
         col_sim1, col_sim2 = st.columns(2)
         with col_sim1:
             start_date = st.date_input("시작일", datetime.date(2023, 1, 1))
         with col_sim2:
             end_date = st.date_input("종료일", datetime.date.today())
 
-        if st.button(f"'{selected_port}' 고수익 모멘텀 시뮬레이션 실행", type="primary", use_container_width=True):
-            stocks = pd.DataFrame(p_data['stocks'])
-            strat = p_data['strategy']
-            init_cash = p_data['cash']
+        if st.button(f"'{selected_port}' 고수익 모멘텀 시뮬레이션 실행 (Backtest)", type="primary", use_container_width=True):
+            index_sym = 'KS11' if current_strategy == '대형주 (Core)' else 'KQ11'
+            index_name = 'KOSPI' if current_strategy == '대형주 (Core)' else 'KOSDAQ'
 
-            index_sym = 'KS11' if strat == '대형주 (Core)' else 'KQ11'
-            index_name = 'KOSPI' if strat == '대형주 (Core)' else 'KOSDAQ'
-
-            if strat == '중소형주 (Satellite)':
+            if current_strategy == '중소형주 (Satellite)':
                 kosdaq_top45 = [
                     ("에코프로비엠", "247540"), ("알테오젠", "196170"), ("HLB", "028300"), ("엔켐", "348370"),
                     ("리가켐바이오", "141080"), ("휴젤", "145020"), ("클래시스", "214150"), ("삼천당제약", "000250"),
@@ -1592,7 +1597,7 @@ with tab3:
                 sim_stocks = pd.DataFrame([{'종목명': name, '티커': code} for name, code in kosdaq_top45])
                 st.info("💡 **[AI 스캐너 시뮬레이션 모드]** 중소형주 전략 백테스트 시 **섹터별 코스닥 우량주 45선**이 검색 풀로 자동 적용됩니다.")
             else:
-                sim_stocks = stocks.copy()
+                sim_stocks = stocks_df.copy()
 
             if sim_stocks.empty:
                 st.error("종목이 없습니다.")
@@ -1600,7 +1605,7 @@ with tab3:
                 with st.spinner(f"산식 보정된 {index_name} 벤치마크 및 스캐너 동기화 백테스트 구동 중... (종목이 많을 시 수 분 소요)"):
                     
                     bt_result = run_quant_simulation(
-                        sim_stocks=sim_stocks, strat=strat, init_cash=init_cash,
+                        sim_stocks=sim_stocks, strat=current_strategy, init_cash=total_cash,
                         start_date=start_date, end_date=end_date, use_ma200_filter=use_ma200_filter,
                         whipsaw_buffer=whipsaw_buffer, sat_stop_loss=sat_stop_loss, max_alloc_pct=max_alloc_pct,
                         min_hold_days=min_hold_days, ts_target_pct=ts_target_pct, ts_drop_pct=ts_drop_pct,
@@ -1610,7 +1615,7 @@ with tab3:
                     if bt_result:
                         st.success(f"✅ 벤치마크 자동 동기화 및 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
-                        col_r1.metric(f"총 초기 자산", f"{init_cash:,.0f} 원")
+                        col_r1.metric(f"총 초기 자산", f"{total_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%")
                         
                         st.markdown("---")
