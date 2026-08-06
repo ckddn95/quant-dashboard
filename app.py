@@ -5,11 +5,11 @@ import yfinance as yf
 import FinanceDataReader as fdr
 import altair as alt
 import json
-import os
-import glob
 import datetime
 import re
 import requests
+import gspread
+from google.oauth2.service_account import Credentials
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -21,19 +21,79 @@ st.set_page_config(
 )
 
 st.title("Core-Satellite Independent Asset Allocation Quant System")
-st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가상 매매 성과 추적기(Forward Test)**, **엔진 100% 동기화**, **가상/실계좌 탭 분리**를 제공하는 실전 퀀트 대시보드입니다.")
+st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가상 매매 성과 추적기(Forward Test)**, **구글 시트 영구 DB 연동**, **가상/실계좌 탭 분리**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
-# 0. 로컬 저장소 디렉토리 세팅
+# 0. 구글 스프레드시트 DB 연동 로직
 # ==========================================
-SAVE_DIR = "./saved_portfolios"
-if not os.path.exists(SAVE_DIR):
-    os.makedirs(SAVE_DIR)
+SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
+
+@st.cache_resource
+def get_gspread_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds_dict = dict(st.secrets["google_sheets_json"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(creds)
+    return client
+
+def load_all_portfolios_from_sheets():
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(SPREADSHEET_ID)
+        try:
+            worksheet = sh.worksheet("Portfolios")
+        except:
+            worksheet = sh.add_worksheet(title="Portfolios", rows=100, cols=2)
+            worksheet.append_row(["Name", "JSON_Data"])
+            
+        records = worksheet.get_all_records()
+        port_dict = {}
+        for r in records:
+            name = str(r.get("Name", "")).strip()
+            data_str = r.get("JSON_Data")
+            if name and data_str:
+                try:
+                    port_dict[name] = json.loads(data_str)
+                except:
+                    pass
+        return port_dict
+    except Exception as e:
+        st.error(f"구글 시트 데이터 로드 오류: {e}")
+        return {}
+
+def save_portfolio_to_sheets(name, p_data):
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.worksheet("Portfolios")
+        
+        cell = worksheet.find(name)
+        data_str = json.dumps(p_data, ensure_ascii=False)
+        
+        if cell:
+            worksheet.update_cell(cell.row, 2, data_str)
+        else:
+            worksheet.append_row([name, data_str])
+    except Exception as e:
+        st.error(f"구글 시트 데이터 저장 오류: {e}")
+
+def delete_portfolio_from_sheets(name):
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.worksheet("Portfolios")
+        cell = worksheet.find(name)
+        if cell:
+            worksheet.delete_rows(cell.row)
+    except Exception as e:
+        st.error(f"구글 시트 데이터 삭제 오류: {e}")
 
 # ==========================================
 # 한국투자증권 Open API 연동 로직
 # ==========================================
-# 💡 [업그레이드 1] 토큰 발급 12시간(43200초) 캐싱: API 한도 초과 에러 완벽 방어 및 속도 향상
 @st.cache_data(ttl=43200, show_spinner=False)
 def get_kis_access_token(app_key, app_secret, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
@@ -82,28 +142,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e:
         st.error(f"잔고 조회 통신 오류: {e}")
     return None, None
-
-# ==========================================
-# 구버전 파일 자동 청소 및 마이그레이션
-# ==========================================
-raw_files = glob.glob(f"{SAVE_DIR}/*.json")
-for f_path in raw_files:
-    try:
-        with open(f_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if not data:
-            os.remove(f_path)
-            continue
-        if 'strategy' not in data:
-            for p_name, p_data in data.items():
-                safe_name = re.sub(r'[\\/*?:"<>|]', "", p_name)
-                new_path = os.path.join(SAVE_DIR, f"{safe_name}.json")
-                with open(new_path, 'w', encoding='utf-8') as out_f:
-                    json.dump(p_data, out_f, ensure_ascii=False, indent=2)
-            os.remove(f_path)
-    except Exception:
-        try: os.remove(f_path)
-        except: pass
 
 # ==========================================
 # 1. 데이터 수집 함수 모음
@@ -261,7 +299,7 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
     df_res = df_res.drop(columns=['_score_num'])
     return df_res
 
-# [핵심 통합] 독립된 시뮬레이션 계산 엔진 (가상 운용/백테스트 공통 사용)
+# [핵심 통합] 독립된 시뮬레이션 계산 엔진
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date,
                          use_ma200_filter, whipsaw_buffer, sat_stop_loss,
@@ -720,29 +758,17 @@ if 'show_scanner' not in st.session_state:
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 
-valid_files = glob.glob(f"{SAVE_DIR}/*.json")
-port_names = [os.path.basename(f).replace('.json', '') for f in valid_files]
+all_ports = load_all_portfolios_from_sheets()
+port_names = list(all_ports.keys())
 
 selected_port = None
 p_data = None
-file_path = None
 
 if port_names:
-    selected_port = st.sidebar.selectbox("가상 포트폴리오(파일) 목록", port_names)
-    file_path = os.path.join(SAVE_DIR, f"{selected_port}.json")
+    selected_port = st.sidebar.selectbox("구글 시트 DB 목록", port_names)
+    p_data = all_ports.get(selected_port)
     
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            p_data = json.load(f)
-            if 'strategy' not in p_data: p_data['strategy'] = '대형주 (Core)'
-            if 'cash' not in p_data: p_data['cash'] = 10000000
-            if 'stocks' not in p_data: p_data['stocks'] = []
-            if 'created_at' not in p_data: p_data['created_at'] = (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
-    except Exception:
-        st.sidebar.error("파일을 읽는 데 실패했습니다.")
-        p_data = None
-
-    active_strat = p_data['strategy'] if p_data else "대형주 (Core)"
+    active_strat = p_data.get('strategy', '대형주 (Core)') if p_data else "대형주 (Core)"
 
     if p_data:
         st.sidebar.markdown("---")
@@ -752,43 +778,38 @@ if port_names:
         
         new_cash = st.sidebar.number_input(
             f"총 투자 운용 자산 (증/감액)", 
-            value=int(p_data['cash']), 
+            value=int(p_data.get('cash', 10000000)), 
             step=1_000_000, 
             format="%d"
         )
         
-        if new_cash != int(p_data['cash']):
+        if new_cash != int(p_data.get('cash', 10000000)):
             p_data['cash'] = new_cash
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(p_data, f, ensure_ascii=False, indent=2)
+            save_portfolio_to_sheets(selected_port, p_data)
+            st.rerun()
                 
         st.sidebar.caption(f"💵 가상 설정 금액: **{new_cash:,.0f} 원**")
         
         with st.sidebar.popover(f"🗑️ '{selected_port}' 삭제", use_container_width=True):
-            st.markdown("⚠️ **경고: 정말 삭제하시겠습니까?**<br>하드디스크에서 영구적으로 파일이 삭제되며 복구할 수 없습니다.", unsafe_allow_html=True)
+            st.markdown("⚠️ **경고: 정말 삭제하시겠습니까?**<br>구글 시트 DB에서 영구적으로 삭제되며 복구할 수 없습니다.", unsafe_allow_html=True)
             if st.button("🚨 네, 영구 삭제합니다", key=f"del_{selected_port}", type="primary", use_container_width=True):
-                try:
-                    os.remove(file_path)
-                    st.sidebar.success(f"✅ 완전히 삭제되었습니다.")
-                    st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"삭제 실패: {e}")
+                delete_portfolio_from_sheets(selected_port)
+                st.sidebar.success(f"✅ 완전히 삭제되었습니다.")
+                st.rerun()
 else:
-    st.sidebar.info("👈 생성된 포트폴리오가 없습니다. 아래에서 새로 추가해 주세요.")
+    st.sidebar.info("👈 구글 시트에 저장된 포트폴리오가 없습니다. 아래에서 새로 추가해 주세요.")
     active_strat = "대형주 (Core)"
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 새 가상 포트폴리오 추가")
 new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (특수문자 제외)")
 new_p_strat = st.sidebar.selectbox("전략 (적용될 규칙)", ["대형주 (Core)", "중소형주 (Satellite)"])
-new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d")
+new_p_cash = st.sidebar.number_input("초기 총 투자금", value=10_000_000, step=1_000_000, format="%d", key="new_cash_input")
 
 if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=True):
     if new_p_name:
         safe_name = re.sub(r'[\\/*?:"<>|]', "", new_p_name)
-        new_file_path = os.path.join(SAVE_DIR, f"{safe_name}.json")
-        
-        if os.path.exists(new_file_path):
+        if safe_name in all_ports:
             st.sidebar.warning("이미 존재하는 이름입니다.")
         else:
             if new_p_strat == "대형주 (Core)":
@@ -816,12 +837,11 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
                 'stocks': default_stocks,
                 'created_at': datetime.date.today().strftime('%Y-%m-%d')
             }
-            with open(new_file_path, 'w', encoding='utf-8') as f:
-                json.dump(new_data, f, ensure_ascii=False, indent=2)
+            save_portfolio_to_sheets(safe_name, new_data)
             st.rerun()
 
 # ==========================================
-# [신규] 전략 동기화 KIS API 로드
+# 전략 동기화 KIS API 로드
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("🔌 한국투자증권 실계좌 연동")
@@ -846,12 +866,12 @@ if p_data:
         acc_type_str = "모의투자" if SYS_IS_MOCK else "실전투자"
         st.sidebar.success(f"✅ **{acc_name}** 자동 매칭됨\n\n(`{SYS_CANO[:4]}****-{SYS_ACNT_PRDT}` / {acc_type_str})")
     else:
-        st.sidebar.warning(f"🔑 **KIS API 미연동**\n\nStreamlit Cloud 우측 하단 `Manage app` -> `Settings` -> `Secrets`에 `[kis_accounts.{kis_secret_key}]` 정보를 등록해주세요.")
+        st.sidebar.warning(f"🔑 **KIS API 미연동**\n\nStreamlit Cloud `Secrets`에 `[kis_accounts.{kis_secret_key}]` 정보를 등록해주세요.")
 else:
      st.sidebar.info("👈 포트폴리오를 선택하면 실계좌가 자동 매칭됩니다.")
 
 # ==========================================
-# 💡 [업그레이드 2] 사이드바 시장 상황판 (신호등 UI)
+# 시장 상황판 (신호등 UI)
 # ==========================================
 vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
 
@@ -866,7 +886,7 @@ st.sidebar.markdown(f"{kp_color} **KOSPI (대형주):** {kospi_ret_60:+.2f}%")
 st.sidebar.markdown(f"{kq_color} **KOSDAQ (중소형):** {kosdaq_ret_60:+.2f}%")
 
 # ==========================================
-# 파라미터 세팅 및 테마 인디케이터 
+# 파라미터 세팅
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Advanced Strategy Parameters")
@@ -916,15 +936,15 @@ bull_market_boost = st.sidebar.checkbox("🔥 강세장 자금 풀 부스터", v
 tab1, tab2, tab3, tab4 = st.tabs(["📝 가상 샌드박스", "🔌 KIS 실전 계좌", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
 with tab1:
-    st.header("📝 가상 포트폴리오 샌드박스")
-    st.caption("수동으로 종목을 관리하고 진단하는 공간입니다. 여기서의 수정은 실제 계좌에 영향을 주지 않습니다.")
+    st.header("📝 가상 포트폴리오 샌드박스 (Google Sheets DB 연동)")
+    st.caption("수동으로 종목을 관리하고 진단하는 공간입니다. 변경사항은 구글 스프레드시트에 영구 저장됩니다.")
     
     if not p_data or not selected_port:
         st.info("👈 좌측 사이드바에서 포트폴리오를 먼저 생성하거나 선택하세요.")
     else:
-        current_strategy = p_data['strategy']
-        total_cash = p_data['cash']
-        stocks_df = pd.DataFrame(p_data['stocks'])
+        current_strategy = p_data.get('strategy', '대형주 (Core)')
+        total_cash = p_data.get('cash', 10000000)
+        stocks_df = pd.DataFrame(p_data.get('stocks', []))
         if stocks_df.empty:
             stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
             
@@ -960,8 +980,7 @@ with tab1:
                         {'종목명': '삼양식품', '티커': '003230', '매수단가': 0, '보유수량': 0}
                     ]
                     p_data['stocks'] = sector_core_stocks
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    save_portfolio_to_sheets(selected_port, p_data)
                     st.rerun()
             else:
                 if st.button("➕ KOSDAQ 우량 45선 채우기", use_container_width=True):
@@ -981,8 +1000,7 @@ with tab1:
                     ]
                     sat_stocks = [{'종목명': name, '티커': code, '매수단가': 0, '보유수량': 0} for name, code in kosdaq_top45_tuples]
                     p_data['stocks'] = sat_stocks
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    save_portfolio_to_sheets(selected_port, p_data)
                     st.rerun()
 
         with col_src2:
@@ -1030,8 +1048,7 @@ with tab1:
                                     p_data['stocks'].append(new_row)
                                     temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
                                     p_data['stocks'] = temp_df.to_dict(orient='records')
-                                    with open(file_path, 'w', encoding='utf-8') as f:
-                                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                                    save_portfolio_to_sheets(selected_port, p_data)
                                     st.rerun() 
                     else:
                         st.warning("⚠️ 현재 조건(200일선 방어 및 골든크로스 전환)을 완벽히 만족하는 대형 우량주가 없습니다.")
@@ -1070,8 +1087,7 @@ with tab1:
                                     p_data['stocks'].append(new_row)
                                     temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
                                     p_data['stocks'] = temp_df.to_dict(orient='records')
-                                    with open(file_path, 'w', encoding='utf-8') as f:
-                                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                                    save_portfolio_to_sheets(selected_port, p_data)
                                     st.rerun() 
                     else:
                         st.warning("⚠️ 현재 조건(수급 폭발 + 60일선 우상향 + 20일선 눌림목)을 엄격히 만족하는 최상위 주도주가 없습니다.")
@@ -1098,8 +1114,7 @@ with tab1:
                         temp_df = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커'])
                         p_data['stocks'] = temp_df.to_dict(orient='records')
                         
-                        with open(file_path, 'w', encoding='utf-8') as f:
-                            json.dump(p_data, f, ensure_ascii=False, indent=2)
+                        save_portfolio_to_sheets(selected_port, p_data)
                         st.rerun()
 
         with col_manage2:
@@ -1111,8 +1126,7 @@ with tab1:
                     stocks_df = stocks_df[stocks_df['종목명'] != del_selected]
                     p_data['stocks'] = stocks_df.to_dict(orient='records')
                     
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        json.dump(p_data, f, ensure_ascii=False, indent=2)
+                    save_portfolio_to_sheets(selected_port, p_data)
                     st.rerun()
             else:
                 st.caption("현재 등록된 종목이 없습니다.")
@@ -1124,28 +1138,28 @@ with tab1:
             stocks_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}"
         )
         
-        # CSS 스타일을 컬럼 밖으로 빼서 버튼 높이 어긋남 현상 방어
         st.markdown("""<style>[data-testid="stPopover"] { width: 100%; }</style>""", unsafe_allow_html=True)
         
         col_qsave1, col_qsave2 = st.columns([1, 1])
         with col_qsave1:
             with st.popover("💾 표 데이터 수정 후 덮어쓰기 (Quick Save)", use_container_width=True):
-                st.markdown("⚠️ **현재 입력하신 '매수 단가'와 '보유 수량'을 기존 파일에 덮어씁니다.**<br>정말 저장하시겠습니까?", unsafe_allow_html=True)
+                st.markdown("⚠️ **현재 입력하신 내용을 구글 시트 DB에 덮어씁니다.**<br>정말 저장하시겠습니까?", unsafe_allow_html=True)
                 if st.button("✔️ 네, 덮어쓰기 저장합니다.", key=f"save_{selected_port}", type="primary", use_container_width=True):
                     p_data['stocks'] = edited_df.to_dict(orient='records')
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        json.dump(p_data, f, ensure_ascii=False, indent=2)
-                    st.success("✅ 포트폴리오 변경사항이 안전하게 저장되었습니다!")
+                    save_portfolio_to_sheets(selected_port, p_data)
+                    st.success("✅ 구글 시트 DB에 안전하게 저장되었습니다!")
                     
         with col_qsave2:
             with st.popover("📄 새 이름으로 복사하기 (Save As)", use_container_width=True):
-                save_filename = st.text_input("새 파일명", value=f"{selected_port}_복사본")
-                if st.button("복사본 생성하기", type="primary"):
+                save_filename = st.text_input("새 파일명", value=f"{selected_port}_복사본", key=f"save_as_input_{selected_port}")
+                if st.button("복사본 생성하기", type="primary", key=f"save_as_btn_{selected_port}"):
                     safe_new_name = re.sub(r'[\\/*?:"<>|]', "", save_filename)
-                    new_file_path = os.path.join(SAVE_DIR, f"{safe_new_name}.json")
-                    with open(new_file_path, "w", encoding="utf-8") as f:
-                         json.dump(p_data, f, ensure_ascii=False, indent=2)
-                    st.rerun()
+                    if safe_new_name in all_ports:
+                        st.warning("이미 존재하는 이름입니다.")
+                    else:
+                        new_copied_data = p_data.copy()
+                        save_portfolio_to_sheets(safe_new_name, new_copied_data)
+                        st.rerun()
 
         st.markdown("---")
         st.subheader("🩺 가상 포트폴리오 AI 진단 결과")
@@ -1276,7 +1290,6 @@ with tab1:
                         current_val = data['qty'] * c_price
                         diff_amt = target_amt - current_val
 
-                        # 💡 [업그레이드 3] 권장 목표가 / 손절가 자동 계산 (표 노출용)
                         buy_price_val = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
                         if is_holding and buy_price_val > 0:
                             target_p = buy_price_val * (1 + ts_target_pct / 100.0)
@@ -1359,7 +1372,7 @@ with tab1:
                                 else:
                                     action = "🔴 전량 매도"
                                     detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 완전 이탈."
-                            else: # 미보유 (관심종목 샌드박스)
+                            else: # 미보유
                                 if (use_ma200_filter and not data['is_above_ma200']):
                                     action = "🔴 진입 보류 (200일선 하회)"
                                     detail = f"[{tech_text}] | [{ma200_status}]\n➔ 장기 추세선 아래 역배열 구간이므로 진입을 금지합니다."
@@ -1375,13 +1388,13 @@ with tab1:
                                                 detail = f"[{tech_text}] | [{vix_status}]\n➔ 스캐너 조건 완벽 일치! 수급 폭발(200%+) 후 정확한 20일선 눌림목 타점입니다."
                                             else:
                                                 action = f"🟡 분할 매수 (관심종목 타점 도달)"
-                                                detail = f"[{tech_text}] | [{vix_status}]\n➔ 20일선 타점은 도달했으나 최근 폭발적인 수급 이력이 없습니다. 샌드박스 편입 종목이므로 소액 진입을 고려해볼 수 있습니다."
+                                                detail = f"[{tech_text}] | [{vix_status}]\n➔ 20일선 타점은 도달했으나 최근 폭발적인 수급 이력이 없습니다."
                                         else:
                                             action = "🟡 진입 보류 (현금 부족)"
                                             detail = f"[{tech_text}]\n➔ 타점은 좋으나 가용 현금이 부족합니다."
                                     else: 
                                         action = "🟡 관망 (타점 대기)"
-                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 현재 가격이 20일선에서 멀리 떨어져 있습니다. 눌림목(-5%~+3%)을 기다리세요."
+                                        detail = f"[{tech_text}] | [{ma200_status}]\n➔ 현재 가격이 20일선에서 멀리 떨어져 있습니다."
                                 
                         results.append({
                             '종목명': s_name, '상태': holding_status, '현재가': f"{c_price:,.0f} 원",
@@ -1469,7 +1482,7 @@ with tab2:
                     st.error("좌측 사이드바에서 비교 기준이 될 '가상 포트폴리오(전략)'를 먼저 선택해 주세요.")
                 else:
                     with st.spinner("실계좌 종목 퀀트 필터링 분석 중..."):
-                        current_strategy = p_data['strategy']
+                        current_strategy = p_data.get('strategy', '대형주 (Core)')
                         market_ret_60 = kospi_ret_60 if current_strategy == '대형주 (Core)' else kosdaq_ret_60
                         buf = whipsaw_buffer / 100.0
 
@@ -1513,7 +1526,6 @@ with tab2:
                                     action = "🔴 전량 매도"
                                     detail = f"[{tech_text_sat}]\n➔ 20일선 데드크로스로 주도주 대열 이탈."
                                     
-                            # 목표가/손절가 추가
                             if buy_price > 0:
                                 target_p = buy_price * (1 + ts_target_pct / 100.0)
                                 stop_p = buy_price * (1 + sat_stop_loss / 100.0)
@@ -1536,27 +1548,22 @@ with tab2:
 
 with tab3:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
-    st.markdown("이곳은 **가상 샌드박스의 관심 종목** 및 **전략 유니버스**를 대상으로 AI 알고리즘의 성과를 검증하는 공간입니다.\n*(※ KIS 실전 연동 계좌의 주식이 아닌, 좌측에서 설정한 가상 포트폴리오를 기준으로 연산됩니다.)*")
+    st.markdown("이곳은 **가상 샌드박스의 관심 종목** 및 **전략 유니버스**를 대상으로 AI 알고리즘의 성과를 검증하는 공간입니다.")
 
     if not p_data or not selected_port:
         st.warning("포트폴리오가 없습니다.")
     else:
-        stocks_df = pd.DataFrame(p_data['stocks'])
-        current_strategy = p_data['strategy']
-        total_cash = p_data['cash']
+        stocks_df = pd.DataFrame(p_data.get('stocks', []))
+        current_strategy = p_data.get('strategy', '대형주 (Core)')
+        total_cash = p_data.get('cash', 10000000)
         
-        # ---------------------------------------------------------
-        # 1. Forward Test (가상 자동매매 운용 성과) 구역
-        # ---------------------------------------------------------
         st.subheader("📈 [Forward Test] 가상 샌드박스 관심 종목 단기 성과 추적")
-        st.markdown("현재 '가상 샌드박스' 탭에 구성해 둔 **관심 종목 풀**을 대상으로, 지정한 시작일부터 오늘까지 AI가 100% 자동 매매(리밸런싱)를 수행했다고 가정했을 때의 단기 누적 수익률을 확인합니다.")
-        
         created_str = p_data.get('created_at', (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d'))
         created_dt = datetime.datetime.strptime(created_str, "%Y-%m-%d").date()
         
         col_ft1, col_ft2 = st.columns([1, 2])
         with col_ft1:
-            ft_start = st.date_input("가상 운용 시작일 (포트폴리오 생성/변경일)", value=created_dt)
+            ft_start = st.date_input("가상 운용 시작일", value=created_dt)
         with col_ft2:
             st.write("")
             st.write("")
@@ -1600,12 +1607,7 @@ with tab3:
 
         st.markdown("---")
         
-        # ---------------------------------------------------------
-        # 2. Backtest (장기 과거 성과 시뮬레이션) 구역
-        # ---------------------------------------------------------
         st.subheader("📊 [Backtest] AI 전략 유니버스 장기 초과수익 검증")
-        st.markdown("설정된 **퀀트 전략(대형주/중소형주)**을 과거 장기 주가 데이터에 적용하여 엔진의 신뢰성을 검증합니다. 수수료 및 방어 산식이 완벽히 보정된 환경에서 시장 지수 및 단순 보유 전략 대비 초과 수익을 달성하는지 확인합니다.")
-
         col_sim1, col_sim2 = st.columns(2)
         with col_sim1:
             start_date = st.date_input("시작일", datetime.date(2023, 1, 1))
@@ -1632,15 +1634,14 @@ with tab3:
                     ("우양", "105630")
                 ]
                 sim_stocks = pd.DataFrame([{'종목명': name, '티커': code} for name, code in kosdaq_top45])
-                st.info("💡 **[AI 스캐너 시뮬레이션 모드]** 중소형주 전략 백테스트 시 **섹터별 코스닥 우량주 45선**이 검색 풀로 자동 적용됩니다.")
+                st.info("💡 **[AI 스캐너 시뮬레이션 모드]** 중소형주 전략 백테스트 시 **섹터별 코스닥 우량주 45선**이 자동 적용됩니다.")
             else:
                 sim_stocks = stocks_df.copy()
 
             if sim_stocks.empty:
                 st.error("종목이 없습니다.")
             else:
-                with st.spinner(f"산식 보정된 {index_name} 벤치마크 및 스캐너 동기화 백테스트 구동 중... (종목이 많을 시 수 분 소요)"):
-                    
+                with st.spinner(f"산식 보정된 {index_name} 벤치마크 및 스캐너 동기화 백테스트 구동 중..."):
                     bt_result = run_quant_simulation(
                         sim_stocks=sim_stocks, strat=current_strategy, init_cash=total_cash,
                         start_date=start_date, end_date=end_date, use_ma200_filter=use_ma200_filter,
@@ -1650,21 +1651,20 @@ with tab3:
                     )
                     
                     if bt_result:
-                        st.success(f"✅ 벤치마크 자동 동기화 및 백테스트 실행 완료!")
+                        st.success(f"✅ 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
                         col_r1.metric(f"총 초기 자산", f"{total_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 최종 기말 자산 (수익률)", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%")
                         
                         st.markdown("---")
-                        
-                        st.subheader(f"📊 [전략 비교] {index_name} 지수 vs 단순보유 vs 적립식 매수 vs AI 초과수익 추구 전략")
+                        st.subheader(f"📊 [전략 비교] {index_name} 지수 vs 단순보유 vs 적립식 매수 vs AI 초과수익 전략")
                         
                         comparison_data = [
                             {
                                 '전략 구분': '🚀 AI 초과수익 전략 (200D Filter + Cooldown)',
                                 '최종 기말 자산': f"{bt_result['final_asset']:,.0f} 원",
                                 '총 수익률': f"{bt_result['final_port_ret']:+.2f}%",
-                                '운용 방식 및 특징': f'200일선 아래 장기 하락 종목 매수 금지 및 연속 2회 손실 종목 {cooldown_days}일 매수 동결. 버퍼({whipsaw_buffer}%) 통과 상승 종목에 집중 배분하여 박스권 수수료 낭비 원천 차단.'
+                                '운용 방식 및 특징': f'200일선 아래 하락 종목 매수 금지 및 연속 손실 종목 {cooldown_days}일 매수 동결.'
                             },
                             {
                                 '전략 구분': f'📈 시장 벤치마크 ({index_name} 지수 ^{index_sym})',
@@ -1676,24 +1676,21 @@ with tab3:
                                 '전략 구분': '📉 단순보유 (Buy & Hold)',
                                 '최종 기말 자산': f"{bt_result['final_bh_asset']:,.0f} 원",
                                 '총 수익률': f"{bt_result['final_bh_ret']:+.2f}%",
-                                '운용 방식 및 특징': '동일 종목 풀 초기 전액 동일 비중 매수 후 매도 없이 홀딩 (변동성 그대로 노출)'
+                                '운용 방식 및 특징': '동일 종목 풀 초기 전액 동일 비중 매수 후 홀딩'
                             },
                             {
                                 '전략 구분': '💰 적립식 매수 (DCA)',
                                 '최종 기말 자산': f"{bt_result['final_dca_asset']:,.0f} 원",
                                 '총 수익률': f"{bt_result['final_dca_ret']:+.2f}%",
-                                '운용 방식 및 특징': '동일 종목 풀 시드 분할 후 매월 정기 추가 투입으로 매입단가 분산'
+                                '운용 방식 및 특징': '매월 정기 추가 투입으로 매입단가 분산'
                             }
                         ]
                         st.table(pd.DataFrame(comparison_data))
-
                         st.markdown("---")
-                        
                         st.subheader("📋 종목별 상세 매매 통계 및 성과 분석")
                         st.table(pd.DataFrame(bt_result['summary_rows']))
                         
                         st.markdown("---")
-                        
                         chart = alt.Chart(bt_result['eom_weights_reset']).mark_bar().encode(
                             x=alt.X('Date:O', title='', axis=alt.Axis(labelAngle=-45)),
                             y=alt.Y('Weight:Q', title='비중 (%)', stack='zero'),
@@ -1709,78 +1706,6 @@ with tab3:
 
 with tab4:
     st.header("📄 AI 퀀트 투자 전략 및 운용 알고리즘 백서")
-    
     st.markdown("""
-    본 대시보드에 탑재된 AI 퀀트 엔진은 단순한 기술적 지표의 조합을 넘어, **시장 거시 지표(Macro), 개별 종목 모멘텀(Micro), 그리고 강력한 리스크 관리(Risk Management)**가 통합된 기관급(Institutional-grade) 다이내믹 자산 배분 알고리즘을 사용합니다.
-    """)
-    
-    st.markdown("---")
-    
-    st.subheader("1. 핵심 운용 철학 (Core Philosophy)")
-    st.markdown("""
-    * **추세 추종과 손익 비대칭성 (Let Winners Run, Cut Losses Short):** 확실한 상승 추세에 올라타 이익을 길게 가져가고, 횡보 및 하락장에서는 휩소(잦은 매매)를 차단하여 수수료와 원금을 철저히 방어합니다.
-    * **동적 자본 관리 (Dynamic Capital Allocation):** 투자금의 증액/감액을 실시간으로 반영하며, 증액 시 즉시 비중 추가 확대 매수를 지시하고, 감액 시 최약체(모멘텀 하위) 종목부터 기계적으로 청산합니다.
-    * **공포 탐욕 지수 역발상 (Contrarian):** 대다수 투자자가 시장을 떠나는 극단적 공포(VIX 폭등 후 꺾임) 시점을 수리적으로 포착하여 V자 반등을 낚아챕니다.
-    """)
-
-    st.markdown("---")
-    
-    st.subheader("2. 실시간 데이터 수집 및 판단 지표 (Data Pipeline)")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info("**📈 거시 지표 (Macro Indicators)**")
-        st.markdown(f"""
-        * **시장 벤치마크 지수 (Market Strength):** 대형주는 KOSPI, 중소형주는 KOSDAQ 지수의 최근 60일 수익률을 계산하여 강세장 여부를 판별하고, 개별 종목의 상대강도(RS)를 비교하는 벤치마크로 사용합니다.
-        * **시장 공포지수 (VIX):** 
-            * `안정/경계 구간`: VIX < 30 (정상적인 매매 작동)
-            * `극단적 공포 (VIX Contrarian)`: VIX $\ge$ 25 이상 고점 도달 후 3일 이동평균선을 하향 이탈할 때 (공포 절정 후 반등 시그널)
-        """)
-    with col2:
-        st.success("**🔎 개별 종목 지표 (Micro Indicators)**")
-        st.markdown(f"""
-        * **20일/60일/200일 이동평균선:** 단기, 중기, 장기 추세를 정의합니다. 특히 200일선은 대장기 추세를 필터링하는 핵심 방어선입니다.
-        * **60일선 기울기 (Slope):** 10일 전의 60일선 값과 비교하여 추세가 위를 향하고 있는지 수치화합니다.
-        * **거래량 폭발 (Volume Surge):** 당일 거래량이 최근 5일 평균 거래량 대비 150% 이상 급증했는지 파악하여 세력(수급) 개입을 추적합니다.
-        """)
-
-    st.markdown("---")
-    
-    st.subheader("3. 진입 및 매수 알고리즘 (Entry Rules)")
-    st.markdown("대형주(Core)와 중소형주(Satellite)는 시장 특성에 맞춰 완전히 분리된 진입 로직을 사용합니다.")
-    
-    st.markdown(f"""
-    **[대형주 (Core) 전략 4대 필터]**
-    1. **대장기 하락장 차단:** 주가가 200일선 위에 위치해야 함.
-    2. **가짜 반등 차단:** 단기 20일선이 중기 60일선을 단순 교차를 넘어 **버퍼 이상 확실하게 돌파**해야 함.
-    3. **진짜 추세 검증:** 60일선 우상향(Slope > 0) 및 최근 20일 모멘텀 양수(> 0).
-    4. **거시적 승인:** VIX가 30 미만이거나 VIX 역발상 바닥 시그널 발생.
-    
-    **[중소형주 (Satellite) 전략 전용 필터: 1+2+3 동시 만족 시 진입]**
-    1. **유동성 및 수급 폭발 이력:** KOSDAQ 시가총액 1000억 이상 유동성 종목 중, 최근 20일 내 거래량이 평소 대비 200% 이상 폭발한 이력이 있어야 함.
-    2. **눌림목(Dip-Buying) 타점:** 수급이 터진 주도주가 조정을 받아 주가가 **20일선 부근(-5% ~ +3% 또는 당일 저가 20일선 터치)**에 안착했을 때 진입.
-    3. **하락장 및 투매 방어:** 200일선(옵션)을 상회해야 하며, 최근 단기 고점 대비 -30% 이상 무너진 폭락 종목은 제외.
-    """)
-    
-    st.markdown("---")
-    
-    st.subheader("4. 자산 배분 및 자본금 증감액 룰 (Capital & Weight Allocation)")
-    
-    st.markdown(f"""
-    * **기본 배분 및 부스터:** 한 종목 최대 투입 비중은 사이드바 파라미터에 따르며, 벤치마크 지수가 60일선 위에 있는 대세 상승장에서는 최대 투입 한도를 **1.5배** 강제로 상향합니다.
-    * **알파 점수 부여 (Score-Tilt):** 수급 폭발(+0.5), 시장 주도주(+0.5), VIX 바닥잡기(+1.0) 조건 만족 시 가점를 부여하여 주도주에 자금을 싹쓸이(Overweight) 합니다.
-    * **자본 증액 리밸런싱 (Capital Inflow):** 사이드바의 설정 운용 자금이 늘어나면, **이미 보유 중인 주도주라도 새로 늘어난 한도(Target Weight)만큼 정확히 계산하여 추가 매수를 지시**합니다.
-    * **자본 감액 최약체 청산 (Deficit Liquidation):** 운용 자본이 현재 주식 평가액보다 낮게 감액 설정 설정될 경우, 부족한 현금을 마련하기 위해 **'AI 스코어 하위 ➔ 20일 모멘텀 하위'** 순서로 가장 부진한 종목부터 기계적으로 부분/전량 매도 지시를 내립니다.
-    """)
-
-    st.markdown("---")
-    
-    st.subheader("5. 리스크 관리 및 청산 알고리즘 (Exit Rules)")
-    
-    st.warning("**🔻 매도 및 방어 규정**")
-    st.markdown(f"""
-    * **추세 이탈 (데드크로스):** 20일선이 60일선을 하향 이탈하되, 잦은 손절을 막기 위해 버퍼의 절반 이상 뚫고 내려갈 때 전량 매도합니다.
-    * **트레일링 스탑 익절 (Trailing Stop):** 지정된 목표 수익률 도달 이후부터 룰이 켜집니다. 이후 최고점 대비 허용 하락폭 이상 떨어지면 즉시 수익을 확정 짓습니다.
-    * **연속 손실 쿨다운 (Cooldown):** 횡보 박스권에 갇혀 연속으로 2회 손실을 발생시킨 종목은 지정된 기간 동안 강제로 매수를 금지(격리)시켜 수수료 누수를 막습니다.
-    * **최소 보유 기간:** 한 번 매수하면 잔파도에 털리지 않도록 일정 기간 강제로 홀딩합니다. (단, 매수가 대비 손절컷 도달 시 즉각 전량 매도 탈출)
+    본 대시보드에 탑재된 AI 퀀트 엔진은 시장 거시 지표(Macro), 개별 종목 모멘텀(Micro), 그리고 리스크 관리(Risk Management)가 통합된 기관급 다이내믹 자산 배분 알고리즘을 사용합니다.
     """)
