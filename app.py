@@ -920,7 +920,7 @@ if tg_token and tg_chat_id:
     if st.sidebar.button("🔔 봇 연동 테스트 알림 발송"):
         success, msg = send_telegram_message("🤖 *Core-Satellite Quant System*\n텔레그램 알림 봇이 정상적으로 연결되었습니다! 앞으로 중요한 매수/매도 시그널을 이곳으로 보내드립니다.")
         if success:
-            st.sidebar.toast("텔레그램 알림 발송 성공!")
+            st.toast("텔레그램 알림 발송 성공!")
         else:
             st.sidebar.error(f"발송 실패: {msg}")
 else:
