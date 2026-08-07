@@ -123,15 +123,16 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
         "appkey": app_key,
         "appsecret": app_secret,
         "tr_id": tr_id,
-        "custtype": "P" # 에러 방지용 필수 헤더 추가
+        "custtype": "P"
     }
     
-    # INVALID_CHECK_ACNO 에러를 완벽히 막기 위해 cano는 앞 8자리만 강제 슬라이싱
-    safe_cano = str(cano).replace("-", "")[:8]
+    # 💡 [핵심 에러 방지] 계좌번호는 앞 8자리, 상품코드는 무조건 2자리(01) 문자로 강제 변환
+    safe_cano = str(cano).replace("-", "").strip()[:8]
+    safe_prdt = str(acnt_prdt_cd).strip().zfill(2)
     
     params = {
         "CANO": safe_cano, 
-        "ACNT_PRDT_CD": str(acnt_prdt_cd), 
+        "ACNT_PRDT_CD": safe_prdt, 
         "AFHR_FLPR_YN": "N",
         "OFL_YN": "", 
         "INQR_DVSN": "02", 
@@ -150,7 +151,7 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
             if data.get('rt_cd') == '0':
                 return data.get('output1', []), data.get('output2', [])
             else:
-                st.error(f"API 응답 오류: {data.get('msg1')} (에러코드: {data.get('msg_cd')})")
+                st.error(f"API 응답 오류: ERROR : {data.get('msg1')} (에러코드: {data.get('msg_cd')})")
     except Exception as e:
         st.error(f"잔고 조회 통신 오류: {e}")
     return None, None
@@ -1483,6 +1484,52 @@ with tab2:
             else:
                 display_df = real_stocks_df[['종목명', '티커', '실시간 현재가', '매수평균가', '보유수량', '평가손익률']]
                 st.dataframe(display_df, use_container_width=True)
+
+            # --- 📥 실계좌 -> 가상 샌드박스 동기화 버튼 추가 ---
+            st.write("")
+            if st.button("📥 실계좌 잔고를 가상 포트폴리오(샌드박스)에 동기화", type="primary", use_container_width=True):
+                with st.spinner("구글 시트 가상 포트폴리오에 동기화 중..."):
+                    virtual_stocks = p_data.get('stocks', [])
+                    v_tickers = [str(s['티커']) for s in virtual_stocks]
+                    real_tickers = []
+                    
+                    # 1. 실제 계좌에 있는 종목: 업데이트 또는 신규 추가
+                    for _, row in real_stocks_df.iterrows():
+                        r_ticker = str(row['티커'])
+                        r_name = row['종목명']
+                        r_qty = int(row['_raw_qty'])
+                        r_buy = float(row['_raw_buy'])
+                        real_tickers.append(r_ticker)
+                        
+                        if r_ticker in v_tickers:
+                            # 기존 종목 수량 및 매수 단가 업데이트
+                            for s in virtual_stocks:
+                                if str(s['티커']) == r_ticker:
+                                    s['보유수량'] = r_qty
+                                    s['매수단가'] = r_buy
+                                    break
+                        else:
+                            # 샌드박스에 없던 신규 매수 종목 자동 추가
+                            virtual_stocks.append({
+                                '종목명': r_name, 
+                                '티커': r_ticker, 
+                                '매수단가': r_buy, 
+                                '보유수량': r_qty
+                            })
+                            
+                    # 2. 실제 계좌에서 전량 매도한 종목 처리
+                    # (리스트에서 삭제하지 않고, 수량과 매수단가만 0으로 초기화하여 모니터링 유지)
+                    for s in virtual_stocks:
+                        if str(s['티커']) not in real_tickers and s.get('보유수량', 0) > 0:
+                            s['보유수량'] = 0
+                            s['매수단가'] = 0
+                            
+                    # 3. 구글 시트 영구 저장 및 화면 새로고침
+                    p_data['stocks'] = virtual_stocks
+                    save_portfolio_to_sheets(selected_port, p_data)
+                    st.success("✅ 가상 포트폴리오에 실계좌 동기화가 완료되었습니다!")
+                    st.rerun()
+            # ----------------------------------------------------
 
             st.markdown("---")
             st.subheader("🩺 실전 계좌 AI 매매 진단기")
