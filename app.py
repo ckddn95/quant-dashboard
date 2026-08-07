@@ -92,7 +92,7 @@ def delete_portfolio_from_sheets(name):
         st.error(f"구글 시트 데이터 삭제 오류: {e}")
 
 # ==========================================
-# 한국투자증권 Open API 연동 로직 (에러 완벽 수정본)
+# 한국투자증권 Open API 연동 로직
 # ==========================================
 @st.cache_data(ttl=43200, show_spinner=False)
 def get_kis_access_token(app_key, app_secret, is_mock=True):
@@ -1475,12 +1475,66 @@ with tab2:
             real_total_eval = kis_data['total_eval']
             real_stocks_df = pd.DataFrame(kis_data['stocks'])
             
-            st.metric("💰 계좌 총 평가 금액 (현금+주식)", f"{real_total_eval:,.0f} 원")
+            # --- 대시보드 시각화 업그레이드 ---
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("💰 계좌 총 평가 금액 (현금+주식)", f"{real_total_eval:,.0f} 원")
             
-            st.markdown("### 📊 실계좌 보유 종목 리스트 (한투증권 실시간 시세 기준)")
-            if real_stocks_df.empty:
-                st.info("현재 이 계좌에 보유 중인 주식이 없습니다.")
+            if not real_stocks_df.empty:
+                # 데이터 전처리 for Chart
+                viz_df = real_stocks_df.copy()
+                viz_df['평가금액'] = viz_df['_raw_qty'] * viz_df['_raw_price']
+                viz_df['수익률(num)'] = viz_df['평가손익률'].astype(str).str.replace('%', '', regex=False).str.replace('+', '', regex=False).astype(float)
+                
+                # 현금 비중 계산
+                total_stock_eval = viz_df['평가금액'].sum()
+                cash_eval = real_total_eval - total_stock_eval
+                
+                col_m2.metric("📈 보유 주식 평가액", f"{total_stock_eval:,.0f} 원")
+                col_m3.metric("💵 가용 현금 (예수금 등)", f"{cash_eval:,.0f} 원")
+                
+                st.markdown("---")
+                st.markdown("### 📊 실계좌 포트폴리오 시각화 분석")
+                
+                # 시각화용 데이터프레임 (현금 포함)
+                pie_data = viz_df[['종목명', '평가금액']].copy()
+                if cash_eval > 0:
+                    pie_data = pd.concat([pie_data, pd.DataFrame([{'종목명': '현금(예수금)', '평가금액': cash_eval}])], ignore_index=True)
+                pie_data['비중(%)'] = (pie_data['평가금액'] / real_total_eval) * 100
+                
+                col_chart1, col_chart2 = st.columns(2)
+                
+                with col_chart1:
+                    st.markdown("**🍩 자산 비중 (도넛 차트)**")
+                    base_pie = alt.Chart(pie_data).encode(
+                        theta=alt.Theta(field="비중(%)", type="quantitative"),
+                        color=alt.Color(field="종목명", type="nominal", legend=alt.Legend(title="자산")),
+                        tooltip=['종목명', alt.Tooltip('평가금액', format=',.0f'), alt.Tooltip('비중(%)', format='.1f')]
+                    )
+                    pie_chart = base_pie.mark_arc(innerRadius=50).properties(height=350)
+                    st.altair_chart(pie_chart, use_container_width=True)
+                    
+                with col_chart2:
+                    st.markdown("**📊 종목별 수익률 랭킹 (바 차트)**")
+                    bar_chart = alt.Chart(viz_df).mark_bar().encode(
+                        x=alt.X('종목명:N', sort='-y', title=''),
+                        y=alt.Y('수익률(num):Q', title='손익률 (%)'),
+                        color=alt.condition(
+                            alt.datum['수익률(num)'] > 0,
+                            alt.value('#d62728'),  # 한국 시장 양수(빨강)
+                            alt.value('#1f77b4')   # 한국 시장 음수(파랑)
+                        ),
+                        tooltip=['종목명', alt.Tooltip('수익률(num)', format='.2f')]
+                    ).properties(height=350)
+                    st.altair_chart(bar_chart, use_container_width=True)
             else:
+                col_m2.metric("📈 보유 주식 평가액", "0 원")
+                col_m3.metric("💵 가용 현금 (예수금 등)", f"{real_total_eval:,.0f} 원")
+                st.info("현재 이 계좌에 보유 중인 주식이 없어 차트를 표시할 수 없습니다.")
+            # ------------------------------------
+
+            st.markdown("---")
+            st.markdown("### 📋 실계좌 보유 종목 리스트 상세")
+            if not real_stocks_df.empty:
                 display_df = real_stocks_df[['종목명', '티커', '실시간 현재가', '매수평균가', '보유수량', '평가손익률']]
                 st.dataframe(display_df, use_container_width=True)
 
