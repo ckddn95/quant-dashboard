@@ -24,6 +24,31 @@ st.title("Core-Satellite Independent Asset Allocation Quant System")
 st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **가상 매매 성과 추적기(Forward Test)**, **구글 시트 영구 DB 연동**, **가상/실계좌 탭 분리**를 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
+# 텔레그램 메시지 발송 함수 (NEW!)
+# ==========================================
+def send_telegram_message(message):
+    try:
+        tg_token = st.secrets.get("telegram", {}).get("bot_token")
+        tg_chat_id = st.secrets.get("telegram", {}).get("chat_id")
+        
+        if not tg_token or not tg_chat_id:
+            return False, "Secrets에 텔레그램 정보가 없습니다."
+            
+        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+        payload = {
+            "chat_id": tg_chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        res = requests.post(url, json=payload, timeout=5)
+        if res.status_code == 200:
+            return True, "발송 성공"
+        else:
+            return False, f"API 오류: {res.text}"
+    except Exception as e:
+        return False, str(e)
+
+# ==========================================
 # 0. 구글 스프레드시트 DB 연동 로직
 # ==========================================
 SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
@@ -883,6 +908,26 @@ else:
      st.sidebar.info("👈 포트폴리오를 선택하면 실계좌가 자동 매칭됩니다.")
 
 # ==========================================
+# 텔레그램 연동 상태 (NEW!)
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.header("📱 텔레그램 알림 봇 연동")
+tg_token = st.secrets.get("telegram", {}).get("bot_token", "")
+tg_chat_id = st.secrets.get("telegram", {}).get("chat_id", "")
+
+if tg_token and tg_chat_id:
+    st.sidebar.success("✅ 텔레그램 봇 연동 완료")
+    if st.sidebar.button("🔔 봇 연동 테스트 알림 발송"):
+        success, msg = send_telegram_message("🤖 *Core-Satellite Quant System*\n텔레그램 알림 봇이 정상적으로 연결되었습니다! 앞으로 중요한 매수/매도 시그널을 이곳으로 보내드립니다.")
+        if success:
+            st.sidebar.toast("텔레그램 알림 발송 성공!")
+        else:
+            st.sidebar.error(f"발송 실패: {msg}")
+else:
+    st.sidebar.warning("🔑 `Secrets`에 `[telegram]` 정보 미등록. 푸시 알림 비활성화됨.")
+
+
+# ==========================================
 # 시장 상황판 (신호등 UI)
 # ==========================================
 vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
@@ -1423,6 +1468,25 @@ with tab1:
                             f"• **운용 특징:** 가상 투자금을 증액하면 추가 매수를 지시하고, 감액 시 최약체부터 우선 청산하는 산식이 반영되었습니다.\n"
                             f"{warning_msg}{boost_msg}")
                     st.table(pd.DataFrame(results))
+                    
+                    # --- 텔레그램 메시지 발송 버튼 추가 ---
+                    if tg_token and tg_chat_id and len(results) > 0:
+                        if st.button("📲 이 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
+                            msg_lines = [f"📊 *[{selected_port}] 가상 포트폴리오 진단 결과*"]
+                            action_found = False
+                            for r in results:
+                                if "보유 유지" not in r['액션 플랜'] and "관망" not in r['액션 플랜'] and "보류" not in r['액션 플랜']:
+                                    msg_lines.append(f"▪️ *{r['종목명']}*: {r['액션 플랜']}")
+                                    action_found = True
+                            
+                            if not action_found:
+                                msg_lines.append("현재 특별한 매수/매도 시그널이 없습니다. 모두 유지/관망 상태입니다.")
+                            
+                            success, msg = send_telegram_message("\n".join(msg_lines))
+                            if success:
+                                st.toast("✅ 텔레그램으로 진단 결과를 전송했습니다!")
+                            else:
+                                st.error(f"텔레그램 전송 실패: {msg}")
 
 with tab2:
     st.header("🔌 실전 계좌(API) 연동 현황")
@@ -1651,6 +1715,25 @@ with tab2:
                             })
                         
                         st.table(pd.DataFrame(live_results))
+                        
+                        # --- 텔레그램 메시지 발송 버튼 추가 ---
+                        if tg_token and tg_chat_id and len(live_results) > 0:
+                            if st.button("📲 이 진단 결과를 텔레그램으로 전송", key="send_tg_real"):
+                                msg_lines = [f"📊 *[{acc_name}] 실전 계좌 진단 결과*"]
+                                action_found = False
+                                for r in live_results:
+                                    if "보유 유지" not in r['AI 액션 플랜 (권장)']:
+                                        msg_lines.append(f"▪️ *{r['보유 종목명']}*: {r['AI 액션 플랜 (권장)']}")
+                                        action_found = True
+                                
+                                if not action_found:
+                                    msg_lines.append("현재 보유 종목 중 특별히 조치해야 할 매도/손절 액션이 없습니다. 모두 정상 홀딩 상태입니다.")
+                                
+                                success, msg = send_telegram_message("\n".join(msg_lines))
+                                if success:
+                                    st.toast("✅ 텔레그램으로 진단 결과를 전송했습니다!")
+                                else:
+                                    st.error(f"텔레그램 전송 실패: {msg}")
 
 with tab3:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
