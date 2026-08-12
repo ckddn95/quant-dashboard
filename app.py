@@ -164,7 +164,6 @@ def execute_kis_order(ticker, qty, price, order_type="BUY", is_market=False):
     except Exception as e:
         return False, f"API 통신 오류: {str(e)}"
 
-# [V3.6 핵심] 일일 매매 기록(Trade Log) 저장 헬퍼 함수
 def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0):
     today_str = datetime.date.today().strftime('%Y-%m-%d')
     now_str = datetime.datetime.now().strftime('%H:%M:%S')
@@ -749,7 +748,7 @@ if SYS_APP_KEY:
         real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
 
 # ==========================================
-# 탭 구성 (V3.6)
+# 탭 구성 (V3.7)
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📝 관심종목 유니버스 & AI 진단", 
@@ -885,7 +884,10 @@ with tab1:
                             easy_desc = "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
 
                 eval_actions_cache[ticker] = action
+                
+                # [V3.7 핵심] 선택 체크박스용 필드 추가
                 display_records.append({
+                    '선택': False,
                     '종목명': row.get('종목명'), 
                     '티커': ticker, 
                     '실시간 현재가': c_price, 
@@ -900,10 +902,14 @@ with tab1:
         
         if not display_df.empty: 
             display_df = display_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
+            # 선택 컬럼을 맨 앞으로 이동
+            cols = ['선택'] + [c for c in display_df.columns if c != '선택']
+            display_df = display_df[cols]
         else:
-            display_df = pd.DataFrame(columns=['종목명', '티커', '실시간 현재가', '🔥 매력도 점수', '🤖 AI 액션 플랜', '📊 판단 근거', '💡 시스템 액션 가이드'])
+            display_df = pd.DataFrame(columns=['선택', '종목명', '티커', '실시간 현재가', '🔥 매력도 점수', '🤖 AI 액션 플랜', '📊 판단 근거', '💡 시스템 액션 가이드'])
 
         col_config = {
+            "선택": st.column_config.CheckboxColumn("선택", help="삭제할 종목을 체크하세요", default=False),
             "종목명": st.column_config.TextColumn("종목명 (수정가능)"),
             "티커": st.column_config.TextColumn("티커 (수정가능)"),
             "실시간 현재가": st.column_config.NumberColumn("🟢 현재가 (조회용)", format="%d", disabled=True),
@@ -915,15 +921,50 @@ with tab1:
         
         edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}", column_config=col_config)
         
-        if st.button("💾 관심종목 리스트 수동 저장", type="primary"):
-            save_df = edited_df[['종목명', '티커']].copy()
-            save_df['매수단가'] = 0 
-            save_df['보유수량'] = 0
+        # [V3.7 핵심] 저장 및 선택 삭제 버튼 분리 배치
+        c_btn1, c_btn2 = st.columns(2)
+        with c_btn1:
+            if st.button("💾 변경된 내용 저장 (추가/수정)", type="primary", use_container_width=True):
+                save_df = edited_df[['종목명', '티커']].copy()
+                save_df['매수단가'] = 0 
+                save_df['보유수량'] = 0
+                p_data['stocks'] = pd.DataFrame(save_df.to_dict('records') + hidden_stocks).drop_duplicates(subset=['티커']).to_dict('records')
+                save_portfolio_to_sheets(selected_port, p_data)
+                st.success("✅ 안전하게 저장 및 동기화되었습니다!")
+                st.rerun()
+
+        with c_btn2:
+            if st.button("🗑️ 체크한 종목 삭제", type="secondary", use_container_width=True):
+                to_delete = edited_df[edited_df['선택'] == True]['티커'].tolist()
+                if to_delete:
+                    p_data['stocks'] = [s for s in p_data['stocks'] if s['티커'] not in to_delete]
+                    save_portfolio_to_sheets(selected_port, p_data)
+                    st.success(f"✅ {len(to_delete)}개의 종목이 리스트에서 삭제되었습니다!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.warning("⚠️ 삭제할 종목을 먼저 체크박스로 선택해주세요.")
+
+        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
+            changed_msgs, needs_save = [], False
+            for idx, r_dict in enumerate(p_data['stocks']):
+                s_name = r_dict['종목명']
+                curr_action = next((r['🤖 AI 액션 플랜'] for r in display_records if r['종목명'] == s_name), "기록없음 (실계좌이동)")
+                
+                if "기록없음" in curr_action: continue 
+
+                if curr_action != r_dict.get('last_action', "기록없음"):
+                    p_data['stocks'][idx]['last_action'] = curr_action 
+                    needs_save = True
+                    if "모니터링 유지" not in curr_action:
+                        changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
             
-            p_data['stocks'] = pd.DataFrame(save_df.to_dict('records') + hidden_stocks).drop_duplicates(subset=['티커']).to_dict('records')
-            save_portfolio_to_sheets(selected_port, p_data)
-            st.success("✅ 안전하게 저장 및 동기화되었습니다!")
-            st.rerun()
+            if changed_msgs:
+                send_telegram_message(f"🤖 *[{selected_port} 관심종목] 시그널 감지!*\n" + "\n".join(changed_msgs))
+                st.toast("오토파일럿 알림 발송 완료!")
+            elif not auto_pilot: st.toast("새로운 신규 시그널이 없습니다.")
+            
+            if needs_save: save_portfolio_to_sheets(selected_port, p_data)
 
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
@@ -1086,48 +1127,9 @@ with tab2:
                     if not live_df.empty:
                         live_df = live_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
                         st.table(live_df.drop(columns=['티커', '_raw_price', '_raw_buy', '_add_qty', '_qty_num']))
-                    
-                    # 오토파일럿 주문 집행 (V3.6)
-                    if auto_pilot and auto_trade_enabled:
-                        if kill_switch:
-                            st.warning("⚠️ 킬 스위치 발동 중: 자동매매 주문 전송이 안전하게 차단되었습니다.")
-                        else:
-                            changed_msgs = []
-                            needs_save = False
-                            for r in live_results:
-                                s_name, curr_action = r['보유 종목명'], r['🤖 실계좌 전용 액션 플랜']
-                                ticker, live_c = r['티커'], r['_raw_price']
-                                add_qty, hold_qty = r['_add_qty'], r['_qty_num']
-                                buy_p = r['_raw_buy']
-                                
-                                if "청산" in curr_action or "손절" in curr_action:
-                                    success, msg = execute_kis_order(ticker, hold_qty, live_c, order_type="SELL", is_market=True)
-                                    if success:
-                                        p_data = log_daily_trade(p_data, s_name, "SELL", live_c, hold_qty, buy_p)
-                                        changed_msgs.append(f"🚨 *[매도 집행]* {s_name} 전량 시장가 청산 완료")
-                                        needs_save = True
-                                    else: changed_msgs.append(f"❌ *[매도 실패]* {s_name} - {msg}")
-                                        
-                                elif "비중 확대" in curr_action and add_qty > 0:
-                                    if real_cash >= (add_qty * live_c):
-                                        success, msg = execute_kis_order(ticker, add_qty, live_c, order_type="BUY", is_market=False)
-                                        if success:
-                                            p_data = log_daily_trade(p_data, s_name, "BUY", live_c, add_qty)
-                                            changed_msgs.append(f"🛒 *[매수 집행]* {s_name} {add_qty}주 지정가 매수 완료")
-                                            real_cash -= (add_qty * live_c)
-                                            needs_save = True
-                                        else: changed_msgs.append(f"❌ *[매수 실패]* {s_name} - {msg}")
-                                    else:
-                                        changed_msgs.append(f"⚠️ *[매수 보류]* {s_name} - 예수금 부족 (필요: {add_qty * live_c:,.0f}원)")
-
-                            if needs_save: save_portfolio_to_sheets(selected_port, p_data)
-                            if changed_msgs: send_telegram_message(f"🤖 *[자동매매 엔진 처리 결과]*\n" + "\n".join(changed_msgs))
             else:
                 st.info("현재 실전 계좌에 매수(보유) 중인 종목이 없습니다. [탭 1]의 관심종목 리스트에서 타점을 대기하세요.")
 
-# ==========================================
-# [V3.6 통합 패치] 자동매매 전용 관제 & 우선순위 대기열 (일일 내역 추가)
-# ==========================================
 with tab3:
     st.header("🤖 실전 자동매매 관제센터 & 우선순위 주문 대기열")
     st.markdown("AI 퀀트 엔진이 포착한 진단 시그널을 바탕으로 **자동주문 전송 대상 종목을 우선순위별로 대기열(Queue)에 배치**하여 관제합니다.")
@@ -1152,7 +1154,6 @@ with tab3:
     
     order_queue = []
     
-    # 대기열 평가 유니버스 구축: 사용자 관심종목 + 실계좌 보유종목 (중복 제거)
     eligible_stocks = {}
     if p_data and 'stocks' in p_data:
         for s in p_data['stocks']:
@@ -1162,13 +1163,11 @@ with tab3:
         for idx, row in real_stocks_df.iterrows():
             eligible_stocks[row['티커']] = row.get('종목명', '')
             
-    # 평가 루프
     for ticker, s_name in eligible_stocks.items():
         qty_num = 0
         buy_price = 0.0
         live_c_price = 0.0
         
-        # 실계좌 내역 확인
         if SYS_APP_KEY and kis_data and not real_stocks_df.empty:
             match_row = real_stocks_df[real_stocks_df['티커'] == ticker]
             if not match_row.empty:
@@ -1207,7 +1206,6 @@ with tab3:
             is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
             entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
 
-        # 1. 매도(청산) 평가
         is_sell = False
         sell_type = ""
         if qty_num > 0:
@@ -1241,7 +1239,6 @@ with tab3:
             })
             continue 
 
-        # 2. 매수(신규 진입 및 비중 확대) 평가
         if entry_cond:
             current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
             is_bull_market = (current_strategy == '대형주 (Core)' and kospi_ret_60 > 0) or (current_strategy != '대형주 (Core)' and kosdaq_ret_60 > 0)
@@ -1289,7 +1286,6 @@ with tab3:
         st.subheader("📋 AI 매매 우선순위 대기열 (Order Queue)")
         st.table(display_queue)
         
-        # [V3.6 핵심] 옵션 B 적용 (동적 전환 버튼)
         st.markdown("---")
         if auto_trade_enabled:
             btn_label = "⚡ 자동 감시 주기 무시하고 즉시 강제 집행 (예수금 입금 직후 등)"
@@ -1343,7 +1339,6 @@ with tab3:
     else:
         st.info("💡 현재 AI 퀀트 엔진이 포착한 신규 매수 또는 매도 시그널이 없습니다. 대기열이 비어있습니다.")
 
-    # [V3.6 핵심] 당일 매매 체결 내역 및 실적 (Trade Log)
     st.markdown("---")
     st.subheader("📜 당일 자동매매 체결 내역 및 실적 요약")
     
@@ -1515,7 +1510,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v3.6 Final Master)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v3.7)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
