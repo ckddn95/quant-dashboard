@@ -189,7 +189,7 @@ def fetch_stock_status(ticker_code):
                 
                 return (yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, (ma60 > ma60_10d_ago), (yf_price >= ma200), recent_20d_vol_max >= 200.0, yf_low, recent_20d_vol_max)
     except: pass
-    return None
+    return None, None, None, None, None, None, None, None, False, False, False, None, 0.0
 
 @st.cache_data(ttl=3600)
 def run_core_scanner(use_ma200_filter_flag, buf_pct):
@@ -218,7 +218,7 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
         dist_ma20 = ((c_price / ma20) - 1) * 100
         is_dip = ((-5.0 <= dist_ma20 <= 3.0) or ((current_low <= ma20 * 1.01) and (c_price >= ma20 * 0.95)))
         if vol_surged and is_dip and ((not use_ma200_filter_flag) or is_above_ma200) and (drawdown >= -30.0) and (ma60_slope_positive and ret_20 > -3.0):
-            score = (recent_vol_max / 100.0) * 0.4 + (res[6] * 0.3) + (res[7] * 0.3)
+            score = (recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3)
             results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{res[12]:,.0f}%", 'AI 스코어': round(score, 2), '_score_num': score})
     if not results: return pd.DataFrame()
     return pd.DataFrame(results).sort_values('_score_num', ascending=False).head(top_n).drop(columns=['_score_num'])
@@ -479,7 +479,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     summary_rows.append({
         '종목명': '💡 [전체 합계]', '최종 보유 주수': '-', '기말 평가금': f"{sum_hval:,.0f} 원",
         '총 순수익 (원)': f"{sum_prof:+,.0f} 원 (자산대비 {(sum_prof/init_cash)*100 if init_cash>0 else 0:+.2f}%)",
-        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {sum_scnt}회",
+        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {s_cnt}회",
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
@@ -740,6 +740,16 @@ with tab1:
         eval_actions_cache = {}
         buf = whipsaw_buffer / 100.0
         
+        # [V2.30 핵심] 가상 포트폴리오(탭 1) 타겟 자산 계산 (신규 매수 목표량 계산용)
+        kis_data = st.session_state.get(cache_key)
+        if kis_data and SYS_APP_KEY: current_asset_base = kis_data.get('total_eval', total_cash)
+        else: current_asset_base = total_cash
+        
+        is_bull_market = (current_strategy == '대형주 (Core)' and kospi_ret_60 > 0) or (current_strategy != '대형주 (Core)' and kosdaq_ret_60 > 0)
+        current_max_alloc_pct = max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct
+        current_max_alloc_pct = min(current_max_alloc_pct, 100.0)
+        target_buy_amt = current_asset_base * (current_max_alloc_pct / 100.0)
+        
         with st.spinner("AI 퀀트 엔진 실시간 데이터 연동 및 통합 표 생성 중..."):
             for row in visible_stocks:
                 ticker = row.get('티커', '')
@@ -748,20 +758,23 @@ with tab1:
                 res = fetch_stock_status(ticker)
                 
                 action, tech_text, easy_desc = "분석 불가", "-", "데이터를 불러오지 못했습니다."
+                ai_score = 0.0
                 
                 if res and res[0] is not None:
-                    yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, _, vol_surged, yf_low, _ = res
+                    yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, _, vol_surged, yf_low, recent_vol_max = res
                     if not c_price or c_price == 0: c_price = yf_price
                     
                     is_above_ma200 = c_price >= ma200
                     current_low = min(yf_low, c_price)
-                    dist_ma20 = ((c_price / ma20) - 1) * 100
-                    diff_ma = ((ma20 / ma60) - 1) * 100
+                    dist_ma20 = ((c_price / ma20) - 1) * 100 if ma20 > 0 else 0
+                    diff_ma = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0
                     tech_text = f"20/60선 이격 {diff_ma:+.2f}%" if current_strategy == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
                     
                     ma200_cond = is_above_ma200 if use_ma200_filter else True
+                    target_shares = int(target_buy_amt // c_price) if c_price > 0 else 0
 
                     if current_strategy == '대형주 (Core)':
+                        ai_score = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 0.2), 2)
                         entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
                         exit_cond_trend = (ma20 < ma60 * (1 - buf/2))
                         
@@ -769,12 +782,13 @@ with tab1:
                             action = "🔴 유니버스 제외 (추세 붕괴)"
                             easy_desc = "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
                         elif entry_cond:
-                            action = "🟢 매수 시그널 발생"
+                            action = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)"
                             easy_desc = "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
                         else:
                             action = "🟡 모니터링 유지"
                             easy_desc = "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
                     else:
+                        ai_score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
                         is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
                         entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
                         
@@ -782,7 +796,7 @@ with tab1:
                             action = "🔴 유니버스 제외 (수급/추세 상실)"
                             easy_desc = "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
                         elif entry_cond:
-                            action = "🟢 매수 시그널 발생"
+                            action = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)"
                             easy_desc = "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
                         else:
                             action = "🟡 모니터링 유지"
@@ -793,6 +807,7 @@ with tab1:
                     '종목명': row.get('종목명'), 
                     '티커': ticker, 
                     '실시간 현재가': c_price, 
+                    '🔥 매력도 점수': ai_score,
                     '🤖 AI 액션 플랜': action, 
                     '📊 판단 근거': tech_text,
                     '💡 시스템 액션 가이드': easy_desc
@@ -800,12 +815,18 @@ with tab1:
                 
         st.session_state.last_eval_actions = eval_actions_cache
         display_df = pd.DataFrame(display_records)
-        if display_df.empty: display_df = pd.DataFrame(columns=['종목명', '티커', '실시간 현재가', '🤖 AI 액션 플랜', '📊 판단 근거', '💡 시스템 액션 가이드'])
+        
+        # [V2.30 핵심] 매력도 점수 기준 내림차순 정렬 (자동매매 우선순위)
+        if not display_df.empty: 
+            display_df = display_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
+        else:
+            display_df = pd.DataFrame(columns=['종목명', '티커', '실시간 현재가', '🔥 매력도 점수', '🤖 AI 액션 플랜', '📊 판단 근거', '💡 시스템 액션 가이드'])
 
         col_config = {
             "종목명": st.column_config.TextColumn("종목명 (수정가능)"),
             "티커": st.column_config.TextColumn("티커 (수정가능)"),
             "실시간 현재가": st.column_config.NumberColumn("🟢 현재가 (조회용)", format="%d", disabled=True),
+            "🔥 매력도 점수": st.column_config.NumberColumn("🔥 매력도 점수", format="%.2f", disabled=True),
             "🤖 AI 액션 플랜": st.column_config.TextColumn("🤖 AI 액션 플랜", disabled=True),
             "📊 판단 근거": st.column_config.TextColumn("📊 판단 근거", disabled=True),
             "💡 시스템 액션 가이드": st.column_config.TextColumn("💡 시스템 액션 가이드", disabled=True)
@@ -862,7 +883,6 @@ with tab2:
                 total_stock_eval = viz_df['평가금액'].sum()
                 real_cash = real_total_eval - total_stock_eval
                 
-                # 순수 KIS API 연동 실계좌 요약 정보 계산
                 real_eval_pnl = kis_data.get('total_pnl', 0)
                 real_invested_principal = total_stock_eval - real_eval_pnl
                 real_ret_pct = (real_eval_pnl / real_invested_principal * 100) if real_invested_principal > 0 else 0
@@ -883,6 +903,13 @@ with tab2:
             if not real_stocks_df.empty:
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
                     buf, live_results = whipsaw_buffer / 100.0, []
+                    
+                    # [V2.30 핵심] 실전 계좌 타겟 자산 계산 (비중 확대 목표량 계산용)
+                    is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
+                    current_max_alloc_pct = max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct
+                    current_max_alloc_pct = min(current_max_alloc_pct, 100.0)
+                    target_buy_amt = real_total_eval * (current_max_alloc_pct / 100.0)
+                    
                     for idx, row in real_stocks_df.iterrows():
                         live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
                         if live_c_price == 0: continue
@@ -891,11 +918,12 @@ with tab2:
                         try: qty_num = int(float(qty_str))
                         except: qty_num = 0
                         profit_amt = (live_c_price - buy_price) * qty_num
+                        current_holding_amt = live_c_price * qty_num
 
                         res = fetch_stock_status(row['티커'])
                         if not res or res[0] is None: continue
                         
-                        yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, _ = res
+                        yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max = res
 
                         user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                         diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0
@@ -904,28 +932,40 @@ with tab2:
                         
                         ma200_cond = is_above_ma200 if use_ma200_filter else True
                         current_low = min(yf_low, live_c_price)
+                        ai_score = 0.0
+
+                        # 추가 매수(비중 확대) 시 필요한 수량 산출
+                        additional_amt = max(0, target_buy_amt - current_holding_amt)
+                        add_qty = int(additional_amt // live_c_price)
 
                         easy_desc = "-"
                         if active_strat == '대형주 (Core)': 
+                            ai_score = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 0.2), 2)
                             entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
                             
                             if user_ret >= ts_target_pct: 
                                 action = "🔵 트레일링 스탑 가동"
-                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%)"
+                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
                                 easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
                                 action = "🔴 전량 청산 (추세 이탈)"
                                 reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
                                 easy_desc = "[전량 청산] 핵심 추세선 이탈(Dead Cross)로 인한 하방 리스크가 확대되었습니다. 전량 매도를 통한 현금 확보를 집행하십시오."
                             elif entry_cond:
-                                action = "🟢 비중 확대 유효"
-                                reason = f"신규 진입(매수) 타점 조건과 일치함 (현재 이격 {diff_ma:+.2f}%)"
-                                easy_desc = "[비중 확대 유효] 현재 가격대에서 신규 진입 로직과 동일한 강세 시그널이 지속되고 있습니다. 포지션 규모(비중) 확대를 고려해볼 수 있습니다."
+                                if add_qty > 0:
+                                    action = f"🟢 비중 확대 유효 (+{add_qty:,}주)"
+                                    reason = f"신규 진입 타점 조건 충족 (현재 이격 {diff_ma:+.2f}%)"
+                                    easy_desc = f"[비중 확대 유효] 타겟 비중({current_max_alloc_pct}%) 달성을 위해 약 {additional_amt:,.0f}원 (+{add_qty:,}주) 추가 매수를 권장합니다."
+                                else:
+                                    action = "🟡 비중 도달 (포지션 홀딩)"
+                                    reason = f"타점 유효하나 목표 비중({current_max_alloc_pct}%) 기충족"
+                                    easy_desc = f"[비중 도달] 이미 목표 비중을 채웠습니다. 타점은 좋으나 추가 매수 없이 관망합니다."
                             else: 
                                 action = "🟡 포지션 홀딩"
                                 reason = f"추세 방어 중 및 지지선 이탈 없음 (현재 이격 {diff_ma:+.2f}%)"
                                 easy_desc = "[포지션 홀딩] 상승 추세 및 지지선 방어가 안정적으로 이루어지고 있습니다. 현재의 비중 유지를 권장합니다."
                         else:
+                            ai_score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
                             is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
                             entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
 
@@ -935,16 +975,21 @@ with tab2:
                                 easy_desc = "[손절 매도] 사전 설정된 최대 허용 손실폭(Stop-loss) 한도에 도달했습니다. 자산 보호를 위해 기계적인 강제 청산을 집행하십시오."
                             elif user_ret >= ts_target_pct: 
                                 action = "🔵 트레일링 스탑 가동"
-                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%)"
+                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
                                 easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
                                 action = "🔴 전량 청산 (추세 이탈)"
                                 reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
                                 easy_desc = "[전량 청산] 핵심 추세선 이탈(Dead Cross)로 인한 하방 리스크가 확대되었습니다. 전량 매도를 통한 현금 확보를 집행하십시오."
                             elif entry_cond:
-                                action = "🟢 비중 확대 유효"
-                                reason = f"수급 유입 후 20일선 눌림목 지지 중 (현재 이격 {dist_ma20:+.2f}%)"
-                                easy_desc = "[비중 확대 유효] 현재 가격대에서 신규 진입 로직과 동일한 강세 시그널이 지속되고 있습니다. 포지션 규모(비중) 확대를 고려해볼 수 있습니다."
+                                if add_qty > 0:
+                                    action = f"🟢 비중 확대 유효 (+{add_qty:,}주)"
+                                    reason = f"수급 유입 후 20일선 눌림목 지지 중 (현재 이격 {dist_ma20:+.2f}%)"
+                                    easy_desc = f"[비중 확대 유효] 타겟 비중({current_max_alloc_pct}%) 달성을 위해 약 {additional_amt:,.0f}원 (+{add_qty:,}주) 추가 매수를 권장합니다."
+                                else:
+                                    action = "🟡 비중 도달 (포지션 홀딩)"
+                                    reason = f"타점 유효하나 목표 비중({current_max_alloc_pct}%) 기충족"
+                                    easy_desc = f"[비중 도달] 이미 목표 비중을 채웠습니다. 타점은 좋으나 추가 매수 없이 관망합니다."
                             else: 
                                 action = "🟡 포지션 홀딩"
                                 reason = f"손절선 이탈 없음 및 추세 유지 중 (현재 수익률 {user_ret:+.2f}%)"
@@ -952,6 +997,7 @@ with tab2:
 
                         live_results.append({
                             '보유 종목명': row['종목명'], 
+                            '🔥 매력도 점수': ai_score,
                             '보유수량': f"{qty_num:,} 주",
                             '매수평균가': f"{buy_price:,.0f} 원",
                             '실시간 현재가': f"{live_c_price:,.0f} 원", 
@@ -962,7 +1008,11 @@ with tab2:
                             '💡 시스템 액션 가이드': easy_desc
                         })
                     
-                    st.table(pd.DataFrame(live_results))
+                    # [V2.30 핵심] 실전 계좌도 매력도 점수 기준 내림차순 정렬
+                    live_df = pd.DataFrame(live_results)
+                    if not live_df.empty:
+                        live_df = live_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
+                    st.table(live_df)
                     
                     if auto_pilot:
                         changed_msgs, needs_save = [], False
@@ -971,7 +1021,8 @@ with tab2:
                             s_name, curr_action = r['보유 종목명'], r['🤖 실계좌 전용 액션 플랜']
                             if curr_action != p_data['real_last_actions'].get(s_name, "기록없음"):
                                 p_data['real_last_actions'][s_name], needs_save = curr_action, True
-                                if "포지션 홀딩" not in curr_action: changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
+                                if "포지션 홀딩" not in curr_action and "비중 도달" not in curr_action: 
+                                    changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
                         if changed_msgs:
                             send_telegram_message(f"🚨 *[실전계좌] 긴급 시그널!*\n" + "\n".join(changed_msgs))
                             st.toast("실계좌 오토파일럿 알림 발송 완료!")
@@ -988,20 +1039,22 @@ with tab3:
         current_strategy = p_data.get('strategy', '대형주 (Core)')
         total_cash = p_data.get('cash', 10000000)
         
-        kis_data = st.session_state.get(cache_key)
-        
-        # 포워드 테스트용 기준일 및 원금 설정 로직
-        inferred_principal = 10000000.0
-        if kis_data:
-            inferred_principal = kis_data.get('total_eval', 0) - kis_data.get('total_pnl', 0)
-            if inferred_principal <= 0: inferred_principal = 10000000.0
-            
-        real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
-        try: real_base_date = pd.to_datetime(real_base_date_str).date()
-        except: real_base_date = datetime.date(2024, 1, 1)
-        
-        real_base_principal = float(p_data.get('real_base_principal', inferred_principal)) if p_data else inferred_principal
+        real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01'))
+        try: created_date = pd.to_datetime(real_base_date_str).date()
+        except: created_date = datetime.date(2024, 1, 1)
         today_date = datetime.date.today()
+        
+        real_base_principal = float(p_data.get('real_base_principal', p_data.get('cash', 10000000)))
+
+        kis_data = st.session_state.get(cache_key)
+        real_tot_eval, real_tot_pnl, real_ret_pct = 0, 0, 0
+        real_summary = {}
+        
+        if kis_data and SYS_APP_KEY:
+            real_tot_eval = kis_data.get('total_eval', 0)
+            real_tot_pnl = real_tot_eval - real_base_principal
+            real_ret_pct = (real_tot_pnl / real_base_principal * 100) if real_base_principal > 0 else 0
+            real_summary = {item['종목명']: item for item in kis_data['stocks']}
 
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
         
@@ -1023,8 +1076,8 @@ with tab3:
             if stocks_df.empty: 
                 st.error("관심종목 리스트에 종목이 없습니다.")
             else:
-                with st.spinner(f"{real_base_date} 부터 현재까지 AI 시뮬레이션 중..."):
-                    fw_result = run_quant_simulation(stocks_df, current_strategy, real_base_principal, real_base_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                with st.spinner(f"{created_date} 부터 현재까지 AI 시뮬레이션 중..."):
+                    fw_result = run_quant_simulation(stocks_df, current_strategy, real_base_principal, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     
                     if fw_result:
                         ai_ret = fw_result['final_port_ret']
@@ -1033,10 +1086,7 @@ with tab3:
                         col_fw1, col_fw2 = st.columns(2)
                         col_fw1.metric("📈 AI 포워드 테스트 (이론)", f"{ai_ret:+.2f}%", f"기말 자산: {fw_result['final_asset']:,.0f} 원")
                         if SYS_APP_KEY and kis_data:
-                            real_tot_eval = kis_data.get('total_eval', 0)
-                            real_tot_pnl_custom = real_tot_eval - real_base_principal
-                            real_ret_pct_custom = (real_tot_pnl_custom / real_base_principal * 100) if real_base_principal > 0 else 0
-                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct_custom:+.2f}%", f"현재 자산: {real_tot_eval:,.0f} 원")
+                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {real_tot_eval:,.0f} 원")
                         else:
                             col_fw2.info("한국투자증권 API 연동이 필요합니다.")
                             
@@ -1044,7 +1094,6 @@ with tab3:
                         st.markdown("### 🔍 종목별 상세 매매 & 보유 현황 비교")
                         st.caption("AI가 알고리즘에 따라 매매한 결과와 실제 계좌의 보유 상태를 숫자로 명확하게 대조합니다. (※ KIS 잔고 API 특성상 실계좌의 과거 매매 횟수는 HTS 확인이 필요합니다.)")
 
-                        real_summary = {item['종목명']: item for item in kis_data['stocks']} if kis_data else {}
                         ai_summary = {item['종목명']: item for item in fw_result['summary_rows'] if item['종목명'] != '💡 [전체 합계]'}
                         all_stocks = sorted(list(set(list(ai_summary.keys()) + list(real_summary.keys()))))
 
@@ -1135,7 +1184,7 @@ with tab3:
 
 with tab4:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.28)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.30)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1203,7 +1252,9 @@ with tab4:
     
     ---
     
-    ## 5. ⚙️ 오토파일럿 실시간 감시 시스템 (Auto-Pilot)
-    *   본 시스템은 사용자가 설정한 주기(예: 10분)마다 백그라운드에서 KOSPI/KOSDAQ 전 종목의 호가와 실시간 잔고를 스크래핑합니다.
-    *   수만 개의 데이터 포인트를 앞서 명세한 수학적 알고리즘으로 즉시 연산하며, **오직 매수/매도 액션 플랜의 상태가 변경(Trigger)되었을 때만** 텔레그램을 통해 사용자에게 스마트 푸시 알림을 발송합니다.
+    ## 5. ⚙️ 자동매매 우선순위 & 자금 배분 로직 (Position Sizing)
+    동시에 여러 종목의 매수 시그널이 발생할 경우, 한정된 예수금 내에서 효율적으로 자본을 배분하기 위해 **AI 매력도 스코어링**을 산출하여 매수 우선순위를 정합니다.
+    * **대형주 우선순위:** 단기 모멘텀(20일 수익률)과 20/60선 정배열 이격도를 종합하여 추세 강도가 높은 종목 우선.
+    * **중소형주 우선순위:** 최근 20일 최대 수급 폭발 강도(거래량 비율)와 단기 수익률을 종합하여 주도주 우선.
+    * **추가 매수(비중 확대) 산출:** `(계좌 총 평가금액 × 설정 비중 %) - 현재 해당 종목의 평가금액` 공식으로 부족한 비중만큼의 구체적인 목표 매수 수량과 금액을 산출하여 과매수를 방지합니다.
     """, unsafe_allow_html=True)
