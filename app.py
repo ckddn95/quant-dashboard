@@ -575,7 +575,7 @@ if tg_token and tg_chat_id:
 else: st.sidebar.warning("🔑 `Secrets`에 `[telegram]` 정보 미등록. 푸시 알림 비활성화됨.")
 
 # ==========================================
-# 파라미터 세팅
+# 파라미터 세팅 (시뮬레이션 상세 설정 포함)
 # ==========================================
 vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
 st.sidebar.markdown("---")
@@ -584,6 +584,14 @@ st.sidebar.header("⚙️ Advanced Strategy Parameters")
 use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 대장기 추세선 필터 적용", value=True)
 whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.5)
 sat_stop_loss = st.sidebar.slider("긴급 손절 컷 (%)", min_value=-25, max_value=-5, value=(-15 if active_strat == '대형주 (Core)' else -12), step=1)
+
+with st.sidebar.expander("🧪 시뮬레이션 전용 상세 설정"):
+    cooldown_days = st.slider("🔒 연속 2회 손실 시 쿨다운 (일)", min_value=0, max_value=90, value=60, step=15)
+    max_alloc_pct = st.slider("기본 종목당 투입 한도 (%)", min_value=10, max_value=60, value=(35 if active_strat == '대형주 (Core)' else 20), step=5)
+    min_hold_days = st.slider("최소 보유 기간 (일)", min_value=0, max_value=20, value=5, step=1)
+    ts_target_pct = st.slider("트레일링 스탑 목표 수익률 (%)", min_value=10, max_value=100, value=(30 if active_strat == '대형주 (Core)' else 15), step=5)
+    ts_drop_pct = st.slider("트레일링 스탑 하락 허용 폭 (%)", min_value=-20, max_value=-5, value=(-10 if active_strat == '대형주 (Core)' else -5), step=1)
+    bull_market_boost = st.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
 # ==========================================
 # [공통] KIS 실계좌 잔고 선제척 조회 (탭 간 연동용)
@@ -620,7 +628,6 @@ with tab1:
     else:
         current_strategy, total_cash = p_data.get('strategy', '대형주 (Core)'), p_data.get('cash', 10000000)
         
-        # 대표종목 추천 버튼 제거 및 스캐너 버튼 전체 넓이 적용
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True): 
             st.session_state.show_scanner = True
 
@@ -678,7 +685,6 @@ with tab1:
                     dist_ma20 = ((c_price / ma20) - 1) * 100
                     tech_text = f"20/60선 이격 {((ma20 / ma60) - 1) * 100:+.2f}%" if current_strategy == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
 
-                    # 탭 1에서는 오직 진입 타점만 판단합니다. (매도 및 유지는 탭 2에서 전담)
                     if current_strategy == '대형주 (Core)':
                         action = "🔴 진입 보류" if (use_ma200_filter and not is_above_ma200) else ("🟢 적극 신규 진입 권장" if ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) or vix_contrarian) else "🟡 관망 (타점 대기)")
                     else:
@@ -695,7 +701,6 @@ with tab1:
         display_df = pd.DataFrame(display_records)
         if display_df.empty: display_df = pd.DataFrame(columns=['종목명', '티커', '실시간 현재가', '🤖 AI 액션 플랜', '📊 판단 근거'])
 
-        # 표에서 가상 단가 및 수량 컬럼 완전 제거
         col_config = {
             "종목명": st.column_config.TextColumn("종목명 (수정가능)"),
             "티커": st.column_config.TextColumn("티커 (수정가능)"),
@@ -706,10 +711,9 @@ with tab1:
         
         edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}", column_config=col_config)
         
-        # 통합 저장 로직 (입력 데이터 + 0으로 초기화된 수량/단가 + 숨겨진 내용)
         if st.button("💾 관심종목 리스트 저장", type="primary"):
             save_df = edited_df[['종목명', '티커']].copy()
-            save_df['매수단가'] = 0 # 시뮬레이션 호환성을 위한 백그라운드 처리
+            save_df['매수단가'] = 0 
             save_df['보유수량'] = 0
             
             p_data['stocks'] = pd.DataFrame(save_df.to_dict('records') + hidden_stocks).drop_duplicates(subset=['티커']).to_dict('records')
@@ -717,14 +721,12 @@ with tab1:
             st.success("✅ 안전하게 저장 및 동기화되었습니다!")
             st.rerun()
 
-        # 오토파일럿 & 텔레그램 연동 로직
         if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
             changed_msgs, needs_save = [], False
             for idx, r_dict in enumerate(p_data['stocks']):
                 s_name = r_dict['종목명']
                 curr_action = next((r['🤖 AI 액션 플랜'] for r in display_records if r['종목명'] == s_name), "기록없음 (실계좌이동)")
                 
-                # 실계좌에 들어가서 리스트에서 사라진 경우, 알림 생략을 위해 action 갱신 안함
                 if "기록없음" in curr_action: continue 
 
                 if curr_action != r_dict.get('last_action', "기록없음"):
@@ -795,4 +797,53 @@ with tab2:
 
 with tab3:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
-    st.info("이곳의 시뮬레이션 엔진 로직은 V2.6 버전의 핵심 코드가 그대로 유지되어 있습니다.")
+    if not p_data or not selected_port: st.warning("포트폴리오가 없습니다.")
+    else:
+        stocks_df, current_strategy, total_cash = pd.DataFrame(p_data.get('stocks', [])), p_data.get('strategy', '대형주 (Core)'), p_data.get('cash', 10000000)
+        
+        st.subheader("📊 AI 전략 유니버스 장기 초과수익 검증 (Backtest)")
+        st.caption("※ 좌측 사이드바의 '시뮬레이션 전용 상세 설정' 메뉴에서 리스크 및 자금 배분 옵션을 조절할 수 있습니다.")
+        col_sim1, col_sim2 = st.columns(2)
+        with col_sim1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1))
+        with col_sim2: end_date = st.date_input("종료일", datetime.date.today())
+
+        if st.button(f"🚀 '{selected_port}' 전략 기반 Backtest 실행", type="primary", use_container_width=True):
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner(f"벤치마크 퀀트 백테스트 구동 중... (약 15초 소요)"):
+                    bt_result = run_quant_simulation(stocks_df, current_strategy, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if bt_result:
+                        st.success(f"✅ 백테스트 실행 완료!")
+                        col_r1, col_r2 = st.columns(2)
+                        col_r1.metric(f"총 초기 자산", f"{total_cash:,.0f} 원")
+                        col_r2.metric(f"AI 초과수익 전략 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%")
+                        
+                        st.markdown("---")
+                        st.subheader("📋 종목별 상세 매매 통계")
+                        st.table(pd.DataFrame(bt_result['summary_rows']))
+                        
+                        chart = alt.Chart(bt_result['eom_weights_reset']).mark_bar().encode(
+                            x=alt.X('Date:O', title=''), y=alt.Y('Weight:Q', title='비중 (%)', stack='zero'),
+                            color=alt.Color('Asset:N', scale=alt.Scale(domain=bt_result['cols_ordered'], range=bt_result['color_range'])), order=alt.Order('Order:Q')
+                        ).properties(height=450)
+                        st.altair_chart(chart, use_container_width=True)
+
+with tab4:
+    st.markdown("<h1 style='text-align: center;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서</h1>", unsafe_allow_html=True)
+    st.markdown("본 보고서는 **'Core-Satellite Quant System'**에 탑재된 AI 매매 엔진의 핵심 로직 명세서입니다.")
+    st.divider()
+    st.markdown("""
+    ### 1. 🏛️ 핵심 투자 철학: Core-Satellite 듀얼 엔진
+    | 구분 | 대형주 (Core / 핵심 자산) | 중소형주 (Satellite / 위성 자산) |
+    | :--- | :--- | :--- |
+    | **운용 목표** | 안정적인 시장 우상향 추종 및 방어 | 시장 주도주 발굴 및 초과 수익 창출 |
+    | **핵심 타점** | 200일선 기반 **골든크로스 추세 추종** | 수급 폭발 후 **20일선 눌림목 스윙** |
+    
+    ### 2. 🌍 시장 환경 필터 (Macro Regime)
+    * **VIX 필터:** VIX 25 이상 시 공포 극점(Bottom) 인식 적극 매수, 30 이상 시 매매 전면 금지.
+    * **강세장 부스터:** 지수 60일 수익률 양수 및 정배열 시 종목당 투입 한도 1.5배 확장.
+    
+    ### 3. 🛡️ 극단적 리스크 관리 (Drawdown Defense)
+    * **트레일링 스탑:** 목표 수익률 도달 후 특정 비율 하락 시 즉시 익절.
+    * **손실 쿨다운:** 연속 2회 손절 시 지정 기간(기본 60일) 해당 종목 매수 동결.
+    """)
