@@ -500,7 +500,7 @@ if SYS_APP_KEY and kis_token_global:
 
 kis_data = st.session_state.get(cache_key)
 
-# 실계좌 변수 선제 계산 (NameError 차단)
+# 실계좌 변수 선제 계산
 real_holdings_tickers = []
 real_total_eval = 0.0
 real_eval_pnl = 0.0
@@ -534,7 +534,6 @@ manual_offset = float(p_data.get('pnl_offset', 0.0)) if p_data else 0.0
 
 total_invested_principal = float(total_cash)
 if kis_data:
-    # [수학적 역산] 현재 계좌 총자산 - (보유주식평가손익 + 봇 누적 실현손익 + 과거 수동 보정치)
     total_invested_principal = real_total_eval - real_eval_pnl - cumulative_realized_pnl - manual_offset
     if total_invested_principal <= 0: total_invested_principal = total_cash
 
@@ -820,19 +819,17 @@ with tab2:
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
             col_m2.metric("📥 자동 역산 투입 원금 (입출금 감지)", f"{total_invested_principal:,.0f} 원")
-            col_m3.metric("📈 총 누적 수익금", f"{total_pnl_all:+,.0f} 원", f"{real_ret_pct:+.2f}%")
+            col_m3.metric("📈 누적 실현/평가 수익금", f"{total_pnl_all:+,.0f} 원", f"{real_ret_pct:+.2f}%")
             col_m4.metric("💵 가용 현금", f"{real_cash_avail:,.0f} 원")
                 
-            with st.expander("⚙️ 실전 계좌 누적 수익률 보정 및 기준일 설정", expanded=False):
-                st.markdown("포트폴리오 시작일(포워드 테스트 기준일)과 자동매매 봇 가동 전에 발생한 과거 실현 손익 보정값을 입력하세요.")
-                c_d1, c_d2, c_d3 = st.columns([3, 4, 3])
-                new_date = c_d1.date_input("📅 포트폴리오 시작일", real_base_date, key="t2_date")
-                new_offset = c_d2.number_input("과거 실현 손익 누적액 (원)", value=int(manual_offset), step=100000, key="t2_offset")
-                if c_d3.button("💾 수익률 기준 저장", use_container_width=True, key="t2_save"):
-                    p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
+            with st.expander("⚙️ 과거 실적 보정 (선택 사항)", expanded=False):
+                st.markdown("봇 가동 전에 이미 발생했던 과거 수익/손실 누적액이 있다면 보정값으로 입력해 주세요.")
+                c_offset, c_btn = st.columns([8, 2])
+                new_offset = c_offset.number_input("과거 실현 손익 누적액 (원)", value=int(manual_offset), step=100000)
+                if c_btn.button("보정 저장", use_container_width=True):
                     p_data['pnl_offset'] = new_offset
                     save_portfolio_to_sheets(selected_port, p_data)
-                    st.success("✅ 실전 계좌 기준이 업데이트되었습니다.")
+                    st.success("보정값이 저장되었습니다.")
                     st.rerun()
 
             st.markdown("---")
@@ -854,10 +851,20 @@ with tab2:
                         current_holding_amt = live_c_price * qty_num
 
                         res = fetch_stock_status(row['티커'])
-                        if not res or res[0] is None: continue
+                        user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                        
+                        # [V4.3 핵심 수정] AI 분석 실패 (ETF 등) 시 빈 표를 방지하기 위한 Fallback 로직
+                        if not res or res[0] is None:
+                            live_results.append({
+                                '보유 종목명': row['종목명'], '티커': row['티커'], '🔥 매력도 점수': 0.0, '보유수량': f"{qty_num:,} 주",
+                                '매수평균가': f"{buy_price:,.0f} 원", '실시간 현재가': f"{live_c_price:,.0f} 원", 
+                                '평가손익': f"{profit_amt:+,.0f} 원", '수익률': f"{user_ret:+.2f}%", 
+                                '🤖 실계좌 전용 액션 플랜': "⚪ 모니터링 불가", '📊 판단 근거': "AI 분석용 과거 데이터(YF) 수신 실패"
+                            })
+                            continue
+                            
                         yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max = res
 
-                        user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                         diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0
                         dist_ma20 = ((live_c_price / ma20) - 1) * 100 if ma20 else 0
                         exit_cond_trend = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian
@@ -932,7 +939,8 @@ with tab3:
                 live_c_price = float(r.get('_raw_price', 0))
 
         res = fetch_stock_status(ticker)
-        if not res or res[0] is None: continue
+        if not res or res[0] is None: continue # 데이터가 없으면 자동매매 대기열에는 올리지 않음
+        
         c_p, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max = res
         
         if qty_num == 0:
@@ -1014,7 +1022,7 @@ with tab3:
             
         if st.button(btn_label, type=btn_type, use_container_width=True):
             if kill_switch: st.error("🚨 킬 스위치가 활성화되어 있어 주문을 전송할 수 없습니다.")
-            elif not auto_trade_enabled and btn_type == "secondary": st.warning("🚀 '실전 자동주문 활성화' 스위치를 켜주세요.")
+            elif not auto_trade_enabled and btn_type == "secondary": st.warning("🚀 사이드바에서 '실전 자동주문 활성화' 스위치를 켜주세요.")
             else:
                 with st.spinner("우선순위 대기열 순차 주문 전송 중..."):
                     exec_msgs, needs_save = [], False
@@ -1161,7 +1169,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.2)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.3)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
