@@ -470,6 +470,10 @@ if p_data:
         SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
         SYS_IS_MOCK = kis_account_data.get("is_mock", False)
 
+# 텔레그램 알림 수신 설정 (V4.5 핵심 글로벌 변수)
+tg_noti_signal = p_data.get('tg_noti_signal', True) if p_data else True
+tg_noti_order = p_data.get('tg_noti_order', True) if p_data else True
+
 # 토큰 파싱 및 11시간 캐싱 로직
 kis_token_global = None
 if SYS_APP_KEY and SYS_APP_SECRET and p_data:
@@ -577,11 +581,29 @@ st.sidebar.header("📱 텔레그램 및 오토파일럿")
 tg_token, tg_chat_id = st.secrets.get("telegram", {}).get("bot_token", ""), st.secrets.get("telegram", {}).get("chat_id", "")
 
 if tg_token and tg_chat_id:
+    st.sidebar.success("✅ 텔레그램 봇 연동 완료")
     if st.sidebar.button("🔔 연동 테스트 알림 발송"):
         success, msg = send_telegram_message("🤖 *Core-Satellite Quant System*\n텔레그램 정상 연결!")
         if success: st.toast("알림 발송 성공!")
         else: st.sidebar.error(f"발송 실패: {msg}")
+
+    # [V4.5 핵심] 텔레그램 수신 항목 세부 설정 UI
+    with st.sidebar.expander("⚙️ 텔레그램 알림 수신 항목", expanded=False):
+        if p_data:
+            init_tg_sig = p_data.get('tg_noti_signal', True)
+            init_tg_ord = p_data.get('tg_noti_order', True)
             
+            new_tg_sig = st.checkbox("💡 신규 매매 시그널 포착", value=init_tg_sig)
+            new_tg_ord = st.checkbox("🛒 매수/매도 체결 결과", value=init_tg_ord)
+            
+            if new_tg_sig != init_tg_sig or new_tg_ord != init_tg_ord:
+                p_data['tg_noti_signal'] = new_tg_sig
+                p_data['tg_noti_order'] = new_tg_ord
+                save_portfolio_to_sheets(selected_port, p_data)
+                st.rerun()
+        else:
+            st.info("포트폴리오 선택 후 설정 가능합니다.")
+
     st.sidebar.markdown("---")
     st.sidebar.subheader("🚨 긴급 제어 및 자동매매")
     
@@ -804,6 +826,30 @@ with tab1:
                     time.sleep(1)
                     st.rerun()
                 else: st.warning("⚠️ 삭제할 종목을 체크박스로 선택해주세요.")
+
+        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
+            changed_msgs, needs_save = [], False
+            for idx, r_dict in enumerate(p_data['stocks']):
+                s_name = r_dict['종목명']
+                curr_action = next((r['🤖 AI 액션 플랜'] for r in display_records if r['종목명'] == s_name), "기록없음 (실계좌이동)")
+                
+                if "기록없음" in curr_action: continue 
+
+                if curr_action != r_dict.get('last_action', "기록없음"):
+                    p_data['stocks'][idx]['last_action'] = curr_action 
+                    needs_save = True
+                    if "모니터링 유지" not in curr_action:
+                        changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
+            
+            if changed_msgs:
+                if tg_noti_signal:
+                    send_telegram_message(f"🤖 *[{selected_port} 관심종목] 시그널 감지!*\n" + "\n".join(changed_msgs))
+                    st.toast("오토파일럿 알림 발송 완료!")
+                elif not auto_pilot:
+                    st.toast("새로운 신규 시그널이 감지되었습니다. (알림 OFF 설정됨)")
+            elif not auto_pilot: st.toast("새로운 신규 시그널이 없습니다.")
+            
+            if needs_save: save_portfolio_to_sheets(selected_port, p_data)
 
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
@@ -1049,7 +1095,8 @@ with tab3:
                     
                     if needs_save: save_portfolio_to_sheets(selected_port, p_data)
                     if exec_msgs:
-                        send_telegram_message("🤖 *[주문 전송 집행 결과]*\n" + "\n".join(exec_msgs))
+                        if tg_noti_order:
+                            send_telegram_message("🤖 *[주문 전송 집행 결과]*\n" + "\n".join(exec_msgs))
                         st.success("주문 집행이 완료되었습니다!")
                         time.sleep(1)
                         st.rerun()
@@ -1168,7 +1215,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.4)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.5)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
