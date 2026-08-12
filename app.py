@@ -448,33 +448,114 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
 if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
 
 # ==========================================
-# 2. 전역 변수 및 사이드바 최상단 호이스팅 (NameError 완벽 차단)
+# 2. 전역 변수 및 데이터 파싱 (NameError 원천 차단)
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 all_ports = load_all_portfolios_from_sheets()
 port_names = list(all_ports.keys())
-selected_port, p_data, active_strat = None, None, "대형주 (Core)"
+selected_port = st.sidebar.selectbox("구글 시트 DB 목록", port_names) if port_names else None
+p_data = all_ports.get(selected_port) if selected_port else None
+active_strat = p_data.get('strategy', '대형주 (Core)') if p_data else "대형주 (Core)"
+total_cash = int(p_data.get('cash', 10000000)) if p_data else 10000000
 
-if port_names:
-    selected_port = st.sidebar.selectbox("구글 시트 DB 목록", port_names)
-    p_data = all_ports.get(selected_port)
-    active_strat = p_data.get('strategy', '대형주 (Core)') if p_data else "대형주 (Core)"
-    if p_data:
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("💰 Virtual Capital & Settings")
-        st.sidebar.markdown(f"**현재 설정 전략:** `{active_strat}`")
-        new_cash = st.sidebar.number_input(f"총 투자 운용 자산 (가상/증감액)", value=int(p_data.get('cash', 10000000)), step=1_000_000, format="%d")
-        if new_cash != int(p_data.get('cash', 10000000)):
-            p_data['cash'] = new_cash
+# KIS API 계좌 파싱
+SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
+if p_data:
+    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
+    kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
+    if kis_account_data:
+        SYS_APP_KEY = kis_account_data.get("app_key")
+        SYS_APP_SECRET = kis_account_data.get("app_secret")
+        SYS_CANO = str(kis_account_data.get("cano"))
+        SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
+        SYS_IS_MOCK = kis_account_data.get("is_mock", False)
+
+# 토큰 파싱 및 11시간 캐싱 로직
+kis_token_global = None
+if SYS_APP_KEY and SYS_APP_SECRET and p_data:
+    current_time = time.time()
+    token_key = f"kis_token_{SYS_APP_KEY[-6:]}"
+    time_key = f"kis_time_{SYS_APP_KEY[-6:]}"
+    kis_token_global = p_data.get(token_key)
+    token_time = p_data.get(time_key, 0)
+    
+    if not kis_token_global or (current_time - token_time) > 40000:
+        new_token = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK)
+        if new_token:
+            kis_token_global = new_token
+            p_data[token_key] = new_token
+            p_data[time_key] = current_time
             save_portfolio_to_sheets(selected_port, p_data)
-            st.rerun()
-        st.sidebar.caption(f"💵 가상 설정 금액: **{new_cash:,.0f} 원**")
-        with st.sidebar.popover(f"🗑️ '{selected_port}' 삭제", use_container_width=True):
-            if st.button("🚨 영구 삭제합니다", key=f"del_{selected_port}", type="primary", use_container_width=True):
-                delete_portfolio_from_sheets(selected_port)
-                st.rerun()
-else: st.sidebar.info("👈 포트폴리오를 추가해 주세요.")
 
+cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
+
+if SYS_APP_KEY and kis_token_global:
+    if st.sidebar.button("🔄 실계좌 데이터 동기화") or cache_key not in st.session_state:
+        holdings, summary = fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
+        if holdings is not None and summary is not None:
+            tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
+            tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
+            imported = [{'종목명': i.get('prdt_name'), '티커': i.get('pdno'), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
+            st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'stocks': imported}
+
+kis_data = st.session_state.get(cache_key)
+
+# 실계좌 변수 선제 계산 (NameError 차단)
+real_holdings_tickers = []
+real_total_eval = 0.0
+real_eval_pnl = 0.0
+real_stocks_df = pd.DataFrame()
+real_cash_avail = total_cash
+
+if kis_data:
+    real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
+    real_total_eval = kis_data.get('total_eval', 0.0)
+    real_eval_pnl = kis_data.get('total_pnl', 0.0)
+    real_stocks_df = pd.DataFrame(kis_data['stocks'])
+    
+    if not real_stocks_df.empty:
+        viz_df = real_stocks_df.copy()
+        viz_df['평가금액'] = viz_df['보유수량'].str.replace(' 주', '').str.replace(',', '').astype(float) * viz_df['_raw_price']
+        real_cash_avail = real_total_eval - viz_df['평가금액'].sum()
+    else:
+        real_cash_avail = real_total_eval
+
+# 수학적 입출금/원금 계산 로직
+real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
+try: real_base_date = pd.to_datetime(real_base_date_str).date()
+except: real_base_date = datetime.date(2024, 1, 1)
+
+cumulative_realized_pnl = 0.0
+if p_data and 'daily_trades' in p_data:
+    for trade in p_data['daily_trades']:
+        cumulative_realized_pnl += trade.get('실현 손익', 0.0)
+        
+manual_offset = float(p_data.get('pnl_offset', 0.0)) if p_data else 0.0
+
+total_invested_principal = float(total_cash)
+if kis_data:
+    # [수학적 역산] 현재 계좌 총자산 - (보유주식평가손익 + 봇 누적 실현손익 + 과거 수동 보정치)
+    total_invested_principal = real_total_eval - real_eval_pnl - cumulative_realized_pnl - manual_offset
+    if total_invested_principal <= 0: total_invested_principal = total_cash
+
+# ------------------------------------------
+# 3. 사이드바 UI 렌더링
+# ------------------------------------------
+if p_data:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("💰 Virtual Capital & Settings")
+    st.sidebar.markdown(f"**현재 설정 전략:** `{active_strat}`")
+    new_cash = st.sidebar.number_input(f"총 투자 운용 자산 (가상/증감액)", value=int(total_cash), step=1_000_000, format="%d")
+    if new_cash != total_cash:
+        p_data['cash'] = new_cash
+        save_portfolio_to_sheets(selected_port, p_data)
+        st.rerun()
+    st.sidebar.caption(f"💵 가상 설정 금액: **{new_cash:,.0f} 원**")
+    with st.sidebar.popover(f"🗑️ '{selected_port}' 삭제", use_container_width=True):
+        if st.button("🚨 영구 삭제합니다", key=f"del_{selected_port}", type="primary", use_container_width=True):
+            delete_portfolio_from_sheets(selected_port)
+            st.rerun()
+            
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 새 관심종목 포트폴리오 추가")
 new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (특수문자 제외)")
@@ -487,83 +568,11 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             save_portfolio_to_sheets(safe_name, {'strategy': new_p_strat, 'cash': new_p_cash, 'stocks': [], 'created_at': datetime.date.today().strftime('%Y-%m-%d')})
             st.rerun()
 
-# ------------------------------------------
-# KIS API 계좌 파싱 및 토큰/잔고 캐싱
-# ------------------------------------------
-SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
-if p_data:
-    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
-    kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
-    if kis_account_data:
-        SYS_APP_KEY = kis_account_data.get("app_key")
-        SYS_APP_SECRET = kis_account_data.get("app_secret")
-        SYS_CANO = str(kis_account_data.get("cano"))
-        SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
-        SYS_IS_MOCK = kis_account_data.get("is_mock", False)
-
 st.sidebar.markdown("---")
 st.sidebar.header("🔌 한국투자증권 실계좌 연동")
 if SYS_APP_KEY and kis_account_data: st.sidebar.success(f"✅ **{kis_account_data.get('name', f'{active_strat} 계좌')}** 연동됨")
 else: st.sidebar.warning(f"🔑 **KIS API 미연동**")
 
-kis_token_global = None
-if SYS_APP_KEY and SYS_APP_SECRET and p_data:
-    current_time = time.time()
-    token_key = f"kis_token_{SYS_APP_KEY[-6:]}"
-    time_key = f"kis_time_{SYS_APP_KEY[-6:]}"
-    kis_token_global = p_data.get(token_key)
-    token_time = p_data.get(time_key, 0)
-    
-    # 40,000초(약 11시간) 이내면 캐시된 토큰 사용, 아니면 재발급
-    if not kis_token_global or (current_time - token_time) > 40000:
-        new_token = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK)
-        if new_token:
-            kis_token_global = new_token
-            p_data[token_key] = new_token
-            p_data[time_key] = current_time
-            save_portfolio_to_sheets(selected_port, p_data)
-
-cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
-
-# 잔고 정보 1회 선제 조회
-real_holdings_tickers = []
-if SYS_APP_KEY and kis_token_global:
-    if st.sidebar.button("🔄 잔고 동기화") or cache_key not in st.session_state:
-        holdings, summary = fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
-        if holdings is not None and summary is not None:
-            tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
-            tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
-            imported = [{'종목명': i.get('prdt_name'), '티커': i.get('pdno'), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
-            st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'stocks': imported}
-
-kis_data = st.session_state.get(cache_key)
-if kis_data:
-    real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
-
-# ------------------------------------------
-# 수학적 팩트 기반 입출금 자동 감지 및 원금 역산
-# ------------------------------------------
-real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
-try: real_base_date = pd.to_datetime(real_base_date_str).date()
-except: real_base_date = datetime.date(2024, 1, 1)
-
-cumulative_realized_pnl = 0.0
-if p_data and 'daily_trades' in p_data:
-    for trade in p_data['daily_trades']:
-        cumulative_realized_pnl += trade.get('실현 손익', 0.0)
-
-manual_offset = p_data.get('pnl_offset', 0.0) if p_data else 0.0
-
-total_invested_principal = 10000000.0 # 초기 fallback
-if kis_data:
-    real_total_eval = kis_data.get('total_eval', 0)
-    real_eval_pnl = kis_data.get('total_pnl', 0)
-    # [수학적 역산] 현재총자산 - (보유주식평가손익 + 봇이실현한손익 + 과거수동보정치) = 내가 통장에 순수하게 꽂은 원금 총합
-    total_invested_principal = real_total_eval - real_eval_pnl - cumulative_realized_pnl - manual_offset
-
-# ------------------------------------------
-# 사이드바 스위치 영구 동기화
-# ------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.header("📱 텔레그램 및 오토파일럿")
 tg_token, tg_chat_id = st.secrets.get("telegram", {}).get("bot_token", ""), st.secrets.get("telegram", {}).get("chat_id", "")
@@ -608,6 +617,7 @@ if tg_token and tg_chat_id:
 
         if kill_switch: st.sidebar.error("⚠️ 킬 스위치 작동 중! 모든 매매 정지.")
             
+        check_min = init_ap_min
         if auto_pilot:
             check_min = st.sidebar.number_input("감시 주기 (분)", min_value=1, max_value=60, value=init_ap_min)
             if check_min != init_ap_min:
@@ -639,7 +649,7 @@ with st.sidebar.expander("🧪 시뮬레이션 상세 설정"):
 
 
 # ==========================================
-# 3. 메인 화면 구성 (모든 준비 완료 후 렌더링)
+# 4. 메인 화면 구성 (모든 준비 완료 후 렌더링)
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📝 관심종목 유니버스 & AI 진단", 
@@ -704,7 +714,7 @@ with tab1:
             
         display_records, eval_actions_cache = [], {}
         buf = whipsaw_buffer / 100.0
-        current_asset_base = kis_data.get('total_eval', total_cash) if kis_data and SYS_APP_KEY else total_cash
+        current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
         is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
         current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
         target_buy_amt = current_asset_base * (current_max_alloc_pct / 100.0)
@@ -804,41 +814,31 @@ with tab2:
         st.warning("사이드바에서 KIS API 키를 등록해주세요.")
     else:
         if kis_data:
-            real_total_eval = kis_data.get('total_eval', 0)
-            real_eval_pnl = kis_data.get('total_pnl', 0)
-            real_stocks_df = pd.DataFrame(kis_data['stocks'])
-            
             total_pnl_all = real_eval_pnl + cumulative_realized_pnl + manual_offset
             real_ret_pct = (total_pnl_all / total_invested_principal * 100) if total_invested_principal > 0 else 0
             
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
-            col_m2.metric("📥 자동 역산 투입 원금", f"{total_invested_principal:,.0f} 원")
-            col_m3.metric("📈 누적 실현/평가 수익금", f"{total_pnl_all:+,.0f} 원", f"{real_ret_pct:+.2f}%")
-            
-            if not real_stocks_df.empty:
-                viz_df = real_stocks_df.copy()
-                viz_df['평가금액'] = viz_df['보유수량'].str.replace(' 주', '').str.replace(',', '').astype(float) * viz_df['_raw_price']
-                real_cash = real_total_eval - viz_df['평가금액'].sum()
-                col_m4.metric("💵 가용 현금", f"{real_cash:,.0f} 원")
-            else:
-                col_m4.metric("💵 가용 현금", f"{real_total_eval:,.0f} 원")
+            col_m2.metric("📥 자동 역산 투입 원금 (입출금 감지)", f"{total_invested_principal:,.0f} 원")
+            col_m3.metric("📈 총 누적 수익금", f"{total_pnl_all:+,.0f} 원", f"{real_ret_pct:+.2f}%")
+            col_m4.metric("💵 가용 현금", f"{real_cash_avail:,.0f} 원")
                 
-            with st.expander("⚙️ 과거 실적 보정 (선택 사항)", expanded=False):
-                st.markdown("봇 가동 전에 이미 발생했던 과거 수익/손실 누적액이 있다면 보정값으로 입력해 주세요.")
-                c_offset, c_btn = st.columns([8, 2])
-                new_offset = c_offset.number_input("과거 실현 손익 누적액 (원)", value=int(manual_offset), step=100000)
-                if c_btn.button("보정 저장", use_container_width=True):
+            with st.expander("⚙️ 실전 계좌 누적 수익률 보정 및 기준일 설정", expanded=False):
+                st.markdown("포트폴리오 시작일(포워드 테스트 기준일)과 자동매매 봇 가동 전에 발생한 과거 실현 손익 보정값을 입력하세요.")
+                c_d1, c_d2, c_d3 = st.columns([3, 4, 3])
+                new_date = c_d1.date_input("📅 포트폴리오 시작일", real_base_date, key="t2_date")
+                new_offset = c_d2.number_input("과거 실현 손익 누적액 (원)", value=int(manual_offset), step=100000, key="t2_offset")
+                if c_d3.button("💾 수익률 기준 저장", use_container_width=True, key="t2_save"):
+                    p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
                     p_data['pnl_offset'] = new_offset
                     save_portfolio_to_sheets(selected_port, p_data)
-                    st.success("보정값이 저장되었습니다.")
+                    st.success("✅ 실전 계좌 기준이 업데이트되었습니다.")
                     st.rerun()
 
             st.markdown("---")
             if not real_stocks_df.empty:
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
                     buf, live_results = whipsaw_buffer / 100.0, []
-                    
                     is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
                     current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
                     target_buy_amt = real_total_eval * (current_max_alloc_pct / 100.0)
@@ -908,16 +908,6 @@ with tab3:
     col_c1.metric("🚨 킬 스위치 (Kill Switch)", "작동 중 (차단)" if kill_switch else "정상 (대기)")
     col_c2.metric("🚀 자동주문 상태", "활성화 (Auto)" if auto_trade_enabled else "비활성화 (Manual)")
     col_c3.metric("🔄 무인 감시 (Auto-Pilot)", f"가동 중 ({check_min}분)" if auto_pilot else "중지됨")
-    
-    real_cash_avail = 0.0
-    if SYS_APP_KEY and kis_data:
-        real_total_eval = kis_data.get('total_eval', 0)
-        real_stocks_df = pd.DataFrame(kis_data['stocks'])
-        if not real_stocks_df.empty:
-            viz_df = real_stocks_df.copy()
-            viz_df['평가금액'] = viz_df['보유수량'].str.replace(' 주', '').str.replace(',', '').astype(float) * viz_df['_raw_price']
-            real_cash_avail = real_total_eval - viz_df['평가금액'].sum()
-        else: real_cash_avail = real_total_eval
     col_c4.metric("💵 가용 예수금", f"{real_cash_avail:,.0f} 원")
     st.markdown("---")
     
@@ -1019,7 +1009,7 @@ with tab3:
         st.table(queue_df[['우선순위', '종목명', '구분', '🔥 점수', '목표 주가', '목표 주문 수량', '필요 자금', '주문 실행 상태']])
         
         st.markdown("---")
-        if auto_trade_enabled: btn_label, btn_type = "⚡ 감시 주기 무시하고 즉시 강제 집행 (입금 직후용)", "secondary"
+        if auto_trade_enabled: btn_label, btn_type = "⚡ 자동 감시 주기 무시하고 즉시 강제 집행 (입금 직후용)", "secondary"
         else: btn_label, btn_type = "⚡ 대기열 일괄 주문 수동 전송", "primary"
             
         if st.button(btn_label, type=btn_type, use_container_width=True):
@@ -1090,7 +1080,19 @@ with tab4:
         
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
         
-        st.markdown(f"설정된 기준일(`{real_base_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
+        with st.expander("⚙️ 실전 계좌 누적 수익률 보정 및 기준일 설정", expanded=False):
+            st.markdown("포트폴리오 시작일(포워드 테스트 기준일)과 자동매매 봇 가동 전에 발생한 과거 실현 손익 보정값을 입력하세요.")
+            c_d1, c_d2, c_d3 = st.columns([3, 4, 3])
+            new_date = c_d1.date_input("📅 포트폴리오 시작일", real_base_date, key="t4_date")
+            new_offset = c_d2.number_input("과거 실현 손익 누적액 (원)", value=int(manual_offset), step=100000, key="t4_offset")
+            if c_d3.button("💾 수익률 기준 저장", use_container_width=True, key="t4_save"):
+                p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
+                p_data['pnl_offset'] = new_offset
+                save_portfolio_to_sheets(selected_port, p_data)
+                st.success("✅ 성과 측정 기준이 업데이트되었습니다.")
+                st.rerun()
+                
+        st.markdown(f"설정된 기준일(`{real_base_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실계좌 수익률**을 나란히 비교합니다.")
 
         if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
             if stocks_df.empty: 
@@ -1098,13 +1100,14 @@ with tab4:
             else:
                 with st.spinner(f"{real_base_date} 부터 현재까지 AI 시뮬레이션 중..."):
                     fw_result = run_quant_simulation(stocks_df, active_strat, total_invested_principal, real_base_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                    
                     if fw_result:
                         st.markdown("### 🏆 누적 수익률 비교 (Yield Comparison)")
                         col_fw1, col_fw2 = st.columns(2)
                         col_fw1.metric("📈 AI 포워드 테스트 (이론)", f"{fw_result['final_port_ret']:+.2f}%", f"기말 자산: {fw_result['final_asset']:,.0f} 원")
                         if SYS_APP_KEY and kis_data:
-                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원")
+                            total_pnl_all = real_eval_pnl + cumulative_realized_pnl + manual_offset
+                            real_ret_pct_custom = (total_pnl_all / total_invested_principal * 100) if total_invested_principal > 0 else 0
+                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct_custom:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원")
                         else: col_fw2.info("한국투자증권 API 연동이 필요합니다.")
                             
                         st.markdown("---")
@@ -1158,7 +1161,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.1)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.2)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
