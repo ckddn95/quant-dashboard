@@ -456,7 +456,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     summary_rows.append({
         '종목명': '💡 [전체 합계]', '최종 보유 주수': '-', '기말 평가금': f"{sum_hval:,.0f} 원",
         '총 순수익 (원)': f"{sum_prof:+,.0f} 원 (자산대비 {(sum_prof/init_cash)*100 if init_cash>0 else 0:+.2f}%)",
-        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {sum_scnt}회",
+        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {s_cnt}회",
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
@@ -636,6 +636,28 @@ with tab1:
                 scan_result = run_core_scanner(use_ma200_filter, whipsaw_buffer) if current_strategy == '대형주 (Core)' else run_satellite_scanner(use_ma200_filter)
                 if not scan_result.empty:
                     st.success(f"✅ 새로운 타점 종목 {len(scan_result)}개 발굴!")
+                    
+                    # [V2.10 추가] 스캐너 발굴 기준 상세 안내 UI
+                    with st.expander("🔍 어떤 기준으로 이 종목들을 발굴했나요?", expanded=True):
+                        if current_strategy == '대형주 (Core)':
+                            st.markdown(f"""
+                            **[대형주 Core 전략 스캐너 발굴 조건]**
+                            *   **📌 유니버스:** KOSPI 시가총액 상위 100종목
+                            *   **🛡️ 장기 추세 필터:** 현재가가 200일 이동평균선 위에 위치 (안전구간)
+                            *   **📈 중기 추세 우상향:** 60일 이동평균선이 10일 전보다 상승 중
+                            *   **🔥 단기 모멘텀:** 20일 전 대비 주가 상승 (단기 수익률 > 0%)
+                            *   **🎯 골든크로스 타점:** 20일선이 60일선을 뚫고 올라가 안착 (휩소 방지 버퍼 `{whipsaw_buffer}%` 이상 이격된 확실한 자리)
+                            """)
+                        else:
+                            st.markdown(f"""
+                            **[중소형주 Satellite 전략 스캐너 발굴 조건]**
+                            *   **📌 유니버스:** KOSDAQ 시가총액 1,000억 이상 상위 종목
+                            *   **💥 수급(거래량) 폭발:** 최근 20일 내 거래량이 5일 평균 대비 **200% 이상 급증**한 이력이 있는 주도주
+                            *   **📉 20일선 눌림목:** 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나 20일선을 터치하며 지지받는 1차 반등 자리
+                            *   **🛡️ 리스크 및 추세 방어:** 고점 대비 하락폭(MDD)이 `-30%` 이내이며, 60일선이 우상향 유지 중
+                            *   **🏆 AI 스코어링:** 최근 거래량 급증 크기(40%) + 60일 모멘텀(30%) + 20일 모멘텀(30%) 점수를 합산하여 가장 타점이 좋은 상위 5개 종목 추천
+                            """)
+                    
                     for _, row in scan_result.iterrows():
                         c1, c2, c3 = st.columns([4, 4, 2])
                         c1.write(f"**{row['종목명']}** (`{row['티커']}`)")
@@ -645,11 +667,10 @@ with tab1:
                             p_data['stocks'] = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커']).to_dict(orient='records')
                             save_portfolio_to_sheets(selected_port, p_data)
                             st.rerun()
-                else: st.warning("⚠️ 필터 조건 만족 종목 없음.")
+                else: st.warning("⚠️ 현재 필터 조건을 만족하는 종목이 없습니다.")
 
         st.markdown("---")
         
-        # 실계좌 보유 종목 분리
         sandbox_stocks = p_data.get('stocks', [])
         visible_stocks, hidden_stocks = [], []
         for s in sandbox_stocks:
@@ -670,7 +691,7 @@ with tab1:
                 ticker = row.get('티커', '')
                 
                 c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else None
-                if not c_price: # YF 우회
+                if not c_price:
                     try: 
                         yf_df = yf.download(f"{ticker}.KS", period="1d", progress=False)
                         if yf_df.empty: yf_df = yf.download(f"{ticker}.KQ", period="1d", progress=False)
