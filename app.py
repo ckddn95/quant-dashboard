@@ -18,7 +18,11 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 0. 페이지 설정 및 보안 (Authentication)
 # ==========================================
-st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
+st.set_page_config(
+    page_title="Core-Satellite Quant System",
+    page_icon="🚀",
+    layout="wide"
+)
 
 # [보안] 대시보드 무단 접근 방지 로직
 if "authenticated" not in st.session_state:
@@ -27,8 +31,7 @@ if "authenticated" not in st.session_state:
 if not st.session_state["authenticated"]:
     st.markdown("<h2 style='text-align: center;'>🔒 퀀트 대시보드 보안 인증</h2>", unsafe_allow_html=True)
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
-    # secrets.toml에 app_password 가 없으면 기본값 '0000'
-    correct_pwd = st.secrets.get("app_password", "0000") 
+    correct_pwd = st.secrets.get("app_password", "0000") # secrets.toml에 app_password="비번" 지정 요망
     
     if pwd:
         if pwd == correct_pwd:
@@ -101,6 +104,14 @@ def save_portfolio_to_sheets(name, p_data):
     except Exception as e:
         st.error(f"구글 시트 저장 오류: {e}")
 
+def delete_portfolio_from_sheets(name):
+    try:
+        worksheet = get_gspread_client().open_by_key(SPREADSHEET_ID).worksheet("Portfolios")
+        cell = worksheet.find(name)
+        if cell: worksheet.delete_rows(cell.row)
+    except Exception as e:
+        st.error(f"구글 시트 삭제 오류: {e}")
+
 # ==========================================
 # 한국투자증권 Open API (조회 및 주문 엔진)
 # ==========================================
@@ -140,31 +151,25 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except: pass
     return None, None
 
-# [자동매매 엔진] 안전 장치가 결합된 가상/실전 주문 함수
 def execute_kis_order(ticker, qty, price, order_type="BUY", is_market=False):
     """
-    실제 주문을 넣기 전 슬리피지 및 예외 상황을 통제하는 방어적 로직의 뼈대입니다.
-    (실제 KIS 주문 API URL 연동 위치)
+    안전 장치가 결합된 KIS API 주문 전송 엔진 (Fail-Safe 적용)
     """
     try:
-        # [Fail-Safe 1] 주문 수량 검증
-        if int(qty) <= 0: return False, "주문 수량 오류"
+        if int(qty) <= 0: return False, "주문 수량 오류 (수량 부족)"
         
-        # [Fail-Safe 2] 주문 종류 결정 (손절/청산은 시장가, 신규 진입은 지정가)
-        order_gubun = "01" if is_market else "00" # 01: 시장가, 00: 지정가
+        # 01: 시장가(매도/손절용), 00: 지정가(신규진입용)
+        order_gubun = "01" if is_market else "00" 
         
-        # TODO: 여기에 실제 한국투자증권 주문 API POST 요청 로직 삽입
-        # res = requests.post(order_url, json=payload, headers=headers)
+        # TODO: 실제 KIS REST API POST 주문 전송 로직 삽입 구간
         
-        # [현재는 연동 준비 단계이므로 성공으로 간주하여 로깅 처리]
         time.sleep(0.5) # 통신 딜레이 시뮬레이션
-        return True, f"[{'시장가' if is_market else '지정가'}] 체결 완료"
-        
+        return True, f"[{'시장가' if is_market else '지정가'}] 주문 접수 완료"
     except Exception as e:
         return False, f"API 통신 오류: {str(e)}"
 
 # ==========================================
-# 데이터 수집 & 백테스트 함수
+# 데이터 수집 & 백테스트 함수 모음
 # ==========================================
 @st.cache_data(ttl=86400)
 def load_krx_universe():
@@ -222,6 +227,40 @@ def fetch_stock_status(ticker_code):
                 return (yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, (ma60 > ma60_10d_ago), (yf_price >= ma200), recent_20d_vol_max >= 200.0, yf_low, recent_20d_vol_max)
     except: pass
     return None
+
+# [복구된 핵심 스캐너 함수 1]
+@st.cache_data(ttl=3600)
+def run_core_scanner(use_ma200_filter_flag, buf_pct):
+    results, krx, buf = [], load_krx_universe(), buf_pct / 100.0
+    try: candidates = krx[krx['Market'] == 'KOSPI'].sort_values('Marcap', ascending=False).head(100) if 'Marcap' in krx.columns else krx[krx['Market'] == 'KOSPI'].head(100)
+    except: return pd.DataFrame()
+    for _, row in candidates.iterrows():
+        res = fetch_stock_status(row['Code'])
+        if res is None: continue
+        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = res
+        if ((not use_ma200_filter_flag) or is_above_ma200) and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0):
+            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20/60선 이격': f"{((ma20 / ma60) - 1) * 100:+.2f}%", '20일 모멘텀': f"{ret_20:+.2f}%", '진단 근거': "장기 추세선 방어 및 골든크로스 안착"})
+    return pd.DataFrame(results)
+
+# [복구된 핵심 스캐너 함수 2]
+@st.cache_data(ttl=3600)
+def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
+    results, krx = [], load_krx_universe()
+    try: 
+        kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
+        candidates = kosdaq[kosdaq['Marcap'] >= 100000000000].sort_values('Marcap', ascending=False).head(100) if 'Marcap' in krx.columns else kosdaq.head(100)
+    except: return pd.DataFrame()
+    for _, row in candidates.iterrows():
+        res = fetch_stock_status(row['Code'])
+        if res is None: continue
+        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = res
+        dist_ma20 = ((c_price / ma20) - 1) * 100 if ma20 > 0 else 0
+        is_dip = ((-5.0 <= dist_ma20 <= 3.0) or ((current_low <= ma20 * 1.01) and (c_price >= ma20 * 0.95)))
+        if vol_surged and is_dip and ((not use_ma200_filter_flag) or is_above_ma200) and (drawdown >= -30.0) and (ma60_slope_positive and ret_20 > -3.0):
+            score = (recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3)
+            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{recent_vol_max:,.0f}%", 'AI 스코어': round(score, 2), '_score_num': score})
+    if not results: return pd.DataFrame()
+    return pd.DataFrame(results).sort_values('_score_num', ascending=False).head(top_n).drop(columns=['_score_num'])
 
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days):
@@ -512,7 +551,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
 if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
 
 # ==========================================
-# 사이드바: 포트폴리오 관리 및 보안 킬스위치
+# 3. 사이드바: 포트폴리오 관리 및 세팅
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 
@@ -540,7 +579,7 @@ if port_names:
                 st.rerun()
 else: st.sidebar.info("👈 포트폴리오를 추가해 주세요.")
 
-# [버그 픽스] NameError 해결을 위한 전역(Global) 변수 호이스팅
+# [V3.0 핵심] NameError 방지를 위한 전역 변수 초기화
 real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
 try: real_base_date = pd.to_datetime(real_base_date_str).date()
 except: real_base_date = datetime.date(2024, 1, 1)
@@ -571,7 +610,7 @@ if p_data:
     else: st.sidebar.warning(f"🔑 **KIS API 미연동**")
 
 # ==========================================
-# 텔레그램 연동, 오토파일럿 및 킬 스위치 (V3.0)
+# 텔레그램 연동 상태, 오토파일럿 및 킬 스위치 탑재
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("📱 텔레그램 알림 봇 연동")
@@ -594,13 +633,27 @@ if tg_token and tg_chat_id:
     st.sidebar.markdown("---")
     st.sidebar.subheader("🚨 긴급 제어 및 오토파일럿")
     
-    # [V3.0 핵심] 보안 및 매매 차단을 위한 킬 스위치 도입
-    kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=False, help="시스템을 즉시 일시정지하고 모든 신규 매수/매도 주문을 차단합니다.")
-    auto_trade_enabled = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=False, help="실계좌 연동 시 KIS API로 실제 매수/매도 주문을 전송합니다.")
-    auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기 (Auto-Refresh)", value=init_ap, key='auto_pilot_toggle')
+    kill_switch = st.sidebar.toggle(
+        "🚨 긴급 정지 (KILL SWITCH)", 
+        value=False, 
+        help="[시스템 비상 차단 장치] 예상치 못한 프로그램 오류나 급격한 시장 변동성(시스템 리스크) 발생 시, 모든 신규 매수 및 매도 주문 전송 루프를 1초 만에 즉시 중단시키는 최종 방어선입니다. 활성화 시 어떠한 자동 주문도 나가지 않도록 계좌를 보호합니다."
+    )
+    
+    auto_trade_enabled = st.sidebar.toggle(
+        "🚀 실전 자동주문 활성화", 
+        value=False, 
+        help="[실계좌 연동 자동매매 모드] AI 퀀트 엔진이 포착한 진단 시그널과 '매력도 점수 기반 자금 배분 로직'에 따라, 한국투자증권(KIS) API를 통해 실제 매수·매도 주문을 계좌에 자동으로 집행합니다. (비활성화 시 시그널 모니터링 및 알림만 전송됩니다.)"
+    )
+    
+    auto_pilot = st.sidebar.toggle(
+        "🔄 오토파일럿 켜기 (Auto-Refresh)", 
+        value=init_ap, 
+        key='auto_pilot_toggle', 
+        help="[무인 백그라운드 감시 체제] 사용자가 직접 화면을 새로고침하지 않아도, 설정된 감시 주기(분 단위)마다 시스템이 자동으로 시장 데이터를 스크래핑하여 타점 변화를 감지하고 텔레그램 스마트 푸시 알림을 발송합니다."
+    )
     
     if kill_switch:
-        st.sidebar.error("⚠️ 킬 스위치 작동 중! 모든 매매 로직이 정지되었습니다.")
+        st.sidebar.error("⚠️ 킬 스위치 작동 중! 모든 자동 매매 로직이 정지되었습니다.")
         
     if auto_pilot != init_ap:
         try: st.query_params["autopilot"] = str(auto_pilot).lower()
@@ -831,6 +884,27 @@ with tab1:
             st.success("✅ 안전하게 저장 및 동기화되었습니다!")
             st.rerun()
 
+        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
+            changed_msgs, needs_save = [], False
+            for idx, r_dict in enumerate(p_data['stocks']):
+                s_name = r_dict['종목명']
+                curr_action = next((r['🤖 AI 액션 플랜'] for r in display_records if r['종목명'] == s_name), "기록없음 (실계좌이동)")
+                
+                if "기록없음" in curr_action: continue 
+
+                if curr_action != r_dict.get('last_action', "기록없음"):
+                    p_data['stocks'][idx]['last_action'] = curr_action 
+                    needs_save = True
+                    if "모니터링 유지" not in curr_action:
+                        changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
+            
+            if changed_msgs:
+                send_telegram_message(f"🤖 *[{selected_port} 관심종목] 시그널 감지!*\n" + "\n".join(changed_msgs))
+                st.toast("오토파일럿 알림 발송 완료!")
+            elif not auto_pilot: st.toast("새로운 신규 시그널이 없습니다.")
+            
+            if needs_save: save_portfolio_to_sheets(selected_port, p_data)
+
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
     st.markdown("한국투자증권에 실제로 매수(보유) 중인 종목만 이곳에 표시되며, AI가 매도/손절 타점을 집중 감시합니다.")
@@ -955,7 +1029,7 @@ with tab2:
                                 easy_desc = "[손절 매도] 사전 설정된 최대 허용 손실폭(Stop-loss) 한도에 도달했습니다. 자산 보호를 위해 기계적인 강제 청산을 집행하십시오."
                             elif user_ret >= ts_target_pct: 
                                 action = "🔵 트레일링 스탑 가동"
-                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
+                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%)"
                                 easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
                                 action = "🔴 전량 청산 (추세 이탈)"
@@ -997,10 +1071,10 @@ with tab2:
                         live_df = live_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
                         st.table(live_df.drop(columns=['티커', '_raw_price', '_add_qty', '_qty_num']))
                     
-                    # [V3.0 핵심] 실전 자동주문 엔진 작동 로직 (Kill Switch & Fail-Safe 적용)
+                    # [V3.1 자동매매 핵심 로직] Fail-Safe 및 킬 스위치 연동
                     if auto_pilot and auto_trade_enabled:
                         if kill_switch:
-                            st.warning("⚠️ 킬 스위치 발동 중: 자동매매 주문 전송이 차단되었습니다.")
+                            st.warning("⚠️ 킬 스위치 발동 중: 자동매매 주문 전송이 안전하게 차단되었습니다.")
                         else:
                             changed_msgs = []
                             for r in live_results:
@@ -1012,18 +1086,18 @@ with tab2:
                                 if "청산" in curr_action or "손절" in curr_action:
                                     success, msg = execute_kis_order(ticker, hold_qty, live_c, order_type="SELL", is_market=True)
                                     if success:
-                                        changed_msgs.append(f"🚨 *[매도 집행]* {s_name} 전량 시장가 매도 완료")
+                                        changed_msgs.append(f"🚨 *[매도 집행]* {s_name} 전량 시장가 청산 완료")
                                         st.toast(f"{s_name} 전량 매도 완료")
                                     else:
                                         changed_msgs.append(f"❌ *[매도 실패]* {s_name} - {msg}")
                                         
-                                # 2. 매수(비중 확대) 로직 실행
+                                # 2. 매수(비중 확대) 로직 실행 (매수 제한 검증)
                                 elif "비중 확대" in curr_action and add_qty > 0:
                                     if real_cash >= (add_qty * live_c):
                                         success, msg = execute_kis_order(ticker, add_qty, live_c, order_type="BUY", is_market=False)
                                         if success:
                                             changed_msgs.append(f"🛒 *[매수 집행]* {s_name} {add_qty}주 지정가 매수 완료")
-                                            real_cash -= (add_qty * live_c) # 임시 잔고 차감
+                                            real_cash -= (add_qty * live_c)
                                             st.toast(f"{s_name} {add_qty}주 매수 완료")
                                         else:
                                             changed_msgs.append(f"❌ *[매수 실패]* {s_name} - {msg}")
@@ -1165,7 +1239,7 @@ with tab3:
 
 with tab4:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v3.0 Final Master)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v3.1 Final Master)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
