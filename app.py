@@ -10,7 +10,6 @@ import datetime
 import re
 import requests
 import gspread
-import time
 from google.oauth2.service_account import Credentials
 import warnings
 warnings.filterwarnings('ignore')
@@ -158,9 +157,8 @@ def fetch_market_data():
         return vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60
     except: return 20.0, False, True, 0.0, 0.0
 
-# [V2.22 핵심 수정] live_price 변수를 캐시 함수 외부로 분리하여 API 폭주 차단!
 @st.cache_data(ttl=3600)
-def fetch_stock_status(ticker_code):
+def fetch_stock_status(ticker_code, live_price=None):
     try:
         for suffix in ['.KS', '.KQ']:
             df = yf.download(f"{ticker_code}{suffix}", period="2y", progress=False)
@@ -671,7 +669,6 @@ with tab1:
                 st.session_state.show_scanner = True
         with col_s2:
             if st.button("🧹 퇴출 권장 종목 일괄 삭제", type="secondary", use_container_width=True):
-                # 퇴출로 분류된 종목만 필터링하여 삭제
                 if 'last_eval_actions' in st.session_state:
                     to_remove = [t for t, a in st.session_state.last_eval_actions.items() if "퇴출" in a]
                     if to_remove:
@@ -869,35 +866,51 @@ with tab2:
                         res = fetch_stock_status(row['티커'])
                         if not res or res[0] is None: continue
                         
-                        yf_price, ma200, ma60, ma20, _, _, _, _, _, _, _, _, _ = res
+                        yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, _ = res
 
                         user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                         diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0
+                        dist_ma20 = ((live_c_price / ma20) - 1) * 100 if ma20 else 0
                         exit_cond_trend = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian
                         
+                        ma200_cond = is_above_ma200 if use_ma200_filter else True
+                        current_low = min(yf_low, live_c_price)
+
+                        # [V2.23 핵심] 실계좌 내 '추가 매수' 판단 및 '판단 근거' 고도화
                         if active_strat == '대형주 (Core)': 
+                            entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
+                            
                             if user_ret >= ts_target_pct: 
-                                action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
-                                reason = f"목표 수익률({ts_target_pct}%) 달성 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 감시 중"
+                                action = "🔵 목표수익 도달 (트레일링 스탑 감시)"
+                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 대기"
                             elif exit_cond_trend: 
-                                action = "🔴 즉각 매도 (추세 이탈)"
+                                action = "🔴 전량 매도 (추세 이탈)"
                                 reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
+                            elif entry_cond:
+                                action = "🟢 추가 매수 권장 (불타기)"
+                                reason = f"현재 신규 진입(매수) 타점 조건과 일치함 (현재 이격 {diff_ma:+.2f}%)"
                             else: 
-                                action = "🟢 보유 유지"
-                                reason = f"20/60선 정배열 추세 유지 중 (현재 이격 {diff_ma:+.2f}%)"
+                                action = "🟡 보유 유지 (관망)"
+                                reason = f"추세는 방어 중이나 신규 매수 타점은 아님 (현재 이격 {diff_ma:+.2f}%)"
                         else:
+                            is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
+                            entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
+
                             if user_ret <= sat_stop_loss: 
                                 action = "🔴 강제 손절 집행"
-                                reason = f"손절 기준선({sat_stop_loss}%) 이하 하락 도달 (현재 {user_ret:+.2f}%)"
+                                reason = f"손절 기준선({sat_stop_loss}%) 이하 하락 (현재 {user_ret:+.2f}%)"
                             elif user_ret >= ts_target_pct: 
-                                action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
-                                reason = f"목표 수익률({ts_target_pct}%) 달성 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 감시 중"
+                                action = "🔵 목표수익 도달 (트레일링 스탑 감시)"
+                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 대기"
                             elif exit_cond_trend: 
-                                action = "🔴 전량 매도"
+                                action = "🔴 전량 매도 (추세 이탈)"
                                 reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
+                            elif entry_cond:
+                                action = "🟢 추가 매수 권장 (비중 확대)"
+                                reason = f"수급 유입 후 20일선 완벽한 눌림목 지지 중 (현재 이격 {dist_ma20:+.2f}%)"
                             else: 
-                                action = "🟢 보유 유지"
-                                reason = f"손절선({sat_stop_loss}%) 방어 및 추세 유지 중 (현재 수익률 {user_ret:+.2f}%)"
+                                action = "🟡 보유 유지 (관망)"
+                                reason = f"손절선 방어 및 추세 유지 중이나 추가 매수 타점은 아님 (현재 수익률 {user_ret:+.2f}%)"
 
                         live_results.append({
                             '보유 종목명': row['종목명'], 
@@ -916,7 +929,7 @@ with tab2:
                             s_name, curr_action = r['보유 종목명'], r['🤖 실계좌 전용 액션 플랜']
                             if curr_action != p_data['real_last_actions'].get(s_name, "기록없음"):
                                 p_data['real_last_actions'][s_name], needs_save = curr_action, True
-                                if "유지" not in curr_action: changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
+                                if "관망" not in curr_action: changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
                         if changed_msgs:
                             send_telegram_message(f"🚨 *[실전계좌] 긴급 시그널!*\n" + "\n".join(changed_msgs))
                             st.toast("실계좌 오토파일럿 알림 발송 완료!")
