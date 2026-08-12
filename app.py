@@ -10,6 +10,7 @@ import datetime
 import re
 import requests
 import gspread
+import time
 from google.oauth2.service_account import Credentials
 import warnings
 warnings.filterwarnings('ignore')
@@ -157,8 +158,9 @@ def fetch_market_data():
         return vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60
     except: return 20.0, False, True, 0.0, 0.0
 
+# [V2.22 핵심 수정] live_price 변수를 캐시 함수 외부로 분리하여 API 폭주 차단!
 @st.cache_data(ttl=3600)
-def fetch_stock_status(ticker_code, live_price=None):
+def fetch_stock_status(ticker_code):
     try:
         for suffix in ['.KS', '.KQ']:
             df = yf.download(f"{ticker_code}{suffix}", period="2y", progress=False)
@@ -168,28 +170,28 @@ def fetch_stock_status(ticker_code, live_price=None):
                 low_prices = df['Low'].dropna() if 'Low' in df.columns else close_prices
                 if len(close_prices) == 0: continue
                 
-                current_price = float(live_price) if live_price and float(live_price) > 0 else float(close_prices.iloc[-1])
-                current_low = float(live_price) if live_price and float(live_price) < float(low_prices.iloc[-1]) else float(low_prices.iloc[-1])
+                yf_price = float(close_prices.iloc[-1])
+                yf_low = float(low_prices.iloc[-1])
                     
-                ma200 = float(close_prices.rolling(window=200).mean().iloc[-1]) if len(close_prices) >= 200 else current_price
-                ma60 = float(close_prices.rolling(window=60).mean().iloc[-1]) if len(close_prices) >= 60 else current_price
+                ma200 = float(close_prices.rolling(window=200).mean().iloc[-1]) if len(close_prices) >= 200 else yf_price
+                ma60 = float(close_prices.rolling(window=60).mean().iloc[-1]) if len(close_prices) >= 60 else yf_price
                 ma60_10d_ago = float(close_prices.rolling(window=60).mean().iloc[-11]) if len(close_prices) >= 70 else ma60
-                ma20 = float(close_prices.rolling(window=20).mean().iloc[-1]) if len(close_prices) >= 20 else current_price
+                ma20 = float(close_prices.rolling(window=20).mean().iloc[-1]) if len(close_prices) >= 20 else yf_price
                 recent_high = float(close_prices.tail(120).max())
-                drawdown = ((current_price / recent_high) - 1) * 100 if recent_high > 0 else 0.0
+                drawdown = ((yf_price / recent_high) - 1) * 100 if recent_high > 0 else 0.0
                 
                 vol_5ma = float(volumes.tail(6).iloc[:-1].mean()) if len(volumes) >= 6 else float(volumes.iloc[-1])
                 vol_ratio = (float(volumes.iloc[-1]) / vol_5ma * 100) if vol_5ma > 0 else 100.0
                 
-                ret_60 = ((current_price / float(close_prices.iloc[-60])) - 1) * 100 if len(close_prices) >= 60 else 0.0
-                ret_20 = ((current_price / float(close_prices.iloc[-20])) - 1) * 100 if len(close_prices) >= 20 else 0.0
+                ret_60 = ((yf_price / float(close_prices.iloc[-60])) - 1) * 100 if len(close_prices) >= 60 else 0.0
+                ret_20 = ((yf_price / float(close_prices.iloc[-20])) - 1) * 100 if len(close_prices) >= 20 else 0.0
                 
                 vol_ratio_series = pd.Series(np.where(volumes.rolling(5).mean().shift(1) > 0, volumes / volumes.rolling(5).mean().shift(1) * 100, 100.0), index=volumes.index)
                 recent_20d_vol_max = float(vol_ratio_series.tail(20).max())
                 
-                return (current_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, (ma60 > ma60_10d_ago), (current_price >= ma200), recent_20d_vol_max >= 200.0, current_low, recent_20d_vol_max)
+                return (yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, (ma60 > ma60_10d_ago), (yf_price >= ma200), recent_20d_vol_max >= 200.0, yf_low, recent_20d_vol_max)
     except: pass
-    return None, None, None, None, None, None, None, None, False, False, False, None, 0.0
+    return None
 
 @st.cache_data(ttl=3600)
 def run_core_scanner(use_ma200_filter_flag, buf_pct):
@@ -198,9 +200,10 @@ def run_core_scanner(use_ma200_filter_flag, buf_pct):
     except: return []
     for _, row in candidates.iterrows():
         res = fetch_stock_status(row['Code'])
-        if res[0] is None: continue
-        if ((not use_ma200_filter_flag) or res[9]) and (res[3] >= res[2] * (1 + buf)) and res[8] and (res[7] > 0):
-            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{res[0]:,.0f} 원", '20/60선 이격': f"{((res[3] / res[2]) - 1) * 100:+.2f}%", '20일 모멘텀': f"{res[7]:+.2f}%", '진단 근거': "장기 추세선 방어 및 골든크로스 안착"})
+        if res is None: continue
+        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = res
+        if ((not use_ma200_filter_flag) or is_above_ma200) and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0):
+            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20/60선 이격': f"{((ma20 / ma60) - 1) * 100:+.2f}%", '20일 모멘텀': f"{ret_20:+.2f}%", '진단 근거': "장기 추세선 방어 및 골든크로스 안착"})
     return pd.DataFrame(results)
 
 @st.cache_data(ttl=3600)
@@ -212,12 +215,13 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
     except: return pd.DataFrame()
     for _, row in candidates.iterrows():
         res = fetch_stock_status(row['Code'])
-        if res[0] is None: continue
-        dist_ma20 = ((res[0] / res[3]) - 1) * 100
-        is_dip = ((-5.0 <= dist_ma20 <= 3.0) or ((res[11] <= res[3] * 1.01) and (res[0] >= res[3] * 0.95)))
-        if res[10] and is_dip and ((not use_ma200_filter_flag) or res[9]) and (res[4] >= -30.0) and (res[8] and res[7] > -3.0):
-            score = (res[12] / 100.0) * 0.4 + (res[6] * 0.3) + (res[7] * 0.3)
-            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{res[0]:,.0f} 원", '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{res[12]:,.0f}%", 'AI 스코어': round(score, 2), '_score_num': score})
+        if res is None: continue
+        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = res
+        dist_ma20 = ((c_price / ma20) - 1) * 100
+        is_dip = ((-5.0 <= dist_ma20 <= 3.0) or ((current_low <= ma20 * 1.01) and (c_price >= ma20 * 0.95)))
+        if vol_surged and is_dip and ((not use_ma200_filter_flag) or is_above_ma200) and (drawdown >= -30.0) and (ma60_slope_positive and ret_20 > -3.0):
+            score = (recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3)
+            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{recent_vol_max:,.0f}%", 'AI 스코어': round(score, 2), '_score_num': score})
     if not results: return pd.DataFrame()
     return pd.DataFrame(results).sort_values('_score_num', ascending=False).head(top_n).drop(columns=['_score_num'])
 
@@ -661,8 +665,21 @@ with tab1:
     else:
         current_strategy, total_cash = p_data.get('strategy', '대형주 (Core)'), p_data.get('cash', 10000000)
         
-        if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True): 
-            st.session_state.show_scanner = True
+        col_s1, col_s2 = st.columns([8, 2])
+        with col_s1:
+            if st.button("🚀 실시간 AI 타점 스캐너 가동 (신규 발굴)", type="primary", use_container_width=True): 
+                st.session_state.show_scanner = True
+        with col_s2:
+            if st.button("🧹 퇴출 권장 종목 일괄 삭제", type="secondary", use_container_width=True):
+                # 퇴출로 분류된 종목만 필터링하여 삭제
+                if 'last_eval_actions' in st.session_state:
+                    to_remove = [t for t, a in st.session_state.last_eval_actions.items() if "퇴출" in a]
+                    if to_remove:
+                        p_data['stocks'] = [s for s in p_data['stocks'] if s['티커'] not in to_remove]
+                        save_portfolio_to_sheets(selected_port, p_data)
+                        st.success(f"{len(to_remove)}개의 종목이 정리되었습니다!")
+                        st.rerun()
+                    else: st.info("현재 퇴출 대상 종목이 없습니다.")
 
         if st.session_state.show_scanner:
             with st.spinner("AI 퀀트 필터 검색 중..."):
@@ -723,6 +740,7 @@ with tab1:
         else: st.caption("📡 **KIS API 미연결:** Yahoo Finance 지연 데이터(약 15분)를 기반으로 진단합니다.")
             
         display_records = []
+        eval_actions_cache = {}
         buf = whipsaw_buffer / 100.0
         
         with st.spinner("AI 퀀트 엔진 실시간 데이터 연동 및 통합 표 생성 중..."):
@@ -730,31 +748,44 @@ with tab1:
                 ticker = row.get('티커', '')
                 
                 c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else None
-                if not c_price:
-                    try: 
-                        yf_df = yf.download(f"{ticker}.KS", period="1d", progress=False)
-                        if yf_df.empty: yf_df = yf.download(f"{ticker}.KQ", period="1d", progress=False)
-                        if not yf_df.empty: c_price = float(yf_df['Close'].iloc[-1])
-                    except: c_price = 0
+                res = fetch_stock_status(ticker)
                 
-                res = fetch_stock_status(ticker, live_price=c_price)
                 action, tech_text = "분석 불가", "-"
                 
                 if res and res[0] is not None:
-                    _, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, _, current_low, _ = res
+                    yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, _, vol_surged, yf_low, _ = res
+                    if not c_price or c_price == 0: c_price = yf_price
+                    
+                    is_above_ma200 = c_price >= ma200
+                    current_low = min(yf_low, c_price)
                     dist_ma20 = ((c_price / ma20) - 1) * 100
-                    tech_text = f"20/60선 이격 {((ma20 / ma60) - 1) * 100:+.2f}%" if current_strategy == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
+                    diff_ma = ((ma20 / ma60) - 1) * 100
+                    tech_text = f"20/60선 이격 {diff_ma:+.2f}%" if current_strategy == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
                     
                     ma200_cond = is_above_ma200 if use_ma200_filter else True
 
                     if current_strategy == '대형주 (Core)':
                         entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
-                        action = "🟢 적극 신규 진입 권장" if entry_cond else "🟡 관망 (타점 대기)"
+                        exit_cond_trend = (ma20 < ma60 * (1 - buf/2))
+                        
+                        if exit_cond_trend or (use_ma200_filter and not is_above_ma200):
+                            action = "🔴 퇴출(삭제) 권장 (추세 붕괴)"
+                        elif entry_cond:
+                            action = "🟢 적극 신규 진입 권장"
+                        else:
+                            action = "🟡 관망 (타점 대기)"
                     else:
                         is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
-                        entry_cond = (ma200_cond and ((is_dip and res[10]) or vix_contrarian) and drawdown >= -30.0)
-                        action = "🟢 적극 신규 진입 권장" if entry_cond else "🟡 관망 (타점 대기)"
+                        entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
+                        
+                        if not vol_surged or drawdown < -30.0 or (use_ma200_filter and not is_above_ma200):
+                            action = "🔴 퇴출(삭제) 권장 (수급/추세 상실)"
+                        elif entry_cond:
+                            action = "🟢 적극 신규 진입 권장"
+                        else:
+                            action = "🟡 관망 (타점 대기)"
 
+                eval_actions_cache[ticker] = action
                 display_records.append({
                     '종목명': row.get('종목명'), 
                     '티커': ticker, 
@@ -763,6 +794,7 @@ with tab1:
                     '📊 판단 근거': tech_text
                 })
                 
+        st.session_state.last_eval_actions = eval_actions_cache
         display_df = pd.DataFrame(display_records)
         if display_df.empty: display_df = pd.DataFrame(columns=['종목명', '티커', '실시간 현재가', '🤖 AI 액션 플랜', '📊 판단 근거'])
 
@@ -776,7 +808,7 @@ with tab1:
         
         edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}", column_config=col_config)
         
-        if st.button("💾 관심종목 리스트 저장", type="primary"):
+        if st.button("💾 관심종목 리스트 수동 저장", type="primary"):
             save_df = edited_df[['종목명', '티커']].copy()
             save_df['매수단가'] = 0 
             save_df['보유수량'] = 0
@@ -834,7 +866,10 @@ with tab2:
                         live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
                         if live_c_price == 0: continue
                             
-                        _, _, ma60, ma20, _, _, _, _, _, _, _, _, _ = fetch_stock_status(row['티커'], live_price=live_c_price)
+                        res = fetch_stock_status(row['티커'])
+                        if not res or res[0] is None: continue
+                        
+                        yf_price, ma200, ma60, ma20, _, _, _, _, _, _, _, _, _ = res
 
                         user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                         diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0
@@ -947,7 +982,6 @@ with tab3:
                             ai_data = ai_summary.get(name)
                             rl_data = real_summary.get(name)
 
-                            # 1. AI 데이터 파싱 (숫자 표기)
                             if ai_data:
                                 ai_qty_str = ai_data['최종 보유 주수'].replace(' 주', '').strip()
                                 try: ai_qty_num = int(float(ai_qty_str.replace(',', '')))
@@ -963,7 +997,6 @@ with tab3:
                                 ai_trades = "매수 0회 / 매도 0회"
                                 ai_display = "0원 (0.00%)"
 
-                            # 2. 실계좌 데이터 파싱 (숫자 표기)
                             if rl_data:
                                 rl_qty_str = str(rl_data.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
                                 try: rl_qty_num = int(rl_qty_str)
@@ -1031,7 +1064,7 @@ with tab3:
 
 with tab4:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.20)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.21)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1058,8 +1091,8 @@ with tab4:
         3.  **단기 모멘텀:** 20일 전 주가 대비 현재 주가가 상승 (단기 수익률 > 0%).
         4.  **골든크로스 안착:** 20일 이동평균선이 60일선을 상향 돌파하고, 휩소 방지 버퍼(기본 `1.5%`) 이상 격차를 벌린 확실한 추세 형성 구간. `[MA20 >= MA60 * (1 + 0.015)]`
         5.  **시장 안정:** VIX(공포지수)가 30 미만으로 시장이 패닉 상태가 아닐 것.
-    *   **🔴 AI 이탈(매도) 조건:**
-        1.  **추세 붕괴 (Dead Cross):** 20일 이동평균선이 60일 이동평균선을 하향 이탈하려는 징후 발생 시 전량 기계적 매도. `[MA20 < MA60 * (1 - 0.0075)]`
+    *   **🔴 AI 이탈(매도/퇴출) 조건:**
+        1.  **추세 붕괴 (Dead Cross):** 20일 이동평균선이 60일 이동평균선을 하향 이탈하려는 징후 발생 시 전량 기계적 매도 및 관심종목 퇴출. `[MA20 < MA60 * (1 - 0.0075)]`
     
     ### 🚀 [전략 B] 중소형주 (Satellite) - 스마트 수급 눌림목
     시장에 강력한 테마가 형성되어 돈이 몰린 주도주를 필터링하고, 해당 종목이 단기 조정을 받을 때(눌림목) 진입하여 기술적 반등을 노립니다.
@@ -1070,8 +1103,8 @@ with tab4:
         2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
         3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)에 위치하거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
         4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 것 (심각한 악재로 인한 폭락 방지).
-    *   **🔴 AI 이탈(매도/손절) 조건:**
-        1.  **추세 붕괴:** 대형주와 동일하게 20일선이 60일선을 이탈 시 전량 매도.
+    *   **🔴 AI 이탈(매도/손절/퇴출) 조건:**
+        1.  **추세/수급 붕괴:** 대형주와 동일하게 20일선이 60일선을 이탈하거나, 수급 폭발 이력이 소멸되면 전량 매도 및 관심종목 퇴출.
         2.  **강제 손절 컷 (Stop Loss):** 매수 단가 대비 수익률이 **`-12%`** (사용자 설정 가능) 도달 시, 지표와 무관하게 즉각적인 기계적 손절 집행.
     
     ---
