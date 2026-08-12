@@ -219,7 +219,7 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
         is_dip = ((-5.0 <= dist_ma20 <= 3.0) or ((current_low <= ma20 * 1.01) and (c_price >= ma20 * 0.95)))
         if vol_surged and is_dip and ((not use_ma200_filter_flag) or is_above_ma200) and (drawdown >= -30.0) and (ma60_slope_positive and ret_20 > -3.0):
             score = (recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3)
-            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{recent_vol_max:,.0f}%", 'AI 스코어': round(score, 2), '_score_num': score})
+            results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{res[12]:,.0f}%", 'AI 스코어': round(score, 2), '_score_num': score})
     if not results: return pd.DataFrame()
     return pd.DataFrame(results).sort_values('_score_num', ascending=False).head(top_n).drop(columns=['_score_num'])
 
@@ -863,6 +863,12 @@ with tab2:
                         live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
                         if live_c_price == 0: continue
                             
+                        # [V2.24 추가] 보유수량 및 수익금 계산 추가
+                        qty_str = str(row.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
+                        try: qty_num = int(float(qty_str))
+                        except: qty_num = 0
+                        profit_amt = (live_c_price - buy_price) * qty_num
+
                         res = fetch_stock_status(row['티커'])
                         if not res or res[0] is None: continue
                         
@@ -876,7 +882,6 @@ with tab2:
                         ma200_cond = is_above_ma200 if use_ma200_filter else True
                         current_low = min(yf_low, live_c_price)
 
-                        # [V2.23 핵심] 실계좌 내 '추가 매수' 판단 및 '판단 근거' 고도화
                         if active_strat == '대형주 (Core)': 
                             entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
                             
@@ -887,7 +892,7 @@ with tab2:
                                 action = "🔴 전량 매도 (추세 이탈)"
                                 reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
                             elif entry_cond:
-                                action = "🟢 추가 매수 권장 (불타기)"
+                                action = "🟢 추가 매수 권장 (비중 확대)"
                                 reason = f"현재 신규 진입(매수) 타점 조건과 일치함 (현재 이격 {diff_ma:+.2f}%)"
                             else: 
                                 action = "🟡 보유 유지 (관망)"
@@ -912,9 +917,13 @@ with tab2:
                                 action = "🟡 보유 유지 (관망)"
                                 reason = f"손절선 방어 및 추세 유지 중이나 추가 매수 타점은 아님 (현재 수익률 {user_ret:+.2f}%)"
 
+                        # [V2.24 핵심] 테이블 컬럼 확장
                         live_results.append({
                             '보유 종목명': row['종목명'], 
-                            '한투 실시간 현재가': f"{live_c_price:,.0f} 원", 
+                            '보유수량': f"{qty_num:,} 주",
+                            '매수평균가': f"{buy_price:,.0f} 원",
+                            '실시간 현재가': f"{live_c_price:,.0f} 원", 
+                            '평가손익': f"{profit_amt:+,.0f} 원",
                             '수익률': f"{user_ret:+.2f}%", 
                             '🤖 실계좌 전용 액션 플랜': action,
                             '📊 판단 근거 (알고리즘 조건 상태)': reason
@@ -1077,7 +1086,7 @@ with tab3:
 
 with tab4:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.21)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.24)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
