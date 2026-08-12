@@ -189,7 +189,7 @@ def fetch_stock_status(ticker_code):
                 
                 return (yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, (ma60 > ma60_10d_ago), (yf_price >= ma200), recent_20d_vol_max >= 200.0, yf_low, recent_20d_vol_max)
     except: pass
-    return None
+    return None, None, None, None, None, None, None, None, False, False, False, None, 0.0
 
 @st.cache_data(ttl=3600)
 def run_core_scanner(use_ma200_filter_flag, buf_pct):
@@ -479,7 +479,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     summary_rows.append({
         '종목명': '💡 [전체 합계]', '최종 보유 주수': '-', '기말 평가금': f"{sum_hval:,.0f} 원",
         '총 순수익 (원)': f"{sum_prof:+,.0f} 원 (자산대비 {(sum_prof/init_cash)*100 if init_cash>0 else 0:+.2f}%)",
-        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {sum_scnt}회",
+        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {s_cnt}회",
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
@@ -670,7 +670,7 @@ with tab1:
         with col_s2:
             if st.button("🧹 퇴출 권장 종목 일괄 삭제", type="secondary", use_container_width=True):
                 if 'last_eval_actions' in st.session_state:
-                    to_remove = [t for t, a in st.session_state.last_eval_actions.items() if "퇴출" in a]
+                    to_remove = [t for t, a in st.session_state.last_eval_actions.items() if "유니버스 제외" in a]
                     if to_remove:
                         p_data['stocks'] = [s for s in p_data['stocks'] if s['티커'] not in to_remove]
                         save_portfolio_to_sheets(selected_port, p_data)
@@ -747,7 +747,7 @@ with tab1:
                 c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else None
                 res = fetch_stock_status(ticker)
                 
-                action, tech_text = "분석 불가", "-"
+                action, tech_text, easy_desc = "분석 불가", "-", "데이터를 불러오지 못했습니다."
                 
                 if res and res[0] is not None:
                     yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, _, vol_surged, yf_low, _ = res
@@ -766,21 +766,27 @@ with tab1:
                         exit_cond_trend = (ma20 < ma60 * (1 - buf/2))
                         
                         if exit_cond_trend or (use_ma200_filter and not is_above_ma200):
-                            action = "🔴 퇴출(삭제) 권장 (추세 붕괴)"
+                            action = "🔴 유니버스 제외 (추세 붕괴)"
+                            easy_desc = "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
                         elif entry_cond:
-                            action = "🟢 적극 신규 진입 권장"
+                            action = "🟢 매수 시그널 발생"
+                            easy_desc = "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
                         else:
-                            action = "🟡 관망 (타점 대기)"
+                            action = "🟡 모니터링 유지"
+                            easy_desc = "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
                     else:
                         is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
                         entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
                         
                         if not vol_surged or drawdown < -30.0 or (use_ma200_filter and not is_above_ma200):
-                            action = "🔴 퇴출(삭제) 권장 (수급/추세 상실)"
+                            action = "🔴 유니버스 제외 (수급/추세 상실)"
+                            easy_desc = "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
                         elif entry_cond:
-                            action = "🟢 적극 신규 진입 권장"
+                            action = "🟢 매수 시그널 발생"
+                            easy_desc = "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
                         else:
-                            action = "🟡 관망 (타점 대기)"
+                            action = "🟡 모니터링 유지"
+                            easy_desc = "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
 
                 eval_actions_cache[ticker] = action
                 display_records.append({
@@ -788,19 +794,21 @@ with tab1:
                     '티커': ticker, 
                     '실시간 현재가': c_price, 
                     '🤖 AI 액션 플랜': action, 
-                    '📊 판단 근거': tech_text
+                    '📊 판단 근거': tech_text,
+                    '💡 시스템 액션 가이드': easy_desc
                 })
                 
         st.session_state.last_eval_actions = eval_actions_cache
         display_df = pd.DataFrame(display_records)
-        if display_df.empty: display_df = pd.DataFrame(columns=['종목명', '티커', '실시간 현재가', '🤖 AI 액션 플랜', '📊 판단 근거'])
+        if display_df.empty: display_df = pd.DataFrame(columns=['종목명', '티커', '실시간 현재가', '🤖 AI 액션 플랜', '📊 판단 근거', '💡 시스템 액션 가이드'])
 
         col_config = {
             "종목명": st.column_config.TextColumn("종목명 (수정가능)"),
             "티커": st.column_config.TextColumn("티커 (수정가능)"),
             "실시간 현재가": st.column_config.NumberColumn("🟢 현재가 (조회용)", format="%d", disabled=True),
             "🤖 AI 액션 플랜": st.column_config.TextColumn("🤖 AI 액션 플랜", disabled=True),
-            "📊 판단 근거": st.column_config.TextColumn("📊 판단 근거", disabled=True)
+            "📊 판단 근거": st.column_config.TextColumn("📊 판단 근거", disabled=True),
+            "💡 시스템 액션 가이드": st.column_config.TextColumn("💡 시스템 액션 가이드", disabled=True)
         }
         
         edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}", column_config=col_config)
@@ -826,7 +834,7 @@ with tab1:
                 if curr_action != r_dict.get('last_action', "기록없음"):
                     p_data['stocks'][idx]['last_action'] = curr_action 
                     needs_save = True
-                    if "관망" not in curr_action and "보류" not in curr_action:
+                    if "모니터링 유지" not in curr_action:
                         changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
             
             if changed_msgs:
@@ -840,7 +848,6 @@ with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
     st.markdown("한국투자증권에 실제로 매수(보유) 중인 종목만 이곳에 표시되며, AI가 매도/손절 타점을 집중 감시합니다.")
     
-    # [V2.26 핵심] 성과 측정 기준일 설정 연동
     real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
     try: real_base_date = pd.to_datetime(real_base_date_str).date()
     except: real_base_date = datetime.date(2024, 1, 1)
@@ -867,7 +874,6 @@ with tab2:
             real_total_eval = kis_data.get('total_eval', 0)
             real_stocks_df = pd.DataFrame(kis_data['stocks'])
             
-            # 기준일 대비 실제 계좌 누적 손익 및 수익률 계산
             real_tot_pnl = real_total_eval - real_base_principal
             real_ret_pct = (real_tot_pnl / real_base_principal * 100) if real_base_principal > 0 else 0
             
@@ -910,40 +916,50 @@ with tab2:
                         ma200_cond = is_above_ma200 if use_ma200_filter else True
                         current_low = min(yf_low, live_c_price)
 
+                        easy_desc = "-"
                         if active_strat == '대형주 (Core)': 
                             entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
                             
                             if user_ret >= ts_target_pct: 
-                                action = "🔵 목표수익 도달 (트레일링 스탑 감시)"
-                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 대기"
+                                action = "🔵 트레일링 스탑 가동"
+                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
+                                easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
-                                action = "🔴 전량 매도 (추세 이탈)"
+                                action = "🔴 전량 청산 (추세 이탈)"
                                 reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
+                                easy_desc = "[전량 청산] 핵심 추세선 이탈(Dead Cross)로 인한 하방 리스크가 확대되었습니다. 전량 매도를 통한 현금 확보를 집행하십시오."
                             elif entry_cond:
-                                action = "🟢 추가 매수 권장 (비중 확대)"
-                                reason = f"현재 신규 진입(매수) 타점 조건과 일치함 (현재 이격 {diff_ma:+.2f}%)"
+                                action = "🟢 비중 확대 유효"
+                                reason = f"신규 진입(매수) 타점 조건 충족 (현재 이격 {diff_ma:+.2f}%)"
+                                easy_desc = "[비중 확대 유효] 현재 가격대에서 신규 진입 로직과 동일한 강세 시그널이 지속되고 있습니다. 포지션 규모(비중) 확대를 고려해볼 수 있습니다."
                             else: 
-                                action = "🟡 보유 유지 (관망)"
-                                reason = f"추세는 방어 중이나 신규 매수 타점은 아님 (현재 이격 {diff_ma:+.2f}%)"
+                                action = "🟡 포지션 홀딩"
+                                reason = f"추세 방어 및 지지선 이탈 없음 (현재 이격 {diff_ma:+.2f}%)"
+                                easy_desc = "[포지션 홀딩] 상승 추세 및 지지선 방어가 안정적으로 이루어지고 있습니다. 현재의 비중 유지를 권장합니다."
                         else:
                             is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
                             entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
 
                             if user_ret <= sat_stop_loss: 
-                                action = "🔴 강제 손절 집행"
+                                action = "🔴 손절 매도 집행"
                                 reason = f"손절 기준선({sat_stop_loss}%) 이하 하락 (현재 {user_ret:+.2f}%)"
+                                easy_desc = "[손절 매도] 사전 설정된 최대 허용 손실폭(Stop-loss) 한도에 도달했습니다. 자산 보호를 위해 기계적인 강제 청산을 집행하십시오."
                             elif user_ret >= ts_target_pct: 
-                                action = "🔵 목표수익 도달 (트레일링 스탑 감시)"
-                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 대기"
+                                action = "🔵 트레일링 스탑 가동"
+                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
+                                easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
-                                action = "🔴 전량 매도 (추세 이탈)"
+                                action = "🔴 전량 청산 (추세 이탈)"
                                 reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
+                                easy_desc = "[전량 청산] 핵심 추세선 이탈(Dead Cross)로 인한 하방 리스크가 확대되었습니다. 전량 매도를 통한 현금 확보를 집행하십시오."
                             elif entry_cond:
-                                action = "🟢 추가 매수 권장 (비중 확대)"
-                                reason = f"수급 유입 후 20일선 완벽한 눌림목 지지 중 (현재 이격 {dist_ma20:+.2f}%)"
+                                action = "🟢 비중 확대 유효"
+                                reason = f"수급 유입 후 20일선 눌림목 지지 중 (현재 이격 {dist_ma20:+.2f}%)"
+                                easy_desc = "[비중 확대 유효] 현재 가격대에서 신규 진입 로직과 동일한 강세 시그널이 지속되고 있습니다. 포지션 규모(비중) 확대를 고려해볼 수 있습니다."
                             else: 
-                                action = "🟡 보유 유지 (관망)"
-                                reason = f"손절선 방어 및 추세 유지 중이나 추가 매수 타점은 아님 (현재 수익률 {user_ret:+.2f}%)"
+                                action = "🟡 포지션 홀딩"
+                                reason = f"손절선 이탈 없음 및 추세 유지 중 (현재 수익률 {user_ret:+.2f}%)"
+                                easy_desc = "[포지션 홀딩] 상승 추세 및 지지선 방어가 안정적으로 이루어지고 있습니다. 현재의 비중 유지를 권장합니다."
 
                         live_results.append({
                             '보유 종목명': row['종목명'], 
@@ -953,7 +969,8 @@ with tab2:
                             '평가손익': f"{profit_amt:+,.0f} 원",
                             '수익률': f"{user_ret:+.2f}%", 
                             '🤖 실계좌 전용 액션 플랜': action,
-                            '📊 판단 근거 (알고리즘 조건 상태)': reason
+                            '📊 판단 근거': reason,
+                            '💡 시스템 액션 가이드': easy_desc
                         })
                     
                     st.table(pd.DataFrame(live_results))
@@ -965,7 +982,7 @@ with tab2:
                             s_name, curr_action = r['보유 종목명'], r['🤖 실계좌 전용 액션 플랜']
                             if curr_action != p_data['real_last_actions'].get(s_name, "기록없음"):
                                 p_data['real_last_actions'][s_name], needs_save = curr_action, True
-                                if "관망" not in curr_action: changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
+                                if "포지션 홀딩" not in curr_action: changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
                         if changed_msgs:
                             send_telegram_message(f"🚨 *[실전계좌] 긴급 시그널!*\n" + "\n".join(changed_msgs))
                             st.toast("실계좌 오토파일럿 알림 발송 완료!")
@@ -982,7 +999,6 @@ with tab3:
         current_strategy = p_data.get('strategy', '대형주 (Core)')
         total_cash = p_data.get('cash', 10000000)
         
-        # [V2.26 핵심] 시뮬레이션 시작일을 새롭게 설정된 실전 계좌 기준일과 동기화
         real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01'))
         try: created_date = pd.to_datetime(real_base_date_str).date()
         except: created_date = datetime.date(2024, 1, 1)
@@ -1008,7 +1024,6 @@ with tab3:
                 st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner(f"{created_date} 부터 현재까지 AI 시뮬레이션 중..."):
-                    # 시뮬레이션 초기 원금을 기준일 당시 투입 원금으로 맞추어 1:1 완벽 비교
                     fw_result = run_quant_simulation(stocks_df, current_strategy, real_base_principal, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     
                     if fw_result:
@@ -1116,7 +1131,7 @@ with tab3:
 
 with tab4:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.26)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.28)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
