@@ -223,14 +223,17 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
 
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days):
+    if sim_stocks.empty: return None
+    
     index_sym = 'KS11' if strat == '대형주 (Core)' else 'KQ11'
-    fetch_start = start_date - datetime.timedelta(days=300)
+    fetch_start = pd.to_datetime(start_date) - datetime.timedelta(days=300)
     market_df = pd.DataFrame()
     benchmark_ret_val, final_benchmark_asset = 0.0, init_cash
     
     try:
         bm_df = fdr.DataReader(index_sym, fetch_start, end_date)
         if not bm_df.empty:
+            bm_df = bm_df[~bm_df.index.duplicated(keep='first')] # [V2.13 핵심] 인덱스 중복 에러 차단
             if bm_df.index.tz is not None: bm_df.index = bm_df.index.tz_localize(None)
             bm_df['Bm_Ret_60'] = bm_df['Close'] / bm_df['Close'].shift(60) - 1
             bm_df['Bm_MA60'] = bm_df['Close'].rolling(60).mean()
@@ -246,7 +249,9 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     try:
         vix_df = yf.download("^VIX", start=fetch_start, end=end_date, progress=False)
         if not vix_df.empty:
+            vix_df = vix_df[~vix_df.index.duplicated(keep='first')] # [V2.13 핵심]
             if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
+            if vix_df.index.tz is not None: vix_df.index = vix_df.index.tz_localize(None)
             vix_df['VIX_MA3'] = vix_df['Close'].rolling(3).mean()
             market_df['VIX_Contrarian'] = (vix_df['Close'] >= 25.0) & (vix_df['Close'] < vix_df['VIX_MA3'])
             market_df['VIX_Safe'] = vix_df['Close'] < 30.0
@@ -258,11 +263,13 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     start_dt = pd.to_datetime(start_date)
     
     for idx, row in sim_stocks.iterrows():
-        ticker, name = row['티커'], row['종목명']
+        ticker, name = str(row.get('티커', '')), str(row.get('종목명', ''))
+        if not ticker: continue
         df = None
         for suf in ['.KS', '.KQ']:
             temp_df = yf.download(f"{ticker}{suf}", start=fetch_start, end=end_date, progress=False)
             if not temp_df.empty:
+                temp_df = temp_df[~temp_df.index.duplicated(keep='first')] # [V2.13 핵심]
                 if isinstance(temp_df.columns, pd.MultiIndex): temp_df.columns = temp_df.columns.get_level_values(0)
                 df = temp_df
                 break
@@ -335,7 +342,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         active_stocks, scores = [], {}
         for name, df in stock_dfs.items():
             if date_val not in df.index: continue
-            sig, c_price = df.loc[date_val, 'Signal'], df.loc[date_val, 'Close']
+            sig, c_price = df.loc[date_val, 'Signal'], float(df.loc[date_val, 'Close'])
             if shares[name] == 0 and date_val < cooldown_until[name]: sig = 0.0
             
             force_exit = trailing_stop_exit = False
@@ -358,13 +365,13 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             if curr_sig == 1 and prev_sig == 0: trade_stats[name]['buy'] += 1
             elif curr_sig == 0 and prev_sig == 1: trade_stats[name]['sell'] += 1
                 
-        total_asset = cash + sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
+        total_asset = cash + sum(shares[name] * float(stock_dfs[name].loc[date_val, 'Close']) for name in stock_dfs if date_val in stock_dfs[name].index)
         
         if active_stocks:
             total_score = sum(scores.values()) or len(active_stocks)
             for name in stock_dfs:
                 if date_val not in stock_dfs[name].index: continue
-                c_price = stock_dfs[name].loc[date_val, 'Close']
+                c_price = float(stock_dfs[name].loc[date_val, 'Close'])
                 if name in active_stocks:
                     target_alloc = min(total_asset * (scores.get(name, 1.0) / total_score), total_asset * current_max_alloc_ratio)
                     diff_val = target_alloc - (shares[name] * c_price)
@@ -401,7 +408,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         else:
             for name in stock_dfs:
                 if shares[name] > 0 and date_val in stock_dfs[name].index:
-                    c_price, proceeds = stock_dfs[name].loc[date_val, 'Close'], shares[name] * stock_dfs[name].loc[date_val, 'Close']
+                    c_price, proceeds = float(stock_dfs[name].loc[date_val, 'Close']), shares[name] * float(stock_dfs[name].loc[date_val, 'Close'])
                     fee, pnl = proceeds * 0.0025, shares[name] * (c_price - avg_buy_price[name]) - proceeds * 0.0025
                     if pnl < 0:
                         consecutive_losses[name] += 1
@@ -412,11 +419,11 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     trade_stats[name]['fee'] += fee
                     shares[name], avg_buy_price[name], peak_price_since_buy[name] = 0.0, 0.0, 0.0
                     
-        final_eval = sum(shares[name] * stock_dfs[name].loc[date_val, 'Close'] for name in stock_dfs if date_val in stock_dfs[name].index)
+        final_eval = sum(shares[name] * float(stock_dfs[name].loc[date_val, 'Close']) for name in stock_dfs if date_val in stock_dfs[name].index)
         portfolio_history.append(max(cash + final_eval, 0))
         
         record = {'Date': date_val, '현금(Cash)': max(cash, 0)}
-        for name in stock_dfs: record[name] = shares[name] * stock_dfs[name].loc[date_val, 'Close'] if date_val in stock_dfs[name].index else 0.0
+        for name in stock_dfs: record[name] = shares[name] * float(stock_dfs[name].loc[date_val, 'Close']) if date_val in stock_dfs[name].index else 0.0
         history_records.append(record)
         
     ai_portfolio_series = pd.Series(portfolio_history, index=common_index)
@@ -439,7 +446,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     final_asset = ai_portfolio_series.iloc[-1]
     
     for name in stock_dfs:
-        c_price = stock_dfs[name].loc[stock_dfs[name].index[-1], 'Close']
+        c_price = float(stock_dfs[name].loc[stock_dfs[name].index[-1], 'Close'])
         h_val, upnl = shares[name] * c_price, shares[name] * (c_price - avg_buy_price[name]) if shares[name] > 0 else 0.0
         t_prof = realized_pnl[name] + upnl
         inv_base = max_invested[name] if max_invested[name] > 0 else (init_cash / len(stock_dfs))
@@ -598,6 +605,7 @@ with st.sidebar.expander("🧪 시뮬레이션 전용 상세 설정"):
 # ==========================================
 real_holdings_tickers = []
 kis_token_global = None
+cache_key = "kis_global_cache_None_None"
 
 if SYS_APP_KEY:
     kis_token_global = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK)
@@ -607,8 +615,10 @@ if SYS_APP_KEY:
         if kis_token_global:
             holdings, summary = fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
             if holdings is not None and summary is not None:
+                tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
+                tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0)) # [V2.13 핵심] 포워드 테스트 비교용 실계좌 누적 수익
                 imported = [{'종목명': i.get('prdt_name'), '티커': i.get('pdno'), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
-                st.session_state[cache_key] = {'total_eval': float(summary[0].get('tot_evlu_amt', 0)) if summary else 0, 'stocks': imported}
+                st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'stocks': imported}
 
     kis_data = st.session_state.get(cache_key)
     if kis_data:
@@ -657,7 +667,6 @@ with tab1:
                             *   **🏆 AI 스코어링:** 최근 거래량 급증 크기(40%) + 60일 모멘텀(30%) + 20일 모멘텀(30%) 점수를 합산하여 가장 타점이 좋은 상위 5개 종목 추천
                             """)
                     
-                    # [V2.12 핵심 변경] 실계좌와 관심종목 리스트를 각각 구분하여 상태 파악
                     current_watchlist_tickers = [str(s.get('티커')).strip() for s in p_data.get('stocks', [])]
                     
                     for _, row in scan_result.iterrows():
@@ -666,14 +675,8 @@ with tab1:
                         c2.write(f"현재가: {row['현재가']}")
                         
                         ticker_str = str(row['티커']).strip()
-                        
-                        # 1. KIS 실계좌에 이미 보유 중인 경우
-                        if ticker_str in real_holdings_tickers:
-                            c3.button("🔌 실계좌 보유", key=f"add_{row['티커']}", disabled=True)
-                        # 2. 실계좌엔 없지만 관심종목 탭(1)에 이미 담아둔 경우
-                        elif ticker_str in current_watchlist_tickers:
-                            c3.button("📝 관심종목", key=f"add_{row['티커']}", disabled=True)
-                        # 3. 둘 다 없는 순수 신규 발굴 종목인 경우
+                        if ticker_str in real_holdings_tickers: c3.button("🔌 실계좌 보유", key=f"add_{row['티커']}", disabled=True)
+                        elif ticker_str in current_watchlist_tickers: c3.button("📝 관심종목", key=f"add_{row['티커']}", disabled=True)
                         else:
                             if c3.button("➕ 담기", key=f"add_{row['티커']}"):
                                 p_data['stocks'].append({'종목명': row['종목명'], '티커': row['티커'], '매수단가': 0, '보유수량': 0})
@@ -831,25 +834,72 @@ with tab2:
 
 with tab3:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
-    if not p_data or not selected_port: st.warning("포트폴리오가 없습니다.")
+    if not p_data or not selected_port: 
+        st.warning("포트폴리오가 없습니다.")
     else:
-        stocks_df, current_strategy, total_cash = pd.DataFrame(p_data.get('stocks', [])), p_data.get('strategy', '대형주 (Core)'), p_data.get('cash', 10000000)
+        stocks_df = pd.DataFrame(p_data.get('stocks', []))
+        current_strategy = p_data.get('strategy', '대형주 (Core)')
+        total_cash = p_data.get('cash', 10000000)
+        created_at_str = p_data.get('created_at', '2024-01-01') # 기본값 설정
         
-        st.subheader("📊 AI 전략 유니버스 장기 초과수익 검증 (Backtest)")
-        st.caption("※ 좌측 사이드바의 '시뮬레이션 전용 상세 설정' 메뉴에서 리스크 및 자금 배분 옵션을 조절할 수 있습니다.")
+        try: created_date = pd.to_datetime(created_at_str).date()
+        except: created_date = datetime.date(2024, 1, 1)
+        today_date = datetime.date.today()
+
+        # [V2.13 복구] 포워드 테스트 (이론 vs 실제 비교)
+        st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
+        st.markdown(f"포트폴리오 생성일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 성적**과, 고객님의 **실제 계좌 성적**을 나란히 비교합니다.")
+
+        fw_col1, fw_col2 = st.columns(2)
+
+        with fw_col1:
+            st.markdown("### 📈 AI 포워드 테스트 (이론)")
+            if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
+                if stocks_df.empty: 
+                    st.error("관심종목 리스트에 종목이 없습니다.")
+                else:
+                    with st.spinner(f"{created_date} 부터 현재까지 AI 시뮬레이션 중..."):
+                        fw_result = run_quant_simulation(stocks_df, current_strategy, total_cash, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                        if fw_result:
+                            fw_profit = fw_result['final_asset'] - total_cash
+                            st.metric("AI 시뮬레이션 기말 자산", f"{fw_result['final_asset']:,.0f} 원", f"{fw_result['final_port_ret']:+.2f}%")
+                            st.caption(f"이론 누적 순수익: {fw_profit:+,.0f} 원")
+                        else:
+                            st.warning("데이터가 부족하여 기간 내 시뮬레이션을 완료할 수 없습니다.")
+
+        with fw_col2:
+            st.markdown("### 🔌 나의 실전 계좌 (실제)")
+            kis_data = st.session_state.get(cache_key)
+            if kis_data and SYS_APP_KEY:
+                real_tot_eval = kis_data.get('total_eval', 0)
+                real_tot_pnl = kis_data.get('total_pnl', 0)
+                real_principal = real_tot_eval - real_tot_pnl
+                real_ret_pct = (real_tot_pnl / real_principal * 100) if real_principal > 0 else 0
+                
+                st.metric("실계좌 현재 평가 자산", f"{real_tot_eval:,.0f} 원", f"{real_ret_pct:+.2f}%")
+                st.caption(f"현재 총 평가손익: {real_tot_pnl:+,.0f} 원")
+            else:
+                st.info("좌측 사이드바에서 한국투자증권 API 연동을 완료해주세요.")
+
+        st.markdown("---")
+        
+        # [기존] 장기 백테스트 기능
+        st.subheader("📊 장기 초과수익 검증 (Long-Term Backtest)")
+        st.caption("※ 관심종목 유니버스를 바탕으로 수년 전부터 현재까지 장기 운용했을 때의 성과를 검증합니다.")
+        
         col_sim1, col_sim2 = st.columns(2)
         with col_sim1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1))
-        with col_sim2: end_date = st.date_input("종료일", datetime.date.today())
+        with col_sim2: end_date = st.date_input("종료일", today_date)
 
-        if st.button(f"🚀 '{selected_port}' 전략 기반 Backtest 실행", type="primary", use_container_width=True):
+        if st.button(f"🚀 장기 Backtest 실행", type="secondary", use_container_width=True):
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner(f"벤치마크 퀀트 백테스트 구동 중... (약 15초 소요)"):
                     bt_result = run_quant_simulation(stocks_df, current_strategy, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if bt_result:
-                        st.success(f"✅ 백테스트 실행 완료!")
+                        st.success(f"✅ 장기 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
-                        col_r1.metric(f"총 초기 자산", f"{total_cash:,.0f} 원")
+                        col_r1.metric(f"총 초기 투입 자산", f"{total_cash:,.0f} 원")
                         col_r2.metric(f"AI 초과수익 전략 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%")
                         
                         st.markdown("---")
