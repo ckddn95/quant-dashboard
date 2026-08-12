@@ -24,14 +24,13 @@ st.set_page_config(
     layout="wide"
 )
 
-# [보안] 대시보드 무단 접근 방지 로직
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
 if not st.session_state["authenticated"]:
     st.markdown("<h2 style='text-align: center;'>🔒 퀀트 대시보드 보안 인증</h2>", unsafe_allow_html=True)
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
-    correct_pwd = st.secrets.get("app_password", "0000") # secrets.toml에 app_password="비번" 지정 요망
+    correct_pwd = st.secrets.get("app_password", "0000") 
     
     if pwd:
         if pwd == correct_pwd:
@@ -45,13 +44,14 @@ st.title("Core-Satellite Independent Asset Allocation Quant System")
 st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **오토파일럿 무인 감시**, **실계좌 자동매매**, **시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
-# 텔레그램 메시지 발송 함수
+# 구글 시트 DB 및 텔레그램 연동
 # ==========================================
+SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
+
 def send_telegram_message(message):
     try:
         tg_token = st.secrets.get("telegram", {}).get("bot_token")
         tg_chat_id = st.secrets.get("telegram", {}).get("chat_id")
-        
         if not tg_token or not tg_chat_id: return False, "Secrets에 텔레그램 정보가 없습니다."
         url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
         payload = {"chat_id": tg_chat_id, "text": message, "parse_mode": "Markdown"}
@@ -60,11 +60,6 @@ def send_telegram_message(message):
         else: return False, f"API 오류: {res.text}"
     except Exception as e:
         return False, str(e)
-
-# ==========================================
-# 구글 스프레드시트 DB 연동 로직
-# ==========================================
-SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
 
 @st.cache_resource
 def get_gspread_client():
@@ -80,7 +75,6 @@ def load_all_portfolios_from_sheets():
         except:
             worksheet = sh.add_worksheet(title="Portfolios", rows=100, cols=2)
             worksheet.append_row(["Name", "JSON_Data"])
-            
         records = worksheet.get_all_records()
         port_dict = {}
         for r in records:
@@ -113,9 +107,8 @@ def delete_portfolio_from_sheets(name):
         st.error(f"구글 시트 삭제 오류: {e}")
 
 # ==========================================
-# 한국투자증권 Open API (조회 및 주문 엔진)
+# 한국투자증권 Open API 엔진 (캐시 최적화 적용)
 # ==========================================
-@st.cache_data(ttl=43200, show_spinner=False)
 def get_kis_access_token(app_key, app_secret, is_mock=True):
     if not app_key or not app_secret: return None
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
@@ -155,7 +148,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     return None, None
 
 def execute_kis_order(ticker, qty, price, order_type="BUY", is_market=False):
-    """안전 장치가 결합된 KIS API 주문 전송 엔진"""
     try:
         if int(qty) <= 0: return False, "주문 수량 오류 (수량 부족)"
         order_gubun = "01" if is_market else "00" 
@@ -188,7 +180,7 @@ def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0):
     return p_data
 
 # ==========================================
-# 데이터 수집 & 백테스트 함수 모음
+# 데이터 수집 & 스캐너 및 백테스트 함수
 # ==========================================
 @st.cache_data(ttl=86400)
 def load_krx_universe():
@@ -568,7 +560,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
 if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
 
 # ==========================================
-# 3. 사이드바: 포트폴리오 관리 및 세팅
+# 3. 사이드바: 포트폴리오 관리
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 
@@ -596,41 +588,6 @@ if port_names:
                 st.rerun()
 else: st.sidebar.info("👈 포트폴리오를 추가해 주세요.")
 
-# [한국투자증권 계좌 파싱 및 원금 역산 로직]
-SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
-if p_data:
-    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
-    kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
-    if kis_account_data:
-        SYS_APP_KEY = kis_account_data.get("app_key")
-        SYS_APP_SECRET = kis_account_data.get("app_secret")
-        SYS_CANO = str(kis_account_data.get("cano"))
-        SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
-        SYS_IS_MOCK = kis_account_data.get("is_mock", False)
-
-kis_token_global = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK) if SYS_APP_KEY else None
-cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
-
-kis_data = st.session_state.get(cache_key)
-default_invested = 1000000.0
-if kis_data and kis_data.get('total_eval', 0) > 0:
-    default_invested = kis_data.get('total_eval', 0) - kis_data.get('total_pnl', 0)
-
-real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
-try: real_base_date = pd.to_datetime(real_base_date_str).date()
-except: real_base_date = datetime.date(2024, 1, 1)
-
-if p_data:
-    if 'real_initial_capital' in p_data: real_initial_capital = float(p_data['real_initial_capital'])
-    elif 'real_base_principal' in p_data: real_initial_capital = float(p_data['real_base_principal'])
-    else: real_initial_capital = default_invested
-    real_net_cashflow = float(p_data.get('real_net_cashflow', 0.0))
-else:
-    real_initial_capital = default_invested
-    real_net_cashflow = 0.0
-
-total_invested_principal = real_initial_capital + real_net_cashflow
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 새 관심종목 포트폴리오 추가")
 new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (특수문자 제외)")
@@ -643,25 +600,51 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
             save_portfolio_to_sheets(safe_name, {'strategy': new_p_strat, 'cash': new_p_cash, 'stocks': [], 'created_at': datetime.date.today().strftime('%Y-%m-%d')})
             st.rerun()
 
+# ==========================================
+# [V4.0 핵심] 계좌 세팅 및 토큰 캐싱 로직
+# ==========================================
+SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
+if p_data:
+    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
+    kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
+    if kis_account_data:
+        SYS_APP_KEY = kis_account_data.get("app_key")
+        SYS_APP_SECRET = kis_account_data.get("app_secret")
+        SYS_CANO = str(kis_account_data.get("cano"))
+        SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
+        SYS_IS_MOCK = kis_account_data.get("is_mock", False)
+
 st.sidebar.markdown("---")
 st.sidebar.header("🔌 한국투자증권 실계좌 연동")
 if SYS_APP_KEY and kis_account_data:
-    st.sidebar.success(f"✅ **{kis_account_data.get('name', f'{active_strat} 계좌')}** 자동 매칭됨")
+    st.sidebar.success(f"✅ **{kis_account_data.get('name', f'{active_strat} 계좌')}** 연동됨")
 else: st.sidebar.warning(f"🔑 **KIS API 미연동**")
 
+kis_token_global = None
+if SYS_APP_KEY and SYS_APP_SECRET and p_data:
+    current_time = time.time()
+    token_key = f"kis_token_{SYS_APP_KEY[-6:]}"
+    time_key = f"kis_time_{SYS_APP_KEY[-6:]}"
+    kis_token_global = p_data.get(token_key)
+    token_time = p_data.get(time_key, 0)
+    
+    if not kis_token_global or (current_time - token_time) > 40000:
+        new_token = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK)
+        if new_token:
+            kis_token_global = new_token
+            p_data[token_key] = new_token
+            p_data[time_key] = current_time
+            save_portfolio_to_sheets(selected_port, p_data)
+
+cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
+kis_data = st.session_state.get(cache_key)
+
 # ==========================================
-# 텔레그램 연동 상태, 오토파일럿 및 킬 스위치 탑재
+# [V4.0 핵심] 사이드바 설정 DB 동기화
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("📱 텔레그램 알림 봇 연동")
 tg_token, tg_chat_id = st.secrets.get("telegram", {}).get("bot_token", ""), st.secrets.get("telegram", {}).get("chat_id", "")
-
-try: init_ap = st.query_params.get("autopilot", "false").lower() == "true"; init_min = int(st.query_params.get("ap_min", "10"))
-except:
-    try: params = st.experimental_get_query_params(); init_ap = params.get("autopilot", ["false"])[0].lower() == "true"; init_min = int(params.get("ap_min", ["10"])[0])
-    except: init_ap, init_min = False, 10
-
-auto_pilot = False 
 
 if tg_token and tg_chat_id:
     st.sidebar.success("✅ 텔레그램 봇 연동 완료")
@@ -673,45 +656,54 @@ if tg_token and tg_chat_id:
     st.sidebar.markdown("---")
     st.sidebar.subheader("🚨 긴급 제어 및 오토파일럿")
     
-    kill_switch = st.sidebar.toggle(
-        "🚨 긴급 정지 (KILL SWITCH)", 
-        value=False, 
-        help="[시스템 비상 차단 장치] 예상치 못한 프로그램 오류나 급격한 시장 변동성 발생 시, 모든 신규 매수 및 매도 주문 전송 루프를 1초 만에 즉시 중단시킵니다."
-    )
-    
-    auto_trade_enabled = st.sidebar.toggle(
-        "🚀 실전 자동주문 활성화", 
-        value=False, 
-        help="[실계좌 연동 자동매매 모드] AI 퀀트 엔진의 시그널에 따라 KIS API로 실제 매수·매도 주문을 계좌에 자동으로 집행합니다."
-    )
-    
-    auto_pilot = st.sidebar.toggle(
-        "🔄 오토파일럿 켜기 (Auto-Refresh)", 
-        value=init_ap, 
-        key='auto_pilot_toggle', 
-        help="[무인 백그라운드 감시 체제] 설정된 주기마다 시스템이 자동으로 데이터를 스크래핑하여 감지하고 스마트 푸시를 발송합니다."
-    )
-    
-    if kill_switch:
-        st.sidebar.error("⚠️ 킬 스위치 작동 중! 모든 자동 매매 로직이 정지되었습니다.")
+    if p_data:
+        ks_key = f"ks_{selected_port}"
+        at_key = f"at_{selected_port}"
+        ap_key = f"ap_{selected_port}"
         
-    if auto_pilot != init_ap:
-        try: st.query_params["autopilot"] = str(auto_pilot).lower()
-        except: st.experimental_set_query_params(autopilot=str(auto_pilot).lower(), ap_min=str(init_min))
-        st.rerun()
-    
-    if auto_pilot:
-        check_min = st.sidebar.number_input("감시 주기 (분)", min_value=1, max_value=60, value=init_min)
-        if check_min != init_min:
-            try: st.query_params["ap_min"] = str(check_min)
-            except: st.experimental_set_query_params(autopilot="true", ap_min=str(check_min))
+        init_ks = p_data.get('kill_switch', False)
+        init_at = p_data.get('auto_trade_enabled', False)
+        init_ap = p_data.get('auto_pilot', False)
+        init_ap_min = p_data.get('ap_min', 10)
+        
+        kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=init_ks, key=ks_key)
+        auto_trade_enabled = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at, key=at_key)
+        auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기 (Auto-Refresh)", value=init_ap, key=ap_key)
+        
+        needs_settings_save = False
+        if kill_switch != init_ks:
+            p_data['kill_switch'] = kill_switch
+            needs_settings_save = True
+        if auto_trade_enabled != init_at:
+            p_data['auto_trade_enabled'] = auto_trade_enabled
+            needs_settings_save = True
+        if auto_pilot != init_ap:
+            p_data['auto_pilot'] = auto_pilot
+            needs_settings_save = True
+            
+        if needs_settings_save:
+            save_portfolio_to_sheets(selected_port, p_data)
             st.rerun()
-        st.sidebar.info(f"🔄 {check_min}분 주기로 백그라운드 자동 감시 중...")
-        components.html(f"<script>setTimeout(function(){{window.parent.location.reload();}}, {check_min * 60000});</script>", height=0)
-else: st.sidebar.warning("🔑 `Secrets`에 `[telegram]` 정보 미등록. 푸시 알림 비활성화됨.")
+
+        if kill_switch:
+            st.sidebar.error("⚠️ 킬 스위치 작동 중! 모든 자동 매매 로직이 정지되었습니다.")
+            
+        if auto_pilot:
+            check_min = st.sidebar.number_input("감시 주기 (분)", min_value=1, max_value=60, value=init_ap_min)
+            if check_min != init_ap_min:
+                p_data['ap_min'] = check_min
+                save_portfolio_to_sheets(selected_port, p_data)
+                st.rerun()
+            st.sidebar.info(f"🔄 {check_min}분 주기로 백그라운드 자동 감시 중...")
+            components.html(f"<script>setTimeout(function(){{window.parent.location.reload();}}, {check_min * 60000});</script>", height=0)
+    else:
+        kill_switch, auto_trade_enabled, auto_pilot, check_min = False, False, False, 10
+else: 
+    st.sidebar.warning("🔑 `Secrets`에 `[telegram]` 정보 미등록. 푸시 알림 비활성화됨.")
+    kill_switch, auto_trade_enabled, auto_pilot, check_min = False, False, False, 10
 
 # ==========================================
-# 파라미터 세팅 (시뮬레이션 상세 설정 포함)
+# 파라미터 세팅
 # ==========================================
 vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
 st.sidebar.markdown("---")
@@ -730,7 +722,7 @@ with st.sidebar.expander("🧪 시뮬레이션 전용 상세 설정"):
     bull_market_boost = st.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
 # ==========================================
-# [공통] KIS 실계좌 잔고 선제척 조회 (탭 간 연동용)
+# [공통] KIS 실계좌 잔고 조회
 # ==========================================
 real_holdings_tickers = []
 if SYS_APP_KEY:
@@ -748,7 +740,7 @@ if SYS_APP_KEY:
         real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
 
 # ==========================================
-# 탭 구성 (V3.7)
+# 탭 구성 
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📝 관심종목 유니버스 & AI 진단", 
@@ -822,9 +814,7 @@ with tab1:
         eval_actions_cache = {}
         buf = whipsaw_buffer / 100.0
         
-        kis_data = st.session_state.get(cache_key)
-        if kis_data and SYS_APP_KEY: current_asset_base = kis_data.get('total_eval', total_cash)
-        else: current_asset_base = total_cash
+        current_asset_base = kis_data.get('total_eval', total_cash) if kis_data and SYS_APP_KEY else total_cash
         
         is_bull_market = (current_strategy == '대형주 (Core)' and kospi_ret_60 > 0) or (current_strategy != '대형주 (Core)' and kosdaq_ret_60 > 0)
         current_max_alloc_pct = max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct
@@ -885,7 +875,6 @@ with tab1:
 
                 eval_actions_cache[ticker] = action
                 
-                # [V3.7 핵심] 선택 체크박스용 필드 추가
                 display_records.append({
                     '선택': False,
                     '종목명': row.get('종목명'), 
@@ -902,7 +891,6 @@ with tab1:
         
         if not display_df.empty: 
             display_df = display_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
-            # 선택 컬럼을 맨 앞으로 이동
             cols = ['선택'] + [c for c in display_df.columns if c != '선택']
             display_df = display_df[cols]
         else:
@@ -921,7 +909,6 @@ with tab1:
         
         edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}", column_config=col_config)
         
-        # [V3.7 핵심] 저장 및 선택 삭제 버튼 분리 배치
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
             if st.button("💾 변경된 내용 저장 (추가/수정)", type="primary", use_container_width=True):
@@ -945,61 +932,34 @@ with tab1:
                 else:
                     st.warning("⚠️ 삭제할 종목을 먼저 체크박스로 선택해주세요.")
 
-        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
-            changed_msgs, needs_save = [], False
-            for idx, r_dict in enumerate(p_data['stocks']):
-                s_name = r_dict['종목명']
-                curr_action = next((r['🤖 AI 액션 플랜'] for r in display_records if r['종목명'] == s_name), "기록없음 (실계좌이동)")
-                
-                if "기록없음" in curr_action: continue 
-
-                if curr_action != r_dict.get('last_action', "기록없음"):
-                    p_data['stocks'][idx]['last_action'] = curr_action 
-                    needs_save = True
-                    if "모니터링 유지" not in curr_action:
-                        changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
-            
-            if changed_msgs:
-                send_telegram_message(f"🤖 *[{selected_port} 관심종목] 시그널 감지!*\n" + "\n".join(changed_msgs))
-                st.toast("오토파일럿 알림 발송 완료!")
-            elif not auto_pilot: st.toast("새로운 신규 시그널이 없습니다.")
-            
-            if needs_save: save_portfolio_to_sheets(selected_port, p_data)
-
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
     st.markdown("한국투자증권에 실제로 매수(보유) 중인 종목만 이곳에 표시되며, AI가 매도/손절 타점을 집중 감시합니다.")
     
-    with st.expander("⚙️ 실전 계좌 누적 수익률 기준 설정 (입출금 반영)", expanded=False):
-        st.markdown("포트폴리오 시작일의 **초기 투입 원금**과 이후 발생한 **누적 입출금액**을 입력하여 정확한 실계좌 누적 수익률을 산출합니다.")
-        c1, c2, c3, c4 = st.columns([2, 3, 3, 2])
-        new_date = c1.date_input("📅 포트폴리오 시작일", real_base_date, key="t2_date")
-        new_init = c2.number_input("💰 최초 투입 원금 (원)", value=int(real_initial_capital), step=100000, key="t2_init")
-        new_flow = c3.number_input("🔄 누적 입출금 (입금+, 출금-)", value=int(real_net_cashflow), step=100000, key="t2_flow")
-        
-        if c4.button("💾 수익률 기준 저장", use_container_width=True, key="t2_save"):
-            p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
-            p_data['real_initial_capital'] = new_init
-            p_data['real_net_cashflow'] = new_flow
-            save_portfolio_to_sheets(selected_port, p_data)
-            st.success("✅ 실전 계좌 수익률 산출 기준이 업데이트되었습니다.")
-            st.rerun()
-            
     if not SYS_APP_KEY:
         st.warning("사이드바에서 KIS API 키를 등록해주세요.")
     else:
-        kis_data = st.session_state.get(cache_key)
         if kis_data:
             real_total_eval = kis_data.get('total_eval', 0)
+            real_eval_pnl = kis_data.get('total_pnl', 0)
             real_stocks_df = pd.DataFrame(kis_data['stocks'])
             
-            real_tot_pnl = real_total_eval - total_invested_principal
-            real_ret_pct = (real_tot_pnl / total_invested_principal * 100) if total_invested_principal > 0 else 0
+            # [V4.0 핵심] 자동 역산 알고리즘을 통한 완벽한 투입 원금 계산
+            cumulative_realized_pnl = 0.0
+            if 'daily_trades' in p_data:
+                for trade in p_data['daily_trades']:
+                    cumulative_realized_pnl += trade.get('실현 손익', 0.0)
+                    
+            manual_offset = p_data.get('pnl_offset', 0.0) # 봇 가동 전 과거 수익률 보정용
+            
+            exact_invested_principal = real_total_eval - real_eval_pnl - cumulative_realized_pnl - manual_offset
+            total_pnl_all = real_eval_pnl + cumulative_realized_pnl + manual_offset
+            real_ret_pct = (total_pnl_all / exact_invested_principal * 100) if exact_invested_principal > 0 else 0
             
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
-            col_m2.metric("📥 누적 투입 원금 (입출금 반영)", f"{total_invested_principal:,.0f} 원")
-            col_m3.metric("📈 총 누적 수익금", f"{real_tot_pnl:+,.0f} 원", f"{real_ret_pct:+.2f}%")
+            col_m2.metric("📥 자동 역산 투입 원금 (입출금 감지)", f"{exact_invested_principal:,.0f} 원")
+            col_m3.metric("📈 누적 실현/평가 수익금", f"{total_pnl_all:+,.0f} 원", f"{real_ret_pct:+.2f}%")
             
             if not real_stocks_df.empty:
                 viz_df = real_stocks_df.copy()
@@ -1011,6 +971,16 @@ with tab2:
                 real_cash = real_total_eval
                 col_m4.metric("💵 가용 현금", f"{real_total_eval:,.0f} 원")
                 
+            with st.expander("⚙️ 과거 실적 보정 (선택 사항)", expanded=False):
+                st.markdown("봇 가동 전에 이미 발생했던 과거 수익/손실이 있다면 보정값으로 입력해 주세요. (없으면 0 유지)")
+                c_offset, c_btn = st.columns([8, 2])
+                new_offset = c_offset.number_input("과거 실현 손익 누적액 (원)", value=int(manual_offset), step=100000)
+                if c_btn.button("보정 저장", use_container_width=True):
+                    p_data['pnl_offset'] = new_offset
+                    save_portfolio_to_sheets(selected_port, p_data)
+                    st.success("보정값이 저장되었습니다.")
+                    st.rerun()
+
             st.markdown("---")
             if not real_stocks_df.empty:
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
@@ -1376,22 +1346,6 @@ with tab4:
         kis_data = st.session_state.get(cache_key)
         
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
-        
-        with st.expander("⚙️ 실전 계좌 누적 수익률 기준 설정 (포워드 테스트 연동)", expanded=False):
-            st.markdown("포트폴리오 시작일의 **초기 투입 원금**과 이후 발생한 **누적 입출금액**을 입력하여 정확한 실계좌 누적 수익률을 산출합니다.")
-            c1, c2, c3, c4 = st.columns([2, 3, 3, 2])
-            new_date = c1.date_input("📅 포트폴리오 시작일", real_base_date, key="t3_date")
-            new_init = c2.number_input("💰 최초 투입 원금 (원)", value=int(real_initial_capital), step=100000, key="t3_init")
-            new_flow = c3.number_input("🔄 누적 입출금 (입금+, 출금-)", value=int(real_net_cashflow), step=100000, key="t3_flow")
-            
-            if c4.button("💾 수익률 기준 저장", use_container_width=True, key="t3_save"):
-                p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
-                p_data['real_initial_capital'] = new_init
-                p_data['real_net_cashflow'] = new_flow
-                save_portfolio_to_sheets(selected_port, p_data)
-                st.success("✅ 성과 측정 기준이 업데이트되었습니다.")
-                st.rerun()
-                
         st.markdown(f"설정된 기준일(`{real_base_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
 
         if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
@@ -1409,8 +1363,16 @@ with tab4:
                         col_fw1.metric("📈 AI 포워드 테스트 (이론)", f"{ai_ret:+.2f}%", f"기말 자산: {fw_result['final_asset']:,.0f} 원")
                         if SYS_APP_KEY and kis_data:
                             real_tot_eval = kis_data.get('total_eval', 0)
-                            real_tot_pnl_custom = real_tot_eval - total_invested_principal
-                            real_ret_pct_custom = (real_tot_pnl_custom / total_invested_principal * 100) if total_invested_principal > 0 else 0
+                            
+                            cumulative_realized_pnl = 0.0
+                            if 'daily_trades' in p_data:
+                                for trade in p_data['daily_trades']:
+                                    cumulative_realized_pnl += trade.get('실현 손익', 0.0)
+                            manual_offset = p_data.get('pnl_offset', 0.0)
+                            exact_invested_principal = real_tot_eval - kis_data.get('total_pnl', 0) - cumulative_realized_pnl - manual_offset
+                            
+                            real_tot_pnl_custom = real_tot_eval - exact_invested_principal
+                            real_ret_pct_custom = (real_tot_pnl_custom / exact_invested_principal * 100) if exact_invested_principal > 0 else 0
                             col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct_custom:+.2f}%", f"현재 자산: {real_tot_eval:,.0f} 원")
                         else:
                             col_fw2.info("한국투자증권 API 연동이 필요합니다.")
@@ -1510,7 +1472,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v3.7)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.0)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1586,10 +1548,9 @@ with tab5:
 
     ---
     
-    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 킬 스위치 (Kill-Switch)
+    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 입출금 자동 감지
     자동매매가 예상치 못한 시장 상황이나 프로그램 오류로 인해 계좌를 망가뜨리지 않도록 최우선 보안 장치가 결합되어 있습니다.
     *   **무작위 재시도 금지 (No Blind Retry):** 주문 실패 시 이전 조건을 맹목적으로 반복하지 않으며, 실시간 호가 및 조건을 재검증합니다.
     *   **하드코딩 킬 스위치 (Kill Switch):** 사이드바의 킬 스위치가 활성화되는 즉시, 어떠한 상황에서도 모든 KIS API 매매 호출이 차단되어 계좌를 안전하게 보호합니다.
-    *   **오버라이드 강제 집행 버튼 (Override Execution):** 자동매매가 활성화된 상태에서 예수금 부족 등으로 대기 중인 주문이 있을 때, 사용자가 HTS로 입금한 직후 시스템의 10분 주기를 무시하고 즉각적으로 주문 큐를 강제 실행시킬 수 있는 유연한 인터럽트 기능을 제공합니다.
-    *   **일일 매매 추적 (Daily Trade Log):** 매매가 발생할 때마다 구글 DB에 기록하여 실시간으로 실적과 주문 내역을 횡단 검증합니다.
+    *   **수학적 팩트 기반 입출금 추적:** 기존의 부정확한 수동 입출금 입력 방식을 폐기하고, `현재 계좌 총 평가금 - 보유 주식 평가손익 - 봇 누적 실현손익` 공식을 통해 외부에서 입출금된 순수 투입 원금을 1원 단위까지 100% 정확하게 자동 역산합니다.
     """, unsafe_allow_html=True)
