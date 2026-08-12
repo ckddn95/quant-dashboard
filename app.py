@@ -730,11 +730,16 @@ with tab1:
                     _, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, _, current_low, _ = res
                     dist_ma20 = ((c_price / ma20) - 1) * 100
                     tech_text = f"20/60선 이격 {((ma20 / ma60) - 1) * 100:+.2f}%" if current_strategy == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
+                    
+                    ma200_cond = is_above_ma200 if use_ma200_filter else True
 
                     if current_strategy == '대형주 (Core)':
-                        action = "🔴 진입 보류" if (use_ma200_filter and not is_above_ma200) else ("🟢 적극 신규 진입 권장" if ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0) or vix_contrarian) else "🟡 관망 (타점 대기)")
+                        entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
+                        action = "🟢 적극 신규 진입 권장" if entry_cond else "🟡 관망 (타점 대기)"
                     else:
-                        action = "🔴 진입 보류" if (use_ma200_filter and not is_above_ma200) else ("🟢 적극 신규 진입 권장" if (((-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01) or vix_contrarian) and drawdown >= -30.0) else "🟡 관망 (타점 대기)")
+                        is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
+                        entry_cond = (ma200_cond and ((is_dip and res[10]) or vix_contrarian) and drawdown >= -30.0)
+                        action = "🟢 적극 신규 진입 권장" if entry_cond else "🟡 관망 (타점 대기)"
 
                 display_records.append({
                     '종목명': row.get('종목명'), 
@@ -817,12 +822,20 @@ with tab2:
                             
                         _, _, ma60, ma20, _, _, _, _, _, _, _, _, _ = fetch_stock_status(row['티커'], live_price=live_c_price)
 
-                        if active_strat == '대형주 (Core)': action = "🟢 보유 유지" if ma20 and ma60 and (ma20 >= ma60 * (1 - buf/2)) else "🔴 즉각 매도 (추세 이탈)"
+                        user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                        exit_cond_trend = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian
+                        
+                        if active_strat == '대형주 (Core)': 
+                            if user_ret >= ts_target_pct: action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
+                            elif exit_cond_trend: action = "🔴 즉각 매도 (추세 이탈)"
+                            else: action = "🟢 보유 유지"
                         else:
-                            user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
-                            action = "🔴 강제 손절 집행" if user_ret <= sat_stop_loss else ("🟢 보유 유지" if ma20 and ma60 and (ma20 >= ma60 * (1 - buf/2)) else "🔴 전량 매도")
+                            if user_ret <= sat_stop_loss: action = "🔴 강제 손절 집행"
+                            elif user_ret >= ts_target_pct: action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
+                            elif exit_cond_trend: action = "🔴 전량 매도"
+                            else: action = "🟢 보유 유지"
 
-                        live_results.append({'보유 종목명': row['종목명'], '한투 실시간 현재가': f"{live_c_price:,.0f} 원", '수익률': f"{((live_c_price / buy_price) - 1) * 100:+.2f}%", '🤖 실계좌 전용 액션 플랜': action})
+                        live_results.append({'보유 종목명': row['종목명'], '한투 실시간 현재가': f"{live_c_price:,.0f} 원", '수익률': f"{user_ret:+.2f}%", '🤖 실계좌 전용 액션 플랜': action})
                     
                     st.table(pd.DataFrame(live_results))
                     
@@ -889,9 +902,8 @@ with tab3:
                             
                         st.markdown("---")
                         st.markdown("### 🔍 종목별 상세 매매 & 보유 현황 비교")
-                        st.caption("AI가 알고리즘에 따라 매매한 결과와 실제 계좌의 보유 상태를 비교합니다. (※ 실전 계좌는 API 한계상 '현재 보유 중인 종목'의 수익률만 표시됩니다.)")
+                        st.caption("AI가 알고리즘에 따라 매매한 결과와 실제 계좌의 보유 상태를 숫자로 명확하게 대조합니다. (※ KIS 잔고 API 특성상 실계좌의 과거 매매 횟수는 HTS 확인이 필요합니다.)")
 
-                        # [V2.16 핵심] "미보유/매도완료" 텍스트 제거 및 직관적인 UI 개선
                         ai_summary = {item['종목명']: item for item in fw_result['summary_rows'] if item['종목명'] != '💡 [전체 합계]'}
                         all_stocks = sorted(list(set(list(ai_summary.keys()) + list(real_summary.keys()))))
 
@@ -900,52 +912,49 @@ with tab3:
                             ai_data = ai_summary.get(name)
                             rl_data = real_summary.get(name)
 
-                            # 1. AI 데이터 추출 및 정제
                             if ai_data:
-                                ai_qty = ai_data['최종 보유 주수']
+                                ai_qty_str = ai_data['최종 보유 주수'].replace(' 주', '').strip()
+                                try: ai_qty_num = float(ai_qty_str.replace(',', ''))
+                                except: ai_qty_num = 0
+                                ai_qty = f"{ai_qty_str} 주" if ai_qty_num > 0 else "0 주"
+                                
                                 ai_trades = ai_data['매매 횟수']
-                                ai_prof = ai_data['총 순수익 (원)'].replace(' 원', '')
+                                ai_prof = ai_data['총 순수익 (원)'].replace(' 원', '').strip()
                                 ai_pct = ai_data['수익률 (%)']
-
-                                if ai_qty == "0.00 주" or ai_qty == "0 주":
-                                    if ai_trades == "매수 0회 / 매도 0회":
-                                        ai_status = "진입 안함 (0주)"
-                                        ai_display = "-"
-                                    else:
-                                        ai_status = "전량 매도 (0주)"
-                                        ai_display = f"{ai_prof}원 ({ai_pct})"
-                                else:
-                                    ai_status = f"보유 중 ({ai_qty})"
-                                    ai_display = f"{ai_prof}원 ({ai_pct})"
+                                ai_display = f"{ai_prof}원 ({ai_pct})"
                             else:
-                                ai_status = "유니버스 제외"
-                                ai_display = "-"
-                                ai_trades = "-"
+                                ai_qty = "0 주"
+                                ai_trades = "매수 0회 / 매도 0회"
+                                ai_display = "0원 (0.00%)"
 
-                            # 2. 실계좌 데이터 추출 및 정제
                             if rl_data:
-                                rl_qty = rl_data.get('보유수량', '0 주')
+                                rl_qty_str = str(rl_data.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
+                                try: rl_qty_num = int(rl_qty_str)
+                                except: rl_qty_num = 0
+                                rl_qty = f"{rl_qty_str} 주" if rl_qty_num > 0 else "0 주"
+                                
                                 rl_pct = rl_data.get('평가손익률', '0.00%')
                                 try:
-                                    rl_qty_num = int(str(rl_qty).replace(' 주', '').replace(',', ''))
                                     rl_buy = float(rl_data.get('_raw_buy', 0))
                                     rl_cur = float(rl_data.get('_raw_price', 0))
                                     rl_prof_amt = (rl_cur - rl_buy) * rl_qty_num
                                     rl_display = f"{rl_prof_amt:+,.0f}원 ({rl_pct})"
                                 except:
-                                    rl_display = f"확인불가 ({rl_pct})"
-                                rl_status = f"보유 중 ({rl_qty})"
+                                    rl_display = f"0원 ({rl_pct})"
+                                rl_trades = "HTS 확인"
                             else:
-                                rl_status = "보유 안함 (0주)"
-                                rl_display = "-"
+                                rl_qty = "0 주"
+                                rl_display = "0원 (0.00%)"
+                                rl_trades = "매수 0회 / 매도 0회"
 
                             comp_data.append({
                                 "종목명": name,
-                                "🤖 AI 상태": ai_status,
-                                "🤖 AI 누적 수익금 (수익률)": ai_display,
-                                "🔌 내 실계좌 상태": rl_status,
-                                "🔌 내 실계좌 평가손익 (수익률)": rl_display,
-                                "AI 누적 매매 횟수": ai_trades
+                                "🤖 AI 잔고": ai_qty,
+                                "🤖 AI 누적손익 (수익률)": ai_display,
+                                "🤖 AI 매매 횟수": ai_trades,
+                                "🔌 내 실계좌 잔고": rl_qty,
+                                "🔌 내 평가손익 (수익률)": rl_display,
+                                "🔌 내 매매 횟수": rl_trades
                             })
 
                         st.dataframe(pd.DataFrame(comp_data), use_container_width=True)
@@ -984,21 +993,76 @@ with tab3:
                         st.altair_chart(chart, use_container_width=True)
 
 with tab4:
-    st.markdown("<h1 style='text-align: center;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서</h1>", unsafe_allow_html=True)
-    st.markdown("본 보고서는 **'Core-Satellite Quant System'**에 탑재된 AI 매매 엔진의 핵심 로직 명세서입니다.")
-    st.divider()
     st.markdown("""
-    ### 1. 🏛️ 핵심 투자 철학: Core-Satellite 듀얼 엔진
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.18)</h1>
+    <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
+    <hr>
+    
+    ## 1. 🏛️ 핵심 투자 철학: Core-Satellite 듀얼 엔진
+    본 시스템은 시장의 방어적 추세 추종(Core)과 공격적인 알파 창출(Satellite)을 분리하여 운용하는 **듀얼 엔진 아키텍처**를 채택하고 있습니다.
+    
     | 구분 | 대형주 (Core / 핵심 자산) | 중소형주 (Satellite / 위성 자산) |
     | :--- | :--- | :--- |
-    | **운용 목표** | 안정적인 시장 우상향 추종 및 방어 | 시장 주도주 발굴 및 초과 수익 창출 |
+    | **운용 목표** | 안정적인 시장 우상향 추종 및 방어적 복리 누적 | 시장 주도주 발굴 및 단기 초과 알파(Alpha) 수익 창출 |
     | **핵심 타점** | 200일선 기반 **골든크로스 추세 추종** | 수급 폭발 후 **20일선 눌림목 스윙** |
+    | **투입 한도** | 종목당 기본 35% (강세장 최대 52.5%) | 종목당 기본 20% (강세장 최대 30%) |
     
-    ### 2. 🌍 시장 환경 필터 (Macro Regime)
-    * **VIX 필터:** VIX 25 이상 시 공포 극점(Bottom) 인식 적극 매수, 30 이상 시 매매 전면 금지.
-    * **강세장 부스터:** 지수 60일 수익률 양수 및 정배열 시 종목당 투입 한도 1.5배 확장.
+    ---
+
+    ## 2. 🧠 엔진별 매수/매도 알고리즘 상세 명세
     
-    ### 3. 🛡️ 극단적 리스크 관리 (Drawdown Defense)
-    * **트레일링 스탑:** 목표 수익률 도달 후 특정 비율 하락 시 즉시 익절.
-    * **손실 쿨다운:** 연속 2회 손절 시 지정 기간(기본 60일) 해당 종목 매수 동결.
-    """)
+    ### 🏛️ [전략 A] 대형주 (Core) - 중장기 추세 추종
+    시가총액 상위 대형주를 대상으로, 기관과 외국인의 거대한 수급 추세가 형성되는 초입(Golden Cross)을 포착하여 안정적으로 수익을 누적합니다.
+    
+    *   **📌 타겟 유니버스:** KOSPI 시가총액 상위 100종목
+    *   **🟢 AI 진입 조건 (모두 만족 시):**
+        1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치 (안전구간 확인).
+        2.  **중기 추세 상승:** 60일 이동평균선(MA60)의 기울기가 양수 (현재 MA60 > 10일 전 MA60).
+        3.  **단기 모멘텀:** 20일 전 주가 대비 현재 주가가 상승 (단기 수익률 > 0%).
+        4.  **골든크로스 안착:** 20일 이동평균선이 60일선을 상향 돌파하고, 휩소 방지 버퍼(기본 `1.5%`) 이상 격차를 벌린 확실한 추세 형성 구간. `[MA20 >= MA60 * (1 + 0.015)]`
+        5.  **시장 안정:** VIX(공포지수)가 30 미만으로 시장이 패닉 상태가 아닐 것.
+    *   **🔴 AI 이탈(매도) 조건:**
+        1.  **추세 붕괴 (Dead Cross):** 20일 이동평균선이 60일 이동평균선을 하향 이탈하려는 징후 발생 시 전량 기계적 매도. `[MA20 < MA60 * (1 - 0.0075)]`
+    
+    ### 🚀 [전략 B] 중소형주 (Satellite) - 스마트 수급 눌림목
+    시장에 강력한 테마가 형성되어 돈이 몰린 주도주를 필터링하고, 해당 종목이 단기 조정을 받을 때(눌림목) 진입하여 기술적 반등을 노립니다.
+    
+    *   **📌 타겟 유니버스:** KOSDAQ 시가총액 1,000억 원 이상 상위 종목
+    *   **🟢 AI 진입 조건 (모두 만족 시):**
+        1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치.
+        2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
+        3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)에 위치하거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
+        4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 것 (심각한 악재로 인한 폭락 방지).
+    *   **🔴 AI 이탈(매도/손절) 조건:**
+        1.  **추세 붕괴:** 대형주와 동일하게 20일선이 60일선을 이탈 시 전량 매도.
+        2.  **강제 손절 컷 (Stop Loss):** 매수 단가 대비 수익률이 **`-12%`** (사용자 설정 가능) 도달 시, 지표와 무관하게 즉각적인 기계적 손절 집행.
+    
+    ---
+    
+    ## 3. 🌍 거시경제 및 마켓 타이밍 엔진 (Macro Regime)
+    개별 종목의 타점이 완벽하더라도 시장 전체가 무너지면 승률이 급감합니다. 이를 방어하기 위한 3중 거시 필터가 작동합니다.
+    
+    *   **🚨 VIX 공포지수 브레이크 (VIX Safe):**
+        *   미국 S&P 500 VIX 지수가 **`30`**을 초과하는 시스템 리스크 구간에서는 모든 신규 매수를 전면 동결합니다.
+    *   **🔥 극한의 역발상 매수 (VIX Contrarian):**
+        *   VIX 지수가 **`25 이상`**으로 치솟아 투매가 발생했으나, 단기 이동평균선(3일선)을 깨고 내려오는 **'공포 극점 확인 후 회복 초기'** 단계에서는, 모든 보조지표 조건을 무시하고 시장의 낙폭 과대 반등을 노려 즉시 공격적 매수를 집행합니다.
+    *   **🐃 강세장 자금 풀 부스터 (Bull Market Boost):**
+        *   KOSPI/KOSDAQ 지수가 60일 이동평균선 위에 있는 완연한 강세장(Bull Market)으로 판별될 경우, 엔진이 자동으로 리스크를 낮게 평가하여 종목당 투입 자금 한도를 **기본값의 1.5배**로 확장합니다. (예: 대형주 35% -> 52.5% 상향)
+
+    ---
+    
+    ## 4. 🛡️ AI 리스크 매니지먼트 (Risk Control)
+    수익을 내는 것만큼 중요한 것은 번 돈을 지키고 뇌동매매를 방지하는 것입니다.
+    
+    *   **🎣 트레일링 스탑 (Trailing Stop - 수익 극대화):**
+        *   수익률이 목표치(대형주 `30%`, 중소형주 `15%`)를 돌파하면 익절 대기 모드로 전환됩니다.
+        *   이후 주가가 계속 오르면 매도하지 않고 따라가며(Trailing), 최고점 대비 특정 비율(`-10%` 또는 `-5%`)만큼 하락하는 꺾임 현상이 발생할 때만 기계적으로 수익을 확정(매도)합니다.
+    *   **🥶 손실 쿨다운 시스템 (Cooldown):**
+        *   특정 종목에서 연속으로 2회 이상 손실(매도/손절)이 발생하면, 해당 종목은 AI 블랙리스트에 등재되어 설정된 기간(기본 `60일`) 동안 어떠한 매수 시그널이 떠도 진입을 거부합니다. (종목과 사랑에 빠지거나, 휩소 구간에서 계좌가 녹는 현상 완벽 차단)
+    
+    ---
+    
+    ## 5. ⚙️ 오토파일럿 실시간 감시 시스템 (Auto-Pilot)
+    *   본 시스템은 사용자가 설정한 주기(예: 10분)마다 백그라운드에서 KOSPI/KOSDAQ 전 종목의 호가와 실시간 잔고를 스크래핑합니다.
+    *   수만 개의 데이터 포인트를 앞서 명세한 수학적 알고리즘으로 즉시 연산하며, **오직 매수/매도 액션 플랜의 상태가 변경(Trigger)되었을 때만** 텔레그램을 통해 사용자에게 스마트 푸시 알림을 발송합니다.
+    """, unsafe_allow_html=True)
