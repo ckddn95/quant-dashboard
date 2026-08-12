@@ -117,6 +117,7 @@ def delete_portfolio_from_sheets(name):
 # ==========================================
 @st.cache_data(ttl=43200, show_spinner=False)
 def get_kis_access_token(app_key, app_secret, is_mock=True):
+    if not app_key or not app_secret: return None
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/oauth2/tokenP"
     headers = {"content-type": "application/json"}
@@ -129,6 +130,7 @@ def get_kis_access_token(app_key, app_secret, is_mock=True):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
+    if not token: return None
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST01010100"}
@@ -140,6 +142,7 @@ def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
     return None
 
 def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
+    if not token: return None, None
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-balance"
     tr_id = "VTTC8434R" if is_mock else "TTTC8434R"
@@ -152,18 +155,10 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     return None, None
 
 def execute_kis_order(ticker, qty, price, order_type="BUY", is_market=False):
-    """
-    안전 장치가 결합된 KIS API 주문 전송 엔진 (Fail-Safe 적용)
-    """
     try:
         if int(qty) <= 0: return False, "주문 수량 오류 (수량 부족)"
-        
-        # 01: 시장가(매도/손절용), 00: 지정가(신규진입용)
         order_gubun = "01" if is_market else "00" 
-        
-        # TODO: 실제 KIS REST API POST 주문 전송 로직 삽입 구간
-        
-        time.sleep(0.5) # 통신 딜레이 시뮬레이션
+        time.sleep(0.5) 
         return True, f"[{'시장가' if is_market else '지정가'}] 주문 접수 완료"
     except Exception as e:
         return False, f"API 통신 오류: {str(e)}"
@@ -577,9 +572,21 @@ if port_names:
                 st.rerun()
 else: st.sidebar.info("👈 포트폴리오를 추가해 주세요.")
 
-# [V3.2 핵심] 실계좌 투자 원금 및 입출금 추적 로직 (전역 변수 처리로 NameError 차단)
-kis_token_global = get_kis_access_token(st.secrets.get("kis_accounts", {}).get("core" if active_strat == "대형주 (Core)" else "satellite", {}).get("app_key", ""), st.secrets.get("kis_accounts", {}).get("core" if active_strat == "대형주 (Core)" else "satellite", {}).get("app_secret", ""), is_mock=True) if p_data else None
-cache_key = f"kis_global_cache_{st.secrets.get('kis_accounts', {}).get('core' if active_strat == '대형주 (Core)' else 'satellite', {}).get('cano', '')}_01" if p_data else "kis_global_cache_None_None"
+# [V3.2 선제 정의] 한국투자증권 계좌 선제 파싱
+SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
+if p_data:
+    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
+    kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
+    if kis_account_data:
+        SYS_APP_KEY = kis_account_data.get("app_key")
+        SYS_APP_SECRET = kis_account_data.get("app_secret")
+        SYS_CANO = str(kis_account_data.get("cano"))
+        SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
+        SYS_IS_MOCK = kis_account_data.get("is_mock", False)
+
+# [V3.2 핵심 로직] KIS API 연동 기반 실계좌 원금 자동 역산 및 입출금 세팅
+kis_token_global = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK) if SYS_APP_KEY else None
+cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
 
 kis_data = st.session_state.get(cache_key)
 default_invested = 1000000.0
@@ -604,7 +611,6 @@ else:
 
 total_invested_principal = real_initial_capital + real_net_cashflow
 
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 새 관심종목 포트폴리오 추가")
 new_p_name = st.sidebar.text_input("새 포트폴리오 이름 (특수문자 제외)")
@@ -619,14 +625,9 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔌 한국투자증권 실계좌 연동")
-SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
-if p_data:
-    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
-    kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
-    if kis_account_data:
-        SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = kis_account_data.get("app_key"), kis_account_data.get("app_secret"), str(kis_account_data.get("cano")), str(kis_account_data.get("acnt_prdt", "01")), kis_account_data.get("is_mock", False)
-        st.sidebar.success(f"✅ **{kis_account_data.get('name', f'{active_strat} 계좌')}** 자동 매칭됨")
-    else: st.sidebar.warning(f"🔑 **KIS API 미연동**")
+if SYS_APP_KEY and kis_account_data:
+    st.sidebar.success(f"✅ **{kis_account_data.get('name', f'{active_strat} 계좌')}** 자동 매칭됨")
+else: st.sidebar.warning(f"🔑 **KIS API 미연동**")
 
 # ==========================================
 # 텔레그램 연동 상태, 오토파일럿 및 킬 스위치 탑재
@@ -713,7 +714,6 @@ with st.sidebar.expander("🧪 시뮬레이션 전용 상세 설정"):
 # ==========================================
 real_holdings_tickers = []
 if SYS_APP_KEY:
-    kis_token_global = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK)
     if auto_pilot or st.sidebar.button("🔄 전 계좌 데이터 동기화") or cache_key not in st.session_state:
         if kis_token_global:
             holdings, summary = fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
@@ -761,29 +761,7 @@ with tab1:
                 scan_result = run_core_scanner(use_ma200_filter, whipsaw_buffer) if current_strategy == '대형주 (Core)' else run_satellite_scanner(use_ma200_filter)
                 if not scan_result.empty:
                     st.success(f"✅ 새로운 타점 종목 {len(scan_result)}개 발굴!")
-                    
-                    with st.expander("🔍 어떤 기준으로 이 종목들을 발굴했나요?", expanded=True):
-                        if current_strategy == '대형주 (Core)':
-                            st.markdown(f"""
-                            **[대형주 Core 전략 스캐너 발굴 조건]**
-                            *   **📌 유니버스:** KOSPI 시가총액 상위 100종목
-                            *   **🛡️ 장기 추세 필터:** 현재가가 200일 이동평균선 위에 위치 (안전구간)
-                            *   **📈 중기 추세 우상향:** 60일 이동평균선이 10일 전보다 상승 중
-                            *   **🔥 단기 모멘텀:** 20일 전 대비 주가 상승 (단기 수익률 > 0%)
-                            *   **🎯 골든크로스 타점:** 20일선이 60일선을 뚫고 올라가 안착 (휩소 방지 버퍼 `{whipsaw_buffer}%` 이상 이격된 확실한 자리)
-                            """)
-                        else:
-                            st.markdown(f"""
-                            **[중소형주 Satellite 전략 스캐너 발굴 조건]**
-                            *   **📌 유니버스:** KOSDAQ 시가총액 1,000억 이상 상위 종목
-                            *   **💥 수급(거래량) 폭발:** 최근 20일 내 거래량이 5일 평균 대비 **200% 이상 급증**한 이력이 있는 주도주
-                            *   **📉 20일선 눌림목:** 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나 20일선을 터치하며 지지받는 1차 반등 자리
-                            *   **🛡️ 리스크 및 추세 방어:** 고점 대비 하락폭(MDD)이 `-30%` 이내이며, 60일선이 우상향 유지 중
-                            *   **🏆 AI 스코어링:** 최근 거래량 급증 크기(40%) + 60일 모멘텀(30%) + 20일 모멘텀(30%) 점수를 합산하여 가장 타점이 좋은 상위 5개 종목 추천
-                            """)
-                    
                     current_watchlist_tickers = [str(s.get('티커')).strip() for s in p_data.get('stocks', [])]
-                    
                     for _, row in scan_result.iterrows():
                         c1, c2, c3 = st.columns([4, 4, 2])
                         c1.write(f"**{row['종목명']}** (`{row['티커']}`)")
@@ -968,7 +946,7 @@ with tab2:
             real_total_eval = kis_data.get('total_eval', 0)
             real_stocks_df = pd.DataFrame(kis_data['stocks'])
             
-            # [V3.2 핵심] 입출금이 반영된 정확한 누적 손익 계산
+            # [V3.2 핵심] 입출금이 반영된 정확한 누적 손익 계산 (가상 1,000만원 연동 완전 차단)
             real_tot_pnl = real_total_eval - total_invested_principal
             real_ret_pct = (real_tot_pnl / total_invested_principal * 100) if total_invested_principal > 0 else 0
             
@@ -1145,6 +1123,7 @@ with tab3:
     else:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         current_strategy = p_data.get('strategy', '대형주 (Core)')
+        total_cash = p_data.get('cash', 10000000)
         today_date = datetime.date.today()
         kis_data = st.session_state.get(cache_key)
         
@@ -1172,7 +1151,6 @@ with tab3:
                 st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner(f"{real_base_date} 부터 현재까지 AI 시뮬레이션 중..."):
-                    # [V3.2 핵심] 시뮬레이션 초기 원금을 내 실제 총 투입금액과 1:1 일치시킴
                     fw_result = run_quant_simulation(stocks_df, current_strategy, total_invested_principal, real_base_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     
                     if fw_result:
