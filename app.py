@@ -158,7 +158,7 @@ def fetch_market_data():
     except: return 20.0, False, True, 0.0, 0.0
 
 @st.cache_data(ttl=3600)
-def fetch_stock_status(ticker_code, live_price=None):
+def fetch_stock_status(ticker_code):
     try:
         for suffix in ['.KS', '.KQ']:
             df = yf.download(f"{ticker_code}{suffix}", period="2y", progress=False)
@@ -218,7 +218,7 @@ def run_satellite_scanner(use_ma200_filter_flag, top_n=5):
         dist_ma20 = ((c_price / ma20) - 1) * 100
         is_dip = ((-5.0 <= dist_ma20 <= 3.0) or ((current_low <= ma20 * 1.01) and (c_price >= ma20 * 0.95)))
         if vol_surged and is_dip and ((not use_ma200_filter_flag) or is_above_ma200) and (drawdown >= -30.0) and (ma60_slope_positive and ret_20 > -3.0):
-            score = (recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3)
+            score = (recent_vol_max / 100.0) * 0.4 + (res[6] * 0.3) + (res[7] * 0.3)
             results.append({'종목명': row['Name'], '티커': row['Code'], '현재가': f"{c_price:,.0f} 원", '20일선 이격도': f"{dist_ma20:+.2f}%", '최근 최대 수급': f"{res[12]:,.0f}%", 'AI 스코어': round(score, 2), '_score_num': score})
     if not results: return pd.DataFrame()
     return pd.DataFrame(results).sort_values('_score_num', ascending=False).head(top_n).drop(columns=['_score_num'])
@@ -832,7 +832,7 @@ with tab1:
             if changed_msgs:
                 send_telegram_message(f"🤖 *[{selected_port} 관심종목] 시그널 감지!*\n" + "\n".join(changed_msgs))
                 st.toast("오토파일럿 알림 발송 완료!")
-            elif not auto_pilot: st.toast("새로운 시그널이 없어 전송을 생략했습니다.")
+            elif not auto_pilot: st.toast("새로운 신규 시그널이 없습니다.")
             
             if needs_save: save_portfolio_to_sheets(selected_port, p_data)
 
@@ -840,30 +840,58 @@ with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
     st.markdown("한국투자증권에 실제로 매수(보유) 중인 종목만 이곳에 표시되며, AI가 매도/손절 타점을 집중 감시합니다.")
     
+    # [V2.26 핵심] 성과 측정 기준일 설정 연동
+    real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
+    try: real_base_date = pd.to_datetime(real_base_date_str).date()
+    except: real_base_date = datetime.date(2024, 1, 1)
+        
+    real_base_principal = float(p_data.get('real_base_principal', p_data.get('cash', 10000000))) if p_data else 10000000.0
+
+    with st.expander("⚙️ 계좌 성과 측정 기준 설정 (포트폴리오 생성일 연동)", expanded=False):
+        st.markdown("포트폴리오가 생성된 시점(또는 특정 기준일)의 원금을 입력하면, 증권사 앱에서 보여주는 단순 평가손익이 아닌 **'기준일 대비 실제 누적 수익률'**을 정확하게 추적할 수 있습니다.")
+        c1, c2, c3 = st.columns([3, 3, 2])
+        new_date = c1.date_input("📅 성과 측정 기준일", real_base_date)
+        new_prin = c2.number_input("💰 기준일 당시 투입 원금 (원)", value=int(real_base_principal), step=1000000)
+        if c3.button("💾 기준 설정 저장", use_container_width=True):
+            p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
+            p_data['real_base_principal'] = new_prin
+            save_portfolio_to_sheets(selected_port, p_data)
+            st.success("✅ 성과 측정 기준이 업데이트되었습니다.")
+            st.rerun()
+            
     if not SYS_APP_KEY:
         st.warning("사이드바에서 KIS API 키를 등록해주세요.")
     else:
         kis_data = st.session_state.get(cache_key)
         if kis_data:
-            real_total_eval, real_stocks_df = kis_data['total_eval'], pd.DataFrame(kis_data['stocks'])
+            real_total_eval = kis_data.get('total_eval', 0)
+            real_stocks_df = pd.DataFrame(kis_data['stocks'])
             
-            col_m1, col_m2, col_m3 = st.columns(3)
+            # 기준일 대비 실제 계좌 누적 손익 및 수익률 계산
+            real_tot_pnl = real_total_eval - real_base_principal
+            real_ret_pct = (real_tot_pnl / real_base_principal * 100) if real_base_principal > 0 else 0
+            
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
+            col_m2.metric("📊 총 평가손익 합계", f"{real_tot_pnl:+,.0f} 원", f"{real_ret_pct:+.2f}%")
+            col_m3.metric("📈 누적 실현/평가 수익금", f"{real_tot_pnl:+,.0f} 원")
+            
             if not real_stocks_df.empty:
                 viz_df = real_stocks_df.copy()
                 viz_df['평가금액'] = viz_df['보유수량'].str.replace(' 주', '').str.replace(',', '').astype(float) * viz_df['_raw_price']
                 total_stock_eval = viz_df['평가금액'].sum()
-                col_m2.metric("📈 주식 평가액", f"{total_stock_eval:,.0f} 원")
-                col_m3.metric("💵 가용 현금", f"{real_total_eval - total_stock_eval:,.0f} 원")
+                col_m4.metric("💵 가용 현금", f"{real_total_eval - total_stock_eval:,.0f} 원")
+            else:
+                col_m4.metric("💵 가용 현금", f"{real_total_eval:,.0f} 원")
                 
-                st.markdown("---")
+            st.markdown("---")
+            if not real_stocks_df.empty:
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
                     buf, live_results = whipsaw_buffer / 100.0, []
                     for idx, row in real_stocks_df.iterrows():
                         live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
                         if live_c_price == 0: continue
                             
-                        # [V2.24 추가] 보유수량 및 수익금 계산 추가
                         qty_str = str(row.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
                         try: qty_num = int(float(qty_str))
                         except: qty_num = 0
@@ -917,7 +945,6 @@ with tab2:
                                 action = "🟡 보유 유지 (관망)"
                                 reason = f"손절선 방어 및 추세 유지 중이나 추가 매수 타점은 아님 (현재 수익률 {user_ret:+.2f}%)"
 
-                        # [V2.24 핵심] 테이블 컬럼 확장
                         live_results.append({
                             '보유 종목명': row['종목명'], 
                             '보유수량': f"{qty_num:,} 주",
@@ -954,11 +981,14 @@ with tab3:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         current_strategy = p_data.get('strategy', '대형주 (Core)')
         total_cash = p_data.get('cash', 10000000)
-        created_at_str = p_data.get('created_at', '2024-01-01')
         
-        try: created_date = pd.to_datetime(created_at_str).date()
+        # [V2.26 핵심] 시뮬레이션 시작일을 새롭게 설정된 실전 계좌 기준일과 동기화
+        real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01'))
+        try: created_date = pd.to_datetime(real_base_date_str).date()
         except: created_date = datetime.date(2024, 1, 1)
         today_date = datetime.date.today()
+        
+        real_base_principal = float(p_data.get('real_base_principal', p_data.get('cash', 10000000)))
 
         kis_data = st.session_state.get(cache_key)
         real_tot_eval, real_tot_pnl, real_ret_pct = 0, 0, 0
@@ -966,20 +996,20 @@ with tab3:
         
         if kis_data and SYS_APP_KEY:
             real_tot_eval = kis_data.get('total_eval', 0)
-            real_tot_pnl = kis_data.get('total_pnl', 0)
-            real_principal = real_tot_eval - real_tot_pnl
-            real_ret_pct = (real_tot_pnl / real_principal * 100) if real_principal > 0 else 0
+            real_tot_pnl = real_tot_eval - real_base_principal
+            real_ret_pct = (real_tot_pnl / real_base_principal * 100) if real_base_principal > 0 else 0
             real_summary = {item['종목명']: item for item in kis_data['stocks']}
 
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
-        st.markdown(f"포트폴리오 생성일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
+        st.markdown(f"설정된 기준일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
 
         if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
             if stocks_df.empty: 
                 st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner(f"{created_date} 부터 현재까지 AI 시뮬레이션 중..."):
-                    fw_result = run_quant_simulation(stocks_df, current_strategy, total_cash, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    # 시뮬레이션 초기 원금을 기준일 당시 투입 원금으로 맞추어 1:1 완벽 비교
+                    fw_result = run_quant_simulation(stocks_df, current_strategy, real_base_principal, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     
                     if fw_result:
                         ai_ret = fw_result['final_port_ret']
@@ -1086,7 +1116,7 @@ with tab3:
 
 with tab4:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.24)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.26)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1123,7 +1153,7 @@ with tab4:
     *   **🟢 AI 진입 조건 (모두 만족 시):**
         1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치.
         2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
-        3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)에 위치하거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
+        3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
         4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 것 (심각한 악재로 인한 폭락 방지).
     *   **🔴 AI 이탈(매도/손절/퇴출) 조건:**
         1.  **추세/수급 붕괴:** 대형주와 동일하게 20일선이 60일선을 이탈하거나, 수급 폭발 이력이 소멸되면 전량 매도 및 관심종목 퇴출.
@@ -1148,7 +1178,7 @@ with tab4:
     
     *   **🎣 트레일링 스탑 (Trailing Stop - 수익 극대화):**
         *   수익률이 목표치(대형주 `30%`, 중소형주 `15%`)를 돌파하면 익절 대기 모드로 전환됩니다.
-        *   이후 주가가 계속 오르면 매도하지 않고 따라가며(Trailing), 최고점 대비 특정 비율(`-10%` 또는 `-5%`)만큼 하락하는 꺾임 현상이 발생할 때만 기계적으로 수익을 확정(매도)합니다.
+        *   이후 주가가 계속 오르면 매도하지 않고 따라가며(Trailing), 최고점 대비 특정 비율(`-10%` 또는 `-5%` 수준)만큼 하락하는 꺾임 현상이 발생할 때만 기계적으로 수익을 확정(매도)합니다.
     *   **🥶 손실 쿨다운 시스템 (Cooldown):**
         *   특정 종목에서 연속으로 2회 이상 손실(매도/손절)이 발생하면, 해당 종목은 AI 블랙리스트에 등재되어 설정된 기간(기본 `60일`) 동안 어떠한 매수 시그널이 떠도 진입을 거부합니다. (종목과 사랑에 빠지거나, 휩소 구간에서 계좌가 녹는 현상 완벽 차단)
     
