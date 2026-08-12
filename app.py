@@ -855,7 +855,6 @@ with tab3:
         except: created_date = datetime.date(2024, 1, 1)
         today_date = datetime.date.today()
 
-        # 실계좌 지표 사전 로드
         kis_data = st.session_state.get(cache_key)
         real_tot_eval, real_tot_pnl, real_ret_pct = 0, 0, 0
         real_summary = {}
@@ -867,7 +866,6 @@ with tab3:
             real_ret_pct = (real_tot_pnl / real_principal * 100) if real_principal > 0 else 0
             real_summary = {item['종목명']: item for item in kis_data['stocks']}
 
-        # [V2.15 핵심] 포워드 테스트 (이론 vs 실제 비교) UI 전면 개편
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
         st.markdown(f"포트폴리오 생성일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
 
@@ -891,9 +889,9 @@ with tab3:
                             
                         st.markdown("---")
                         st.markdown("### 🔍 종목별 상세 매매 & 보유 현황 비교")
-                        st.caption("AI가 알고리즘에 따라 이론적으로 매매한 결과와 실제 계좌의 보유 상태를 나란히 보여줍니다.")
+                        st.caption("AI가 알고리즘에 따라 매매한 결과와 실제 계좌의 보유 상태를 비교합니다. (※ 실전 계좌는 API 한계상 '현재 보유 중인 종목'의 수익률만 표시됩니다.)")
 
-                        # AI 요약 결과와 실계좌 요약 결과 병합
+                        # [V2.16 핵심] "미보유/매도완료" 텍스트 제거 및 직관적인 UI 개선
                         ai_summary = {item['종목명']: item for item in fw_result['summary_rows'] if item['종목명'] != '💡 [전체 합계]'}
                         all_stocks = sorted(list(set(list(ai_summary.keys()) + list(real_summary.keys()))))
 
@@ -902,22 +900,52 @@ with tab3:
                             ai_data = ai_summary.get(name)
                             rl_data = real_summary.get(name)
 
-                            # AI 데이터 추출 (미보유 처리)
-                            ai_yld = ai_data['수익률 (%)'] if ai_data and ai_data['최종 보유 주수'] != "0.00 주" else "미보유/매도완료"
-                            ai_amt = ai_data['최종 보유 주수'] if ai_data and ai_data['최종 보유 주수'] != "0.00 주" else "-"
-                            ai_trades = ai_data['매매 횟수'] if ai_data else "-"
+                            # 1. AI 데이터 추출 및 정제
+                            if ai_data:
+                                ai_qty = ai_data['최종 보유 주수']
+                                ai_trades = ai_data['매매 횟수']
+                                ai_prof = ai_data['총 순수익 (원)'].replace(' 원', '')
+                                ai_pct = ai_data['수익률 (%)']
 
-                            # 실계좌 데이터 추출 (미보유 처리)
-                            rl_yld = rl_data['평가손익률'] if rl_data else "미보유/매도완료"
-                            rl_amt = rl_data['보유수량'] if rl_data else "-"
+                                if ai_qty == "0.00 주" or ai_qty == "0 주":
+                                    if ai_trades == "매수 0회 / 매도 0회":
+                                        ai_status = "진입 안함 (0주)"
+                                        ai_display = "-"
+                                    else:
+                                        ai_status = "전량 매도 (0주)"
+                                        ai_display = f"{ai_prof}원 ({ai_pct})"
+                                else:
+                                    ai_status = f"보유 중 ({ai_qty})"
+                                    ai_display = f"{ai_prof}원 ({ai_pct})"
+                            else:
+                                ai_status = "유니버스 제외"
+                                ai_display = "-"
+                                ai_trades = "-"
+
+                            # 2. 실계좌 데이터 추출 및 정제
+                            if rl_data:
+                                rl_qty = rl_data.get('보유수량', '0 주')
+                                rl_pct = rl_data.get('평가손익률', '0.00%')
+                                try:
+                                    rl_qty_num = int(str(rl_qty).replace(' 주', '').replace(',', ''))
+                                    rl_buy = float(rl_data.get('_raw_buy', 0))
+                                    rl_cur = float(rl_data.get('_raw_price', 0))
+                                    rl_prof_amt = (rl_cur - rl_buy) * rl_qty_num
+                                    rl_display = f"{rl_prof_amt:+,.0f}원 ({rl_pct})"
+                                except:
+                                    rl_display = f"확인불가 ({rl_pct})"
+                                rl_status = f"보유 중 ({rl_qty})"
+                            else:
+                                rl_status = "보유 안함 (0주)"
+                                rl_display = "-"
 
                             comp_data.append({
                                 "종목명": name,
-                                "AI 이론 수익률": ai_yld,
-                                "내 실제 수익률": rl_yld,
-                                "AI 보유 수량": ai_amt,
-                                "내 실제 수량": rl_amt,
-                                "AI 시뮬레이션 매매 횟수": ai_trades
+                                "🤖 AI 상태": ai_status,
+                                "🤖 AI 누적 수익금 (수익률)": ai_display,
+                                "🔌 내 실계좌 상태": rl_status,
+                                "🔌 내 실계좌 평가손익 (수익률)": rl_display,
+                                "AI 누적 매매 횟수": ai_trades
                             })
 
                         st.dataframe(pd.DataFrame(comp_data), use_container_width=True)
@@ -927,7 +955,6 @@ with tab3:
 
         st.markdown("---")
         
-        # 장기 백테스트 기능
         st.subheader("📊 장기 초과수익 검증 (Long-Term Backtest)")
         st.caption("※ 관심종목 유니버스를 바탕으로 수년 전부터 현재까지 장기 운용했을 때의 성과를 검증합니다.")
         
