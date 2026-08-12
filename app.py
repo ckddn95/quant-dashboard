@@ -155,9 +155,7 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     return None, None
 
 def execute_kis_order(ticker, qty, price, order_type="BUY", is_market=False):
-    """
-    안전 장치가 결합된 KIS API 주문 전송 엔진 (Fail-Safe 적용)
-    """
+    """안전 장치가 결합된 KIS API 주문 전송 엔진"""
     try:
         if int(qty) <= 0: return False, "주문 수량 오류 (수량 부족)"
         order_gubun = "01" if is_market else "00" 
@@ -513,7 +511,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     summary_rows.append({
         '종목명': '💡 [전체 합계]', '최종 보유 주수': '-', '기말 평가금': f"{sum_hval:,.0f} 원",
         '총 순수익 (원)': f"{sum_prof:+,.0f} 원 (자산대비 {(sum_prof/init_cash)*100 if init_cash>0 else 0:+.2f}%)",
-        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {sum_scnt}회",
+        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {s_cnt}회",
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
@@ -730,7 +728,7 @@ if SYS_APP_KEY:
         real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
 
 # ==========================================
-# 탭 구성 (V3.4: 자동매매 관제 탭 신설)
+# 탭 구성 (V3.5)
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📝 관심종목 유니버스 & AI 진단", 
@@ -906,27 +904,6 @@ with tab1:
             st.success("✅ 안전하게 저장 및 동기화되었습니다!")
             st.rerun()
 
-        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
-            changed_msgs, needs_save = [], False
-            for idx, r_dict in enumerate(p_data['stocks']):
-                s_name = r_dict['종목명']
-                curr_action = next((r['🤖 AI 액션 플랜'] for r in display_records if r['종목명'] == s_name), "기록없음 (실계좌이동)")
-                
-                if "기록없음" in curr_action: continue 
-
-                if curr_action != r_dict.get('last_action', "기록없음"):
-                    p_data['stocks'][idx]['last_action'] = curr_action 
-                    needs_save = True
-                    if "모니터링 유지" not in curr_action:
-                        changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
-            
-            if changed_msgs:
-                send_telegram_message(f"🤖 *[{selected_port} 관심종목] 시그널 감지!*\n" + "\n".join(changed_msgs))
-                st.toast("오토파일럿 알림 발송 완료!")
-            elif not auto_pilot: st.toast("새로운 신규 시그널이 없습니다.")
-            
-            if needs_save: save_portfolio_to_sheets(selected_port, p_data)
-
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
     st.markdown("한국투자증권에 실제로 매수(보유) 중인 종목만 이곳에 표시되며, AI가 매도/손절 타점을 집중 감시합니다.")
@@ -1046,7 +1023,7 @@ with tab2:
                                 easy_desc = "[손절 매도] 사전 설정된 최대 허용 손실폭(Stop-loss) 한도에 도달했습니다. 자산 보호를 위해 기계적인 강제 청산을 집행하십시오."
                             elif user_ret >= ts_target_pct: 
                                 action = "🔵 트레일링 스탑 가동"
-                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
+                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%)"
                                 easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
                                 action = "🔴 전량 청산 (추세 이탈)"
@@ -1091,13 +1068,12 @@ with tab2:
                 st.info("현재 실전 계좌에 매수(보유) 중인 종목이 없습니다. [탭 1]의 관심종목 리스트에서 타점을 대기하세요.")
 
 # ==========================================
-# [V3.4 신설 탭] 자동매매 전용 관제 & 우선순위 대기열
+# [V3.5 통합 패치] 자동매매 전용 관제 & 우선순위 대기열
 # ==========================================
 with tab3:
     st.header("🤖 실전 자동매매 관제센터 & 우선순위 주문 대기열")
     st.markdown("AI 퀀트 엔진이 포착한 진단 시그널을 바탕으로 **자동주문 전송 대상 종목을 우선순위별로 대기열(Queue)에 배치**하여 관제합니다.")
     
-    # 상단 컨트롤 메트릭
     col_c1, col_c2, col_c3, col_c4 = st.columns(4)
     col_c1.metric("🚨 킬 스위치 (Kill Switch)", "작동 중 (차단)" if kill_switch else "정상 (대기)")
     col_c2.metric("🚀 자동주문 상태", "활성화 (Auto)" if auto_trade_enabled else "비활성화 (Manual)")
@@ -1116,81 +1092,68 @@ with tab3:
     col_c4.metric("💵 가용 예수금", f"{real_cash_avail:,.0f} 원")
     st.markdown("---")
     
-    # 자동매매 주문 대기열(Queue) 수집 로직
     order_queue = []
     
-    # 1. 관심종목 중 '신규 매수 시그널' 수집
+    # [V3.5 핵심] 대기열 평가 유니버스 구축: 사용자 관심종목 + 실계좌 보유종목 (중복 제거)
+    eligible_stocks = {}
     if p_data and 'stocks' in p_data:
         for s in p_data['stocks']:
-            ticker = s.get('티커', '')
-            if ticker in real_holdings_tickers: continue # 이미 보유 중이면 관심종목 매수 대상에서 제외
+            eligible_stocks[s['티커']] = s.get('종목명', '')
             
-            res = fetch_stock_status(ticker)
-            if res and res[0] is not None:
-                c_p, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max = res
-                
-                c_price_live = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else c_p
-                if not c_price_live: c_price_live = c_p
-                
-                ma200_cond = is_above_ma200 if use_ma200_filter else True
-                diff_ma = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0
-                dist_ma20 = ((c_price_live / ma20) - 1) * 100 if ma20 > 0 else 0
-                
-                target_buy_amt = (real_total_eval if (SYS_APP_KEY and kis_data) else total_cash) * (max_alloc_pct / 100.0)
-                target_qty = int(target_buy_amt // c_price_live) if c_price_live > 0 else 0
-                
-                if current_strategy == '대형주 (Core)':
-                    score = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 0.2), 2)
-                    entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + whipsaw_buffer/100.0)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
-                else:
-                    score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
-                    is_dip = (-5.0 <= dist_ma20 <= 3.0) or (min(yf_low, c_price_live) <= ma20 * 1.01)
-                    entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
-                    
-                if entry_cond and target_qty > 0:
-                    req_fund = target_qty * c_price_live
-                    status_text = "대기 중"
-                    if kill_switch: status_text = "🚨 킬 스위치 차단됨"
-                    elif not auto_trade_enabled: status_text = "⏸️ 자동주문 비활성"
-                    elif real_cash_avail < req_fund: status_text = "⚠️ 예수금 부족"
-                    
-                    order_queue.append({
-                        '우선순위_분류': 1, # 매수는 2순위 (매도가 1순위)
-                        '🔥 점수': score,
-                        '종목명': s.get('종목명'),
-                        '티커': ticker,
-                        '구분': '🛒 신규 매수',
-                        '목표 주가': f"{c_price_live:,.0f} 원",
-                        '목표 주문 수량': f"{target_qty:,} 주",
-                        '필요 자금': f"{req_fund:,.0f} 원",
-                        '_req_fund': req_fund,
-                        '주문 실행 상태': status_text
-                    })
-
-    # 2. 실계좌 보유 종목 중 '매도/청산' 및 '비중 확대' 수집
     if SYS_APP_KEY and kis_data and not real_stocks_df.empty:
         for idx, row in real_stocks_df.iterrows():
-            ticker = row['티커']
-            live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
-            if live_c_price == 0: continue
+            eligible_stocks[row['티커']] = row.get('종목명', '')
             
-            qty_str = str(row.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
-            try: qty_num = int(float(qty_str))
-            except: qty_num = 0
-            
-            res = fetch_stock_status(ticker)
-            if not res or res[0] is None: continue
-            yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max = res
-            
-            user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
-            diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0
-            dist_ma20 = ((live_c_price / ma20) - 1) * 100 if ma20 else 0
-            exit_cond_trend = (ma20 < ma60 * (1 - whipsaw_buffer/200.0)) and not vix_contrarian
-            
-            # 매도 시그널 감지 (최우선 순위)
-            is_sell = False
-            sell_type = ""
-            if active_strat == '대형주 (Core)':
+    # 평가 루프
+    for ticker, s_name in eligible_stocks.items():
+        qty_num = 0
+        buy_price = 0.0
+        live_c_price = 0.0
+        
+        # 실계좌 내역 확인
+        if SYS_APP_KEY and kis_data and not real_stocks_df.empty:
+            match_row = real_stocks_df[real_stocks_df['티커'] == ticker]
+            if not match_row.empty:
+                r = match_row.iloc[0]
+                qty_str = str(r.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
+                try: qty_num = int(float(qty_str))
+                except: qty_num = 0
+                buy_price = float(r.get('_raw_buy', 0))
+                live_c_price = float(r.get('_raw_price', 0))
+
+        res = fetch_stock_status(ticker)
+        if not res or res[0] is None: continue
+        c_p, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max = res
+        
+        if qty_num == 0:
+            live_c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else c_p
+            if not live_c_price: live_c_price = c_p
+
+        if live_c_price <= 0: continue
+
+        user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+        diff_ma = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0
+        dist_ma20 = ((live_c_price / ma20) - 1) * 100 if ma20 > 0 else 0
+        ma200_cond = is_above_ma200 if use_ma200_filter else True
+        current_low = min(yf_low, live_c_price)
+        
+        ai_score = 0.0
+        entry_cond = False
+        exit_cond_trend = (ma20 < ma60 * (1 - whipsaw_buffer/200.0)) and not vix_contrarian
+        
+        if current_strategy == '대형주 (Core)':
+            ai_score = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 0.2), 2)
+            entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + whipsaw_buffer/100.0)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
+        else:
+            ai_score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
+            is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
+            entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
+
+        # 1. 매도(청산) 평가 (보유 수량이 있을 때만)
+        is_sell = False
+        sell_type = ""
+        if qty_num > 0:
+            if current_strategy == '대형주 (Core)':
                 if user_ret >= ts_target_pct: is_sell, sell_type = True, "🔵 트레일링 익절"
                 elif exit_cond_trend: is_sell, sell_type = True, "🔴 추세 이탈 매도"
             else:
@@ -1198,29 +1161,63 @@ with tab3:
                 elif user_ret >= ts_target_pct: is_sell, sell_type = True, "🔵 트레일링 익절"
                 elif exit_cond_trend: is_sell, sell_type = True, "🔴 추세 이탈 매도"
                 
-            if is_sell:
+        if is_sell:
+            status_text = "대기 중"
+            if kill_switch: status_text = "🚨 킬 스위치 차단됨"
+            elif not auto_trade_enabled: status_text = "⏸️ 자동주문 비활성"
+            
+            order_queue.append({
+                '우선순위_분류': 0, 
+                '🔥 점수': 999.0,
+                '종목명': s_name,
+                '티커': ticker,
+                '구분': sell_type,
+                '목표 주가': f"{live_c_price:,.0f} 원",
+                '목표 주문 수량': f"{qty_num:,} 주",
+                '필요 자금': f"-{live_c_price * qty_num:,.0f} 원 (회수)",
+                '_req_fund': 0,
+                '주문 실행 상태': status_text
+            })
+            continue # 매도 신호가 최우선이므로, 매도 시그널이 떴다면 매수 검토는 건너뜀
+
+        # 2. 매수(신규 진입 및 비중 확대) 평가
+        if entry_cond:
+            current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
+            is_bull_market = (current_strategy == '대형주 (Core)' and kospi_ret_60 > 0) or (current_strategy != '대형주 (Core)' and kosdaq_ret_60 > 0)
+            current_max_alloc_pct = max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct
+            current_max_alloc_pct = min(current_max_alloc_pct, 100.0)
+            
+            target_buy_amt = current_asset_base * (current_max_alloc_pct / 100.0)
+            current_holding_amt = qty_num * live_c_price
+            
+            additional_amt = max(0, target_buy_amt - current_holding_amt)
+            add_qty = int(additional_amt // live_c_price)
+            
+            if add_qty > 0:
+                req_fund = add_qty * live_c_price
                 status_text = "대기 중"
                 if kill_switch: status_text = "🚨 킬 스위치 차단됨"
                 elif not auto_trade_enabled: status_text = "⏸️ 자동주문 비활성"
+                elif real_cash_avail < req_fund: status_text = "⚠️ 예수금 부족"
+                
+                buy_type = "🛒 신규 매수" if qty_num == 0 else "🟢 비중 확대"
                 
                 order_queue.append({
-                    '우선순위_분류': 0, # 매도는 최우선 0순위
-                    '🔥 점수': 999.0,
-                    '종목명': row['종목명'],
+                    '우선순위_분류': 1,
+                    '🔥 점수': ai_score,
+                    '종목명': s_name,
                     '티커': ticker,
-                    '구분': sell_type,
+                    '구분': buy_type,
                     '목표 주가': f"{live_c_price:,.0f} 원",
-                    '목표 주문 수량': f"{qty_num:,} 주",
-                    '필요 자금': f"-{live_c_price * qty_num:,.0f} 원 (회수)",
-                    '_req_fund': 0,
+                    '목표 주문 수량': f"{add_qty:,} 주",
+                    '필요 자금': f"{req_fund:,.0f} 원",
+                    '_req_fund': req_fund,
                     '주문 실행 상태': status_text
                 })
-                
-    # 큐 DataFrame 변환 및 정렬
+
     queue_df = pd.DataFrame(order_queue)
     
     if not queue_df.empty:
-        # 우선순위 분류(0순위 매도 우선) -> 점수 내림차순 정렬
         queue_df = queue_df.sort_values(by=['우선순위_분류', '🔥 점수'], ascending=[True, False]).reset_index(drop=True)
         queue_df['우선순위'] = [f"{i+1}위" for i in range(len(queue_df))]
         
@@ -1245,7 +1242,7 @@ with tab3:
                         if "매도" in q_type or "익절" in q_type:
                             succ, msg = execute_kis_order(t_code, raw_qty, raw_price, order_type="SELL", is_market=True)
                             exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {msg}")
-                        elif "매수" in q_type:
+                        elif "매수" in q_type or "확대" in q_type:
                             req_f = q_row['_req_fund']
                             if real_cash_avail >= req_f:
                                 succ, msg = execute_kis_order(t_code, raw_qty, raw_price, order_type="BUY", is_market=False)
@@ -1259,6 +1256,7 @@ with tab3:
                     if exec_msgs:
                         send_telegram_message("🤖 *[수동 주문 전송 집행 결과]*\n" + "\n".join(exec_msgs))
                         st.success("수동 주문 집행이 완료되었습니다!")
+                        time.sleep(1)
                         st.rerun()
     else:
         st.info("💡 현재 AI 퀀트 엔진이 포착한 신규 매수 또는 매도 시그널이 없습니다. 대기열이 비어있습니다.")
@@ -1270,7 +1268,6 @@ with tab4:
     else:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         current_strategy = p_data.get('strategy', '대형주 (Core)')
-        total_cash = p_data.get('cash', 10000000)
         today_date = datetime.date.today()
         kis_data = st.session_state.get(cache_key)
         
@@ -1409,7 +1406,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v3.4)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v3.5 Final Master)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1446,7 +1443,7 @@ with tab5:
     *   **🟢 AI 진입 조건 (모두 만족 시):**
         1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치.
         2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
-        3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)에 위치하거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
+        3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
         4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 것 (심각한 악재로 인한 폭락 방지).
     *   **🔴 AI 이탈(매도/손절/퇴출) 조건:**
         1.  **추세/수급 붕괴:** 대형주와 동일하게 20일선이 60일선을 이탈하거나, 수급 폭발 이력이 소멸되면 전량 매도 및 관심종목 퇴출.
