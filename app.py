@@ -319,9 +319,10 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         
     portfolio_history, history_records = [], []
     trade_stats = {name: {'buy': 0, 'sell': 0, 'fee': 0.0, 'realized_pnl': 0.0} for name in stock_dfs}
-    shares, hold_days, max_invested, peak_price_since_buy, consecutive_losses, avg_buy_price, realized_pnl = ({name: 0 for name in stock_dfs} for _ in range(7))
+    shares = {name: 0 for name in stock_dfs}
+    hold_days, max_invested, peak_price_since_buy, consecutive_losses, avg_buy_price, realized_pnl = ({name: 0 for name in stock_dfs} for _ in range(6))
     cooldown_until = {name: pd.Timestamp.min for name in stock_dfs}
-    cash = init_cash
+    cash = float(init_cash)
     
     base_alloc_ratio, ts_target, ts_drop = max_alloc_pct / 100.0, ts_target_pct / 100.0, ts_drop_pct / 100.0
     
@@ -372,31 +373,41 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             for name in stock_dfs:
                 if date_val not in stock_dfs[name].index: continue
                 c_price = float(stock_dfs[name].loc[date_val, 'Close'])
+                if c_price <= 0: continue
+                
                 if name in active_stocks:
                     target_alloc = min(total_asset * (scores.get(name, 1.0) / total_score), total_asset * current_max_alloc_ratio)
                     diff_val = target_alloc - (shares[name] * c_price)
                     
-                    if diff_val > 0: 
-                        cost = min(diff_val, max(cash - (cash * 0.0025), 0))
-                        if cost > 0:
-                            fee = cost * 0.0025
-                            cash -= (cost + fee)
-                            avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + cost) / (shares[name] + cost / c_price) if shares[name] > 0 else c_price
-                            shares[name] += cost / c_price
+                    if diff_val > 0:
+                        buy_qty = int(diff_val // c_price)
+                        if buy_qty > 0:
+                            actual_cost = buy_qty * c_price
+                            fee = actual_cost * 0.0025
+                            if cash >= (actual_cost + fee):
+                                cash -= (actual_cost + fee)
+                                avg_buy_price[name] = ((shares[name] * avg_buy_price[name]) + actual_cost) / (shares[name] + buy_qty) if shares[name] > 0 else c_price
+                                shares[name] += buy_qty
+                                trade_stats[name]['fee'] += fee
+                                realized_pnl[name] -= fee 
+                                max_invested[name] = max(max_invested[name], shares[name] * c_price)
+                                peak_price_since_buy[name] = max(peak_price_since_buy[name], c_price)
+                    elif diff_val < 0:
+                        sell_qty = int(abs(diff_val) // c_price)
+                        sell_qty = min(sell_qty, int(shares[name]))
+                        if sell_qty > 0:
+                            proceeds = sell_qty * c_price
+                            fee = proceeds * 0.0025
+                            realized_pnl[name] += sell_qty * (c_price - avg_buy_price[name]) - fee
+                            cash += (proceeds - fee)
+                            shares[name] -= sell_qty
                             trade_stats[name]['fee'] += fee
-                            realized_pnl[name] -= fee 
-                            max_invested[name] = max(max_invested[name], shares[name] * c_price)
-                            peak_price_since_buy[name] = max(peak_price_since_buy[name], c_price)
-                    elif diff_val < 0: 
-                        proceeds, fee = abs(diff_val), abs(diff_val) * 0.0025
-                        realized_pnl[name] += (proceeds / c_price) * (c_price - avg_buy_price[name]) - fee
-                        cash += (proceeds - fee)
-                        shares[name] -= (proceeds / c_price)
-                        trade_stats[name]['fee'] += fee
                 else:
                     if shares[name] > 0: 
-                        proceeds, fee = shares[name] * c_price, shares[name] * c_price * 0.0025
-                        pnl = shares[name] * (c_price - avg_buy_price[name]) - fee
+                        sell_qty = int(shares[name])
+                        proceeds = sell_qty * c_price
+                        fee = proceeds * 0.0025
+                        pnl = sell_qty * (c_price - avg_buy_price[name]) - fee
                         if pnl < 0:
                             consecutive_losses[name] += 1
                             if consecutive_losses[name] >= 2 and cooldown_days > 0: cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
@@ -404,12 +415,15 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                         realized_pnl[name] += pnl
                         cash += (proceeds - fee)
                         trade_stats[name]['fee'] += fee
-                        shares[name], avg_buy_price[name], peak_price_since_buy[name] = 0.0, 0.0, 0.0
+                        shares[name], avg_buy_price[name], peak_price_since_buy[name] = 0, 0.0, 0.0
         else:
             for name in stock_dfs:
                 if shares[name] > 0 and date_val in stock_dfs[name].index:
-                    c_price, proceeds = float(stock_dfs[name].loc[date_val, 'Close']), shares[name] * float(stock_dfs[name].loc[date_val, 'Close'])
-                    fee, pnl = proceeds * 0.0025, shares[name] * (c_price - avg_buy_price[name]) - proceeds * 0.0025
+                    c_price = float(stock_dfs[name].loc[date_val, 'Close'])
+                    sell_qty = int(shares[name])
+                    proceeds = sell_qty * c_price
+                    fee = proceeds * 0.0025
+                    pnl = sell_qty * (c_price - avg_buy_price[name]) - fee
                     if pnl < 0:
                         consecutive_losses[name] += 1
                         if consecutive_losses[name] >= 2 and cooldown_days > 0: cooldown_until[name] = date_val + pd.Timedelta(days=cooldown_days)
@@ -417,7 +431,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     realized_pnl[name] += pnl
                     cash += (proceeds - fee)
                     trade_stats[name]['fee'] += fee
-                    shares[name], avg_buy_price[name], peak_price_since_buy[name] = 0.0, 0.0, 0.0
+                    shares[name], avg_buy_price[name], peak_price_since_buy[name] = 0, 0.0, 0.0
                     
         final_eval = sum(shares[name] * float(stock_dfs[name].loc[date_val, 'Close']) for name in stock_dfs if date_val in stock_dfs[name].index)
         portfolio_history.append(max(cash + final_eval, 0))
@@ -454,7 +468,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         
         sum_hval += h_val; sum_prof += t_prof; sum_fee += fee; sum_bcnt += b_cnt; sum_scnt += s_cnt
         summary_rows.append({
-            '종목명': name, '최종 보유 주수': f"{shares[name]:.2f} 주", '기말 평가금': f"{h_val:,.0f} 원",
+            '종목명': name, '최종 보유 주수': f"{int(shares[name]):,} 주", '기말 평가금': f"{h_val:,.0f} 원",
             '총 순수익 (원)': f"{t_prof:+,.0f} 원", '수익률 (%)': f"{max((t_prof/inv_base)*100, -100.0):+.2f}%",
             '매매 횟수': f"매수 {b_cnt}회 / 매도 {s_cnt}회", '총 발생 수수료': f"{fee:,.0f} 원",
             '기말 포트폴리오 비중': f"{(h_val/final_asset)*100 if final_asset>0 else 0:.2f}%"
@@ -463,7 +477,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     summary_rows.append({
         '종목명': '💡 [전체 합계]', '최종 보유 주수': '-', '기말 평가금': f"{sum_hval:,.0f} 원",
         '총 순수익 (원)': f"{sum_prof:+,.0f} 원 (자산대비 {(sum_prof/init_cash)*100 if init_cash>0 else 0:+.2f}%)",
-        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {s_cnt}회",
+        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {sum_scnt}회",
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
@@ -823,19 +837,40 @@ with tab2:
                         _, _, ma60, ma20, _, _, _, _, _, _, _, _, _ = fetch_stock_status(row['티커'], live_price=live_c_price)
 
                         user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                        diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0
                         exit_cond_trend = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian
                         
                         if active_strat == '대형주 (Core)': 
-                            if user_ret >= ts_target_pct: action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
-                            elif exit_cond_trend: action = "🔴 즉각 매도 (추세 이탈)"
-                            else: action = "🟢 보유 유지"
+                            if user_ret >= ts_target_pct: 
+                                action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
+                                reason = f"목표 수익률({ts_target_pct}%) 달성 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 감시 중"
+                            elif exit_cond_trend: 
+                                action = "🔴 즉각 매도 (추세 이탈)"
+                                reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
+                            else: 
+                                action = "🟢 보유 유지"
+                                reason = f"20/60선 정배열 추세 유지 중 (현재 이격 {diff_ma:+.2f}%)"
                         else:
-                            if user_ret <= sat_stop_loss: action = "🔴 강제 손절 집행"
-                            elif user_ret >= ts_target_pct: action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
-                            elif exit_cond_trend: action = "🔴 전량 매도"
-                            else: action = "🟢 보유 유지"
+                            if user_ret <= sat_stop_loss: 
+                                action = "🔴 강제 손절 집행"
+                                reason = f"손절 기준선({sat_stop_loss}%) 이하 하락 도달 (현재 {user_ret:+.2f}%)"
+                            elif user_ret >= ts_target_pct: 
+                                action = "🔵 목표수익 도달 (트레일링 스탑 가동)"
+                                reason = f"목표 수익률({ts_target_pct}%) 달성 (현재 {user_ret:+.2f}%). 최고점 대비 하락 시 익절 감시 중"
+                            elif exit_cond_trend: 
+                                action = "🔴 전량 매도"
+                                reason = f"20/60선 데드크로스 이탈 (현재 이격 {diff_ma:+.2f}%)"
+                            else: 
+                                action = "🟢 보유 유지"
+                                reason = f"손절선({sat_stop_loss}%) 방어 및 추세 유지 중 (현재 수익률 {user_ret:+.2f}%)"
 
-                        live_results.append({'보유 종목명': row['종목명'], '한투 실시간 현재가': f"{live_c_price:,.0f} 원", '수익률': f"{user_ret:+.2f}%", '🤖 실계좌 전용 액션 플랜': action})
+                        live_results.append({
+                            '보유 종목명': row['종목명'], 
+                            '한투 실시간 현재가': f"{live_c_price:,.0f} 원", 
+                            '수익률': f"{user_ret:+.2f}%", 
+                            '🤖 실계좌 전용 액션 플랜': action,
+                            '📊 판단 근거 (알고리즘 조건 상태)': reason
+                        })
                     
                     st.table(pd.DataFrame(live_results))
                     
@@ -912,11 +947,12 @@ with tab3:
                             ai_data = ai_summary.get(name)
                             rl_data = real_summary.get(name)
 
+                            # 1. AI 데이터 파싱 (숫자 표기)
                             if ai_data:
                                 ai_qty_str = ai_data['최종 보유 주수'].replace(' 주', '').strip()
-                                try: ai_qty_num = float(ai_qty_str.replace(',', ''))
+                                try: ai_qty_num = int(float(ai_qty_str.replace(',', '')))
                                 except: ai_qty_num = 0
-                                ai_qty = f"{ai_qty_str} 주" if ai_qty_num > 0 else "0 주"
+                                ai_qty = f"{ai_qty_num:,} 주"
                                 
                                 ai_trades = ai_data['매매 횟수']
                                 ai_prof = ai_data['총 순수익 (원)'].replace(' 원', '').strip()
@@ -927,11 +963,12 @@ with tab3:
                                 ai_trades = "매수 0회 / 매도 0회"
                                 ai_display = "0원 (0.00%)"
 
+                            # 2. 실계좌 데이터 파싱 (숫자 표기)
                             if rl_data:
                                 rl_qty_str = str(rl_data.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
                                 try: rl_qty_num = int(rl_qty_str)
                                 except: rl_qty_num = 0
-                                rl_qty = f"{rl_qty_str} 주" if rl_qty_num > 0 else "0 주"
+                                rl_qty = f"{rl_qty_num:,} 주"
                                 
                                 rl_pct = rl_data.get('평가손익률', '0.00%')
                                 try:
@@ -994,7 +1031,7 @@ with tab3:
 
 with tab4:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.18)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v2.20)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
