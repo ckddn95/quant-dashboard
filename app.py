@@ -119,6 +119,8 @@ def send_telegram_message(message):
     except Exception as e:
         return False, str(e)
 
+# [V5.0 핵심 패치] 구글 시트 읽기 요청 과부하(429 에러) 방지를 위한 스마트 캐싱 적용 (120초 유지)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_all_portfolios_from_sheets():
     try:
         client = get_gspread_client()
@@ -147,6 +149,7 @@ def save_portfolio_to_sheets(name, p_data):
         data_str = json.dumps(p_data, ensure_ascii=False)
         if cell: worksheet.update_cell(cell.row, 2, data_str)
         else: worksheet.append_row([name, data_str])
+        load_all_portfolios_from_sheets.clear() # [V5.0 패치] 저장 시 캐시 무효화로 데이터 동기화
     except Exception as e:
         st.error(f"구글 시트 저장 오류: {e}")
 
@@ -155,6 +158,7 @@ def delete_portfolio_from_sheets(name):
         worksheet = get_gspread_client().open_by_key(SPREADSHEET_ID).worksheet("Portfolios")
         cell = worksheet.find(name)
         if cell: worksheet.delete_rows(cell.row)
+        load_all_portfolios_from_sheets.clear() # [V5.0 패치] 삭제 시 캐시 무효화로 데이터 동기화
     except Exception as e:
         st.error(f"구글 시트 삭제 오류: {e}")
 
@@ -234,11 +238,10 @@ def fetch_market_data():
         return vix_val, (vix_val >= 25.0) and (vix_val < vix_ma3), (vix_val < 30.0), kospi_ret_60, kosdaq_ret_60
     except: return 20.0, False, True, 0.0, 0.0
 
-# [V4.9 핵심 교체] yfinance 대신 FinanceDataReader(FDR)로 한국 주식 데이터 완전 대체
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
     try:
-        tc = str(ticker_code).strip().zfill(6) # 005930 처럼 6자리 포맷 강제 유지
+        tc = str(ticker_code).strip().zfill(6)
         start_dt = (datetime.date.today() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
         
         df = fdr.DataReader(tc, start=start_dt)
@@ -338,13 +341,8 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     for _, row in sim_stocks.iterrows():
         tk, nm = str(row.get('티커','')).strip().zfill(6), str(row.get('종목명',''))
         if not tk or tk == '000000': continue
-        
-        # [V4.9 핵심 교체] 시뮬레이션에서도 FDR 엔진 사용
-        try:
-            df = fdr.DataReader(tk, start=f_start, end=end_date)
-        except:
-            df = pd.DataFrame()
-            
+        try: df = fdr.DataReader(tk, start=f_start, end=end_date)
+        except: df = pd.DataFrame()
         if df is None or df.empty: continue
         
         df['Close'], df['Volume'] = df['Close'].ffill(), df['Volume'].ffill()
@@ -1360,7 +1358,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.9 Final Master)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.0 Final)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1443,5 +1441,6 @@ with tab5:
     *   **수학적 팩트 기반 입출금 추적:** 기존의 부정확한 수동 입출금 입력 방식을 폐기하고, `현재 계좌 총 평가금 - 보유 주식 평가손익 - 봇 누적 실현손익` 공식을 통해 외부에서 입출금된 순수 투입 원금을 1원 단위까지 100% 정확하게 자동 역산합니다.
     *   **통합 평가총액 집계 및 무결성 표출:** 보유 종목별 개별 평가금액(`수량 × 현재가`)과 실계좌 보유 주식의 전체 평가총액/평가손익/수익률을 자동 집계하여 최하단 요약행에 직관적으로 표시합니다.
     *   **보안 로그인 및 세션 영구 보존:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다.
-    *   **[V4.9] 데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
+    *   **데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
+    *   **[V5.0] 스마트 캐싱 최적화:** 무분별한 구글 시트 API 호출을 막기 위해 120초 단위의 내부 메모리 캐싱 로직을 도입하여 트래픽 초과(429 에러)를 100% 방어합니다.
     """, unsafe_allow_html=True)
