@@ -657,17 +657,23 @@ with tab1:
                             *   **🏆 AI 스코어링:** 최근 거래량 급증 크기(40%) + 60일 모멘텀(30%) + 20일 모멘텀(30%) 점수를 합산하여 가장 타점이 좋은 상위 5개 종목 추천
                             """)
                     
-                    # [V2.11 핵심 변경] 현재 관리 중인 모든 티커 목록 (관심종목 + 실계좌) 가져오기
-                    current_tickers = [str(s.get('티커')).strip() for s in p_data.get('stocks', [])]
+                    # [V2.12 핵심 변경] 실계좌와 관심종목 리스트를 각각 구분하여 상태 파악
+                    current_watchlist_tickers = [str(s.get('티커')).strip() for s in p_data.get('stocks', [])]
                     
                     for _, row in scan_result.iterrows():
                         c1, c2, c3 = st.columns([4, 4, 2])
                         c1.write(f"**{row['종목명']}** (`{row['티커']}`)")
                         c2.write(f"현재가: {row['현재가']}")
                         
-                        # 이미 추가된 종목인지 검사
-                        if str(row['티커']).strip() in current_tickers:
-                            c3.button("✔️ 보유중", key=f"add_{row['티커']}", disabled=True)
+                        ticker_str = str(row['티커']).strip()
+                        
+                        # 1. KIS 실계좌에 이미 보유 중인 경우
+                        if ticker_str in real_holdings_tickers:
+                            c3.button("🔌 실계좌 보유", key=f"add_{row['티커']}", disabled=True)
+                        # 2. 실계좌엔 없지만 관심종목 탭(1)에 이미 담아둔 경우
+                        elif ticker_str in current_watchlist_tickers:
+                            c3.button("📝 관심종목", key=f"add_{row['티커']}", disabled=True)
+                        # 3. 둘 다 없는 순수 신규 발굴 종목인 경우
                         else:
                             if c3.button("➕ 담기", key=f"add_{row['티커']}"):
                                 p_data['stocks'].append({'종목명': row['종목명'], '티커': row['티커'], '매수단가': 0, '보유수량': 0})
