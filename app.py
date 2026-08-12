@@ -138,6 +138,32 @@ def get_kis_access_token(app_key, app_secret, is_mock=True):
         pass
     return None
 
+# [V2.6 추가] KIS API를 이용한 단일 종목 실시간 단가 조회
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/uapi/domestic-stock/v1/quotations/inquire-price"
+    headers = {
+        "content-type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHKST01010100"
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": str(ticker).strip()
+    }
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('rt_cd') == '0':
+                return float(data['output']['stck_prpr'])
+    except Exception:
+        pass
+    return None
+
 def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-balance"
@@ -206,8 +232,9 @@ def fetch_market_data():
     except:
         return 20.0, False, True, 0.0, 0.0
 
+# [V2.6 수정] live_price 매개변수를 추가하여 KIS 실시간 가격이 있을 경우 덮어쓰기 지원
 @st.cache_data(ttl=3600)
-def fetch_stock_status(ticker_code):
+def fetch_stock_status(ticker_code, live_price=None):
     try:
         for suffix in ['.KS', '.KQ']:
             df = yf.download(f"{ticker_code}{suffix}", period="2y", progress=False)
@@ -218,8 +245,15 @@ def fetch_stock_status(ticker_code):
                 low_prices = df['Low'].dropna() if 'Low' in df.columns else close_prices
                 if len(close_prices) == 0: continue
                 
+                # 실시간 단가가 입력되면 덮어쓰기하여 모든 보조지표를 실시간 기준에 맞춤
                 current_price = float(close_prices.iloc[-1])
+                if live_price and float(live_price) > 0:
+                    current_price = float(live_price)
+                    
                 current_low = float(low_prices.iloc[-1])
+                if live_price and float(live_price) < current_low:
+                    current_low = float(live_price)
+                    
                 ma200 = float(close_prices.rolling(window=200).mean().iloc[-1]) if len(close_prices) >= 200 else current_price
                 ma60 = float(close_prices.rolling(window=60).mean().iloc[-1]) if len(close_prices) >= 60 else current_price
                 ma60_10d_ago = float(close_prices.rolling(window=60).mean().iloc[-11]) if len(close_prices) >= 70 else ma60
@@ -639,7 +673,7 @@ if p_data:
     else: st.sidebar.warning(f"🔑 **KIS API 미연동**")
 
 # ==========================================
-# 텔레그램 연동 상태 및 오토파일럿 (V2.5)
+# 텔레그램 연동 상태 및 오토파일럿
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("📱 텔레그램 알림 봇 연동")
@@ -731,7 +765,6 @@ with tab1:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         if stocks_df.empty: stocks_df = pd.DataFrame(columns=['종목명', '티커', '매수단가', '보유수량'])
 
-        # --- AI 스캐너 및 원클릭 종목 채우기 복구 ---
         col_src1, col_src2 = st.columns(2)
         with col_src1:
             if st.button("➕ 대표 종목 자동 채우기 (샘플)", use_container_width=True):
@@ -762,10 +795,57 @@ with tab1:
 
         st.markdown("---")
         st.markdown("**가상 포트폴리오 내역 (매수단가 및 보유수량 테스트 입력)**")
-        edited_df = st.data_editor(stocks_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}")
+        
+        # [V2.6 핵심] KIS API로 실시간 단가 조회하여 표에 즉시 표시
+        kis_token_for_sandbox = get_kis_access_token(SYS_APP_KEY, SYS_APP_SECRET, is_mock=SYS_IS_MOCK) if SYS_APP_KEY else None
+        if kis_token_for_sandbox:
+            st.caption("⚡ **KIS API 연결됨:** 한국투자증권 실시간 호가 데이터를 반영 중입니다.")
+        else:
+            st.caption("📡 **KIS API 미연결:** Yahoo Finance 지연 데이터(약 15분)를 반영 중입니다.")
+            
+        display_records = []
+        for idx, row in stocks_df.iterrows():
+            ticker = row.get('티커', '')
+            buy_price = pd.to_numeric(row.get('매수단가', 0), errors='coerce')
+            c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_for_sandbox, SYS_IS_MOCK) if kis_token_for_sandbox else None
+            
+            # KIS 조회 실패 혹은 API 미연결 시 야후 파이낸스로 2차 조회
+            if not c_price:
+                try:
+                    yf_df = yf.download(f"{ticker}.KS", period="1d", progress=False)
+                    if yf_df.empty: yf_df = yf.download(f"{ticker}.KQ", period="1d", progress=False)
+                    if not yf_df.empty:
+                        if isinstance(yf_df.columns, pd.MultiIndex): yf_df.columns = yf_df.columns.get_level_values(0)
+                        c_price = float(yf_df['Close'].iloc[-1])
+                except:
+                    c_price = 0
+                    
+            ret_val = ((c_price / buy_price) - 1) * 100 if buy_price > 0 and c_price and c_price > 0 else 0
+            
+            record = row.to_dict()
+            record['실시간 현재가'] = c_price if c_price else 0
+            record['수익률(%)'] = ret_val
+            display_records.append(record)
+            
+        display_df = pd.DataFrame(display_records)
+
+        # 표에서 [현재가]와 [수익률]은 사용자가 수정하지 못하도록 읽기 전용(disabled=True) 설정
+        col_config = {
+            "종목명": st.column_config.TextColumn("종목명"),
+            "티커": st.column_config.TextColumn("티커"),
+            "매수단가": st.column_config.NumberColumn("매수단가 (수정가능)", format="%d"),
+            "보유수량": st.column_config.NumberColumn("보유수량 (수정가능)", format="%d"),
+            "실시간 현재가": st.column_config.NumberColumn("🟢 실시간 현재가 (조회용)", format="%d", disabled=True),
+            "수익률(%)": st.column_config.NumberColumn("📊 현재 수익률 (조회용)", format="%.2f %%", disabled=True),
+            "last_action": None # 내부 데이터 숨김
+        }
+        
+        edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}", column_config=col_config)
         
         if st.button("💾 표 데이터 수정 후 덮어쓰기 (Quick Save)", type="primary"):
-            p_data['stocks'] = edited_df.to_dict(orient='records')
+            # 구글 시트에 저장할 때는 조회용 열을 빼고 핵심 정보만 깔끔하게 저장
+            save_df = edited_df[['종목명', '티커', '매수단가', '보유수량']]
+            p_data['stocks'] = save_df.to_dict(orient='records')
             save_portfolio_to_sheets(selected_port, p_data)
             st.success("✅ 구글 시트 DB에 저장되었습니다!")
 
@@ -787,7 +867,10 @@ with tab1:
                         buy_price, quantity = pd.to_numeric(row.get('매수단가', 0), errors='coerce'), pd.to_numeric(row.get('보유수량', 0), errors='coerce')
                         is_holding = (quantity > 0) and (buy_price > 0)
                         
-                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = fetch_stock_status(s_ticker)
+                        # [V2.6 핵심] 표에서 가져온 100% 실시간 단가를 AI 진단 엔진에 넘겨서 이격도 재계산
+                        live_price = float(row.get('실시간 현재가', 0))
+                        
+                        c_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, current_low, recent_vol_max = fetch_stock_status(s_ticker, live_price=live_price)
                         if c_price is None: continue
                         stock_data_cache[s_name] = {'price': c_price, 'ma200': ma200, 'ma60': ma60, 'ma20': ma20, 'drawdown': drawdown, 'is_holding': is_holding, 'qty': quantity, 'is_above_ma200': is_above_ma200, 'low': current_low, 'vol_surged': vol_surged, 'ma60_slope': ma60_slope_positive, 'ret_20': ret_20}
 
@@ -862,7 +945,6 @@ with tab2:
         if kis_data:
             real_total_eval, real_stocks_df = kis_data['total_eval'], pd.DataFrame(kis_data['stocks'])
             
-            # --- 실계좌 차트 시각화 (V2.1) 복구 ---
             col_m1, col_m2, col_m3 = st.columns(3)
             col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
             if not real_stocks_df.empty:
@@ -881,9 +963,12 @@ with tab2:
                     with st.spinner("실계좌 종목 분석 중..."):
                         buf, live_results = whipsaw_buffer / 100.0, []
                         for idx, row in real_stocks_df.iterrows():
-                            c_price, ma200, ma60, ma20, _, _, _, _, _, _, _, _, _ = fetch_stock_status(row['티커'])
-                            live_c_price, buy_price = float(row.get('_raw_price', c_price or 0)), float(row.get('_raw_buy', 0))
+                            # 실전 계좌도 실시간 단가 덮어쓰기 로직 적용
+                            live_c_price = float(row.get('_raw_price', 0))
+                            buy_price = float(row.get('_raw_buy', 0))
                             if live_c_price == 0: continue
+                                
+                            _, ma200, ma60, ma20, _, _, _, _, _, _, _, _, _ = fetch_stock_status(row['티커'], live_price=live_c_price)
 
                             if active_strat == '대형주 (Core)': action = "🟢 보유 유지" if ma20 and ma60 and (ma20 >= ma60 * (1 - buf/2)) else "🔴 즉각 매도 (추세 이탈)"
                             else:
