@@ -233,7 +233,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     try:
         bm_df = fdr.DataReader(index_sym, fetch_start, end_date)
         if not bm_df.empty:
-            bm_df = bm_df[~bm_df.index.duplicated(keep='first')] # [V2.13 핵심] 인덱스 중복 에러 차단
+            bm_df = bm_df[~bm_df.index.duplicated(keep='first')]
             if bm_df.index.tz is not None: bm_df.index = bm_df.index.tz_localize(None)
             bm_df['Bm_Ret_60'] = bm_df['Close'] / bm_df['Close'].shift(60) - 1
             bm_df['Bm_MA60'] = bm_df['Close'].rolling(60).mean()
@@ -249,7 +249,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     try:
         vix_df = yf.download("^VIX", start=fetch_start, end=end_date, progress=False)
         if not vix_df.empty:
-            vix_df = vix_df[~vix_df.index.duplicated(keep='first')] # [V2.13 핵심]
+            vix_df = vix_df[~vix_df.index.duplicated(keep='first')]
             if isinstance(vix_df.columns, pd.MultiIndex): vix_df.columns = vix_df.columns.get_level_values(0)
             if vix_df.index.tz is not None: vix_df.index = vix_df.index.tz_localize(None)
             vix_df['VIX_MA3'] = vix_df['Close'].rolling(3).mean()
@@ -269,7 +269,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         for suf in ['.KS', '.KQ']:
             temp_df = yf.download(f"{ticker}{suf}", start=fetch_start, end=end_date, progress=False)
             if not temp_df.empty:
-                temp_df = temp_df[~temp_df.index.duplicated(keep='first')] # [V2.13 핵심]
+                temp_df = temp_df[~temp_df.index.duplicated(keep='first')]
                 if isinstance(temp_df.columns, pd.MultiIndex): temp_df.columns = temp_df.columns.get_level_values(0)
                 df = temp_df
                 break
@@ -467,8 +467,21 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
-    history_df = pd.DataFrame(history_records).set_index('Date')
-    eom_val_df = history_df.resample('ME').last() if hasattr(history_df.resample('M'), 'last') else history_df.resample('M').last()
+    # [V2.14 핵심 에러 수정] 가장 안전한 날짜 인덱싱 및 리샘플링
+    history_df = pd.DataFrame(history_records)
+    if history_df.empty: return None
+    
+    history_df['Date'] = pd.to_datetime(history_df['Date'])
+    history_df = history_df.set_index('Date')
+    
+    try:
+        eom_val_df = history_df.resample('ME').last()
+    except Exception:
+        eom_val_df = history_df.resample('M').last()
+        
+    if eom_val_df.empty:
+        eom_val_df = history_df.tail(1)
+        
     eom_weights = (eom_val_df.div(eom_val_df.sum(axis=1), axis=0) * 100).fillna(0)
     eom_weights.index = eom_weights.index.strftime('%Y-%m')
     cols_ordered = sorted([c for c in eom_weights.columns if c != '현금(Cash)']) + ['현금(Cash)']
@@ -616,7 +629,7 @@ if SYS_APP_KEY:
             holdings, summary = fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
             if holdings is not None and summary is not None:
                 tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
-                tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0)) # [V2.13 핵심] 포워드 테스트 비교용 실계좌 누적 수익
+                tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
                 imported = [{'종목명': i.get('prdt_name'), '티커': i.get('pdno'), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
                 st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'stocks': imported}
 
@@ -840,13 +853,12 @@ with tab3:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         current_strategy = p_data.get('strategy', '대형주 (Core)')
         total_cash = p_data.get('cash', 10000000)
-        created_at_str = p_data.get('created_at', '2024-01-01') # 기본값 설정
+        created_at_str = p_data.get('created_at', '2024-01-01')
         
         try: created_date = pd.to_datetime(created_at_str).date()
         except: created_date = datetime.date(2024, 1, 1)
         today_date = datetime.date.today()
 
-        # [V2.13 복구] 포워드 테스트 (이론 vs 실제 비교)
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
         st.markdown(f"포트폴리오 생성일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 성적**과, 고객님의 **실제 계좌 성적**을 나란히 비교합니다.")
 
@@ -883,7 +895,6 @@ with tab3:
 
         st.markdown("---")
         
-        # [기존] 장기 백테스트 기능
         st.subheader("📊 장기 초과수익 검증 (Long-Term Backtest)")
         st.caption("※ 관심종목 유니버스를 바탕으로 수년 전부터 현재까지 장기 운용했을 때의 성과를 검증합니다.")
         
