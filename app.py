@@ -189,7 +189,7 @@ def fetch_stock_status(ticker_code):
                 
                 return (yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, (ma60 > ma60_10d_ago), (yf_price >= ma200), recent_20d_vol_max >= 200.0, yf_low, recent_20d_vol_max)
     except: pass
-    return None, None, None, None, None, None, None, None, False, False, False, None, 0.0
+    return None
 
 @st.cache_data(ttl=3600)
 def run_core_scanner(use_ma200_filter_flag, buf_pct):
@@ -479,7 +479,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     summary_rows.append({
         '종목명': '💡 [전체 합계]', '최종 보유 주수': '-', '기말 평가금': f"{sum_hval:,.0f} 원",
         '총 순수익 (원)': f"{sum_prof:+,.0f} 원 (자산대비 {(sum_prof/init_cash)*100 if init_cash>0 else 0:+.2f}%)",
-        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {s_cnt}회",
+        '수익률 (%)': '-', '매매 횟수': f"매수 {sum_bcnt}회 / 매도 {sum_scnt}회",
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
@@ -848,24 +848,6 @@ with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
     st.markdown("한국투자증권에 실제로 매수(보유) 중인 종목만 이곳에 표시되며, AI가 매도/손절 타점을 집중 감시합니다.")
     
-    real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
-    try: real_base_date = pd.to_datetime(real_base_date_str).date()
-    except: real_base_date = datetime.date(2024, 1, 1)
-        
-    real_base_principal = float(p_data.get('real_base_principal', p_data.get('cash', 10000000))) if p_data else 10000000.0
-
-    with st.expander("⚙️ 계좌 성과 측정 기준 설정 (포트폴리오 생성일 연동)", expanded=False):
-        st.markdown("포트폴리오가 생성된 시점(또는 특정 기준일)의 원금을 입력하면, 증권사 앱에서 보여주는 단순 평가손익이 아닌 **'기준일 대비 실제 누적 수익률'**을 정확하게 추적할 수 있습니다.")
-        c1, c2, c3 = st.columns([3, 3, 2])
-        new_date = c1.date_input("📅 성과 측정 기준일", real_base_date)
-        new_prin = c2.number_input("💰 기준일 당시 투입 원금 (원)", value=int(real_base_principal), step=1000000)
-        if c3.button("💾 기준 설정 저장", use_container_width=True):
-            p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
-            p_data['real_base_principal'] = new_prin
-            save_portfolio_to_sheets(selected_port, p_data)
-            st.success("✅ 성과 측정 기준이 업데이트되었습니다.")
-            st.rerun()
-            
     if not SYS_APP_KEY:
         st.warning("사이드바에서 KIS API 키를 등록해주세요.")
     else:
@@ -874,21 +856,28 @@ with tab2:
             real_total_eval = kis_data.get('total_eval', 0)
             real_stocks_df = pd.DataFrame(kis_data['stocks'])
             
-            real_tot_pnl = real_total_eval - real_base_principal
-            real_ret_pct = (real_tot_pnl / real_base_principal * 100) if real_base_principal > 0 else 0
-            
-            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
-            col_m2.metric("📊 총 평가손익 합계", f"{real_tot_pnl:+,.0f} 원", f"{real_ret_pct:+.2f}%")
-            col_m3.metric("📈 누적 실현/평가 수익금", f"{real_tot_pnl:+,.0f} 원")
-            
             if not real_stocks_df.empty:
                 viz_df = real_stocks_df.copy()
                 viz_df['평가금액'] = viz_df['보유수량'].str.replace(' 주', '').str.replace(',', '').astype(float) * viz_df['_raw_price']
                 total_stock_eval = viz_df['평가금액'].sum()
-                col_m4.metric("💵 가용 현금", f"{real_total_eval - total_stock_eval:,.0f} 원")
+                real_cash = real_total_eval - total_stock_eval
+                
+                # 순수 KIS API 연동 실계좌 요약 정보 계산
+                real_eval_pnl = kis_data.get('total_pnl', 0)
+                real_invested_principal = total_stock_eval - real_eval_pnl
+                real_ret_pct = (real_eval_pnl / real_invested_principal * 100) if real_invested_principal > 0 else 0
             else:
-                col_m4.metric("💵 가용 현금", f"{real_total_eval:,.0f} 원")
+                total_stock_eval = 0
+                real_cash = real_total_eval
+                real_eval_pnl = 0
+                real_invested_principal = 0
+                real_ret_pct = 0
+            
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
+            col_m2.metric("🛒 총 주식 매입 금액", f"{real_invested_principal:,.0f} 원")
+            col_m3.metric("📉 총 평가 손익", f"{real_eval_pnl:+,.0f} 원", f"{real_ret_pct:+.2f}%")
+            col_m4.metric("💵 가용 현금", f"{real_cash:,.0f} 원")
                 
             st.markdown("---")
             if not real_stocks_df.empty:
@@ -922,7 +911,7 @@ with tab2:
                             
                             if user_ret >= ts_target_pct: 
                                 action = "🔵 트레일링 스탑 가동"
-                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
+                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%)"
                                 easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
                                 action = "🔴 전량 청산 (추세 이탈)"
@@ -930,11 +919,11 @@ with tab2:
                                 easy_desc = "[전량 청산] 핵심 추세선 이탈(Dead Cross)로 인한 하방 리스크가 확대되었습니다. 전량 매도를 통한 현금 확보를 집행하십시오."
                             elif entry_cond:
                                 action = "🟢 비중 확대 유효"
-                                reason = f"신규 진입(매수) 타점 조건 충족 (현재 이격 {diff_ma:+.2f}%)"
+                                reason = f"신규 진입(매수) 타점 조건과 일치함 (현재 이격 {diff_ma:+.2f}%)"
                                 easy_desc = "[비중 확대 유효] 현재 가격대에서 신규 진입 로직과 동일한 강세 시그널이 지속되고 있습니다. 포지션 규모(비중) 확대를 고려해볼 수 있습니다."
                             else: 
                                 action = "🟡 포지션 홀딩"
-                                reason = f"추세 방어 및 지지선 이탈 없음 (현재 이격 {diff_ma:+.2f}%)"
+                                reason = f"추세 방어 중 및 지지선 이탈 없음 (현재 이격 {diff_ma:+.2f}%)"
                                 easy_desc = "[포지션 홀딩] 상승 추세 및 지지선 방어가 안정적으로 이루어지고 있습니다. 현재의 비중 유지를 권장합니다."
                         else:
                             is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
@@ -942,11 +931,11 @@ with tab2:
 
                             if user_ret <= sat_stop_loss: 
                                 action = "🔴 손절 매도 집행"
-                                reason = f"손절 기준선({sat_stop_loss}%) 이하 하락 (현재 {user_ret:+.2f}%)"
+                                reason = f"손절 기준선({sat_stop_loss}%) 도달 (현재 {user_ret:+.2f}%)"
                                 easy_desc = "[손절 매도] 사전 설정된 최대 허용 손실폭(Stop-loss) 한도에 도달했습니다. 자산 보호를 위해 기계적인 강제 청산을 집행하십시오."
                             elif user_ret >= ts_target_pct: 
                                 action = "🔵 트레일링 스탑 가동"
-                                reason = f"목표 수익률({ts_target_pct}%) 도달 (현재 {user_ret:+.2f}%)"
+                                reason = f"목표 수익률({ts_target_pct}%) 돌파 (현재 {user_ret:+.2f}%)"
                                 easy_desc = "[트레일링 스탑 가동] 1차 목표 수익률 구간을 돌파하였습니다. 수익 보존을 위해 고점 대비 일정 비율 하락 시 즉각 청산하는 추적 매도(Trailing) 체제로 전환합니다."
                             elif exit_cond_trend: 
                                 action = "🔴 전량 청산 (추세 이탈)"
@@ -999,32 +988,43 @@ with tab3:
         current_strategy = p_data.get('strategy', '대형주 (Core)')
         total_cash = p_data.get('cash', 10000000)
         
-        real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01'))
-        try: created_date = pd.to_datetime(real_base_date_str).date()
-        except: created_date = datetime.date(2024, 1, 1)
-        today_date = datetime.date.today()
-        
-        real_base_principal = float(p_data.get('real_base_principal', p_data.get('cash', 10000000)))
-
         kis_data = st.session_state.get(cache_key)
-        real_tot_eval, real_tot_pnl, real_ret_pct = 0, 0, 0
-        real_summary = {}
         
-        if kis_data and SYS_APP_KEY:
-            real_tot_eval = kis_data.get('total_eval', 0)
-            real_tot_pnl = real_tot_eval - real_base_principal
-            real_ret_pct = (real_tot_pnl / real_base_principal * 100) if real_base_principal > 0 else 0
-            real_summary = {item['종목명']: item for item in kis_data['stocks']}
+        # 포워드 테스트용 기준일 및 원금 설정 로직
+        inferred_principal = 10000000.0
+        if kis_data:
+            inferred_principal = kis_data.get('total_eval', 0) - kis_data.get('total_pnl', 0)
+            if inferred_principal <= 0: inferred_principal = 10000000.0
+            
+        real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
+        try: real_base_date = pd.to_datetime(real_base_date_str).date()
+        except: real_base_date = datetime.date(2024, 1, 1)
+        
+        real_base_principal = float(p_data.get('real_base_principal', inferred_principal)) if p_data else inferred_principal
+        today_date = datetime.date.today()
 
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
-        st.markdown(f"설정된 기준일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
+        
+        with st.expander("⚙️ 실전 계좌 성과 측정 기준 설정 (포워드 테스트 연동)", expanded=False):
+            st.markdown("포트폴리오 생성일(또는 특정 기준일)의 원금을 입력하면, 기준일 대비 **'실제 누적 수익률'**을 정확하게 추적할 수 있습니다.")
+            c1, c2, c3 = st.columns([3, 3, 2])
+            new_date = c1.date_input("📅 성과 측정 기준일", real_base_date)
+            new_prin = c2.number_input("💰 기준일 당시 투입 원금 (원)", value=int(real_base_principal), step=1000000)
+            if c3.button("💾 기준 설정 저장", use_container_width=True):
+                p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
+                p_data['real_base_principal'] = new_prin
+                save_portfolio_to_sheets(selected_port, p_data)
+                st.success("✅ 성과 측정 기준이 업데이트되었습니다.")
+                st.rerun()
+                
+        st.markdown(f"설정된 기준일(`{real_base_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
 
         if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
             if stocks_df.empty: 
                 st.error("관심종목 리스트에 종목이 없습니다.")
             else:
-                with st.spinner(f"{created_date} 부터 현재까지 AI 시뮬레이션 중..."):
-                    fw_result = run_quant_simulation(stocks_df, current_strategy, real_base_principal, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                with st.spinner(f"{real_base_date} 부터 현재까지 AI 시뮬레이션 중..."):
+                    fw_result = run_quant_simulation(stocks_df, current_strategy, real_base_principal, real_base_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     
                     if fw_result:
                         ai_ret = fw_result['final_port_ret']
@@ -1032,8 +1032,11 @@ with tab3:
                         st.markdown("### 🏆 누적 수익률 비교 (Yield Comparison)")
                         col_fw1, col_fw2 = st.columns(2)
                         col_fw1.metric("📈 AI 포워드 테스트 (이론)", f"{ai_ret:+.2f}%", f"기말 자산: {fw_result['final_asset']:,.0f} 원")
-                        if SYS_APP_KEY:
-                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {real_tot_eval:,.0f} 원")
+                        if SYS_APP_KEY and kis_data:
+                            real_tot_eval = kis_data.get('total_eval', 0)
+                            real_tot_pnl_custom = real_tot_eval - real_base_principal
+                            real_ret_pct_custom = (real_tot_pnl_custom / real_base_principal * 100) if real_base_principal > 0 else 0
+                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct_custom:+.2f}%", f"현재 자산: {real_tot_eval:,.0f} 원")
                         else:
                             col_fw2.info("한국투자증권 API 연동이 필요합니다.")
                             
@@ -1041,6 +1044,7 @@ with tab3:
                         st.markdown("### 🔍 종목별 상세 매매 & 보유 현황 비교")
                         st.caption("AI가 알고리즘에 따라 매매한 결과와 실제 계좌의 보유 상태를 숫자로 명확하게 대조합니다. (※ KIS 잔고 API 특성상 실계좌의 과거 매매 횟수는 HTS 확인이 필요합니다.)")
 
+                        real_summary = {item['종목명']: item for item in kis_data['stocks']} if kis_data else {}
                         ai_summary = {item['종목명']: item for item in fw_result['summary_rows'] if item['종목명'] != '💡 [전체 합계]'}
                         all_stocks = sorted(list(set(list(ai_summary.keys()) + list(real_summary.keys()))))
 
