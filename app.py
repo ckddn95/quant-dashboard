@@ -637,7 +637,6 @@ with tab1:
                 if not scan_result.empty:
                     st.success(f"✅ 새로운 타점 종목 {len(scan_result)}개 발굴!")
                     
-                    # [V2.10 추가] 스캐너 발굴 기준 상세 안내 UI
                     with st.expander("🔍 어떤 기준으로 이 종목들을 발굴했나요?", expanded=True):
                         if current_strategy == '대형주 (Core)':
                             st.markdown(f"""
@@ -658,15 +657,23 @@ with tab1:
                             *   **🏆 AI 스코어링:** 최근 거래량 급증 크기(40%) + 60일 모멘텀(30%) + 20일 모멘텀(30%) 점수를 합산하여 가장 타점이 좋은 상위 5개 종목 추천
                             """)
                     
+                    # [V2.11 핵심 변경] 현재 관리 중인 모든 티커 목록 (관심종목 + 실계좌) 가져오기
+                    current_tickers = [str(s.get('티커')).strip() for s in p_data.get('stocks', [])]
+                    
                     for _, row in scan_result.iterrows():
                         c1, c2, c3 = st.columns([4, 4, 2])
                         c1.write(f"**{row['종목명']}** (`{row['티커']}`)")
                         c2.write(f"현재가: {row['현재가']}")
-                        if c3.button("➕ 담기", key=f"add_{row['티커']}"):
-                            p_data['stocks'].append({'종목명': row['종목명'], '티커': row['티커'], '매수단가': 0, '보유수량': 0})
-                            p_data['stocks'] = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커']).to_dict(orient='records')
-                            save_portfolio_to_sheets(selected_port, p_data)
-                            st.rerun()
+                        
+                        # 이미 추가된 종목인지 검사
+                        if str(row['티커']).strip() in current_tickers:
+                            c3.button("✔️ 보유중", key=f"add_{row['티커']}", disabled=True)
+                        else:
+                            if c3.button("➕ 담기", key=f"add_{row['티커']}"):
+                                p_data['stocks'].append({'종목명': row['종목명'], '티커': row['티커'], '매수단가': 0, '보유수량': 0})
+                                p_data['stocks'] = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커']).to_dict(orient='records')
+                                save_portfolio_to_sheets(selected_port, p_data)
+                                st.rerun()
                 else: st.warning("⚠️ 현재 필터 조건을 만족하는 종목이 없습니다.")
 
         st.markdown("---")
