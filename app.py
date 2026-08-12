@@ -11,7 +11,6 @@ import time
 import re
 import requests
 import gspread
-import hashlib
 from google.oauth2.service_account import Credentials
 import warnings
 warnings.filterwarnings('ignore')
@@ -21,68 +20,16 @@ warnings.filterwarnings('ignore')
 # ==========================================
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 
-# [V4.6 핵심] 해시 암호화 및 구글 시트 비밀번호 연동 로직
-SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
-
-@st.cache_resource
-def get_gspread_client():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets_json"]), scopes=scopes)
-    return gspread.authorize(creds)
-
-def hash_password(password):
-    return hashlib.sha256(str(password).encode('utf-8')).hexdigest()
-
-@st.cache_data(ttl=600)
-def get_saved_password_hash():
-    try:
-        client = get_gspread_client()
-        sh = client.open_by_key(SPREADSHEET_ID)
-        try: 
-            worksheet = sh.worksheet("Settings")
-        except:
-            worksheet = sh.add_worksheet(title="Settings", rows=10, cols=2)
-            default_hash = hash_password("0000") # 초기 비밀번호 0000
-            worksheet.append_row(["app_password", default_hash])
-            return default_hash
-        
-        cell = worksheet.find("app_password")
-        if cell: 
-            return worksheet.cell(cell.row, 2).value
-        else:
-            default_hash = hash_password("0000")
-            worksheet.append_row(["app_password", default_hash])
-            return default_hash
-    except Exception:
-        return hash_password(st.secrets.get("app_password", "0000"))
-        
-def save_password_hash(new_hash):
-    try:
-        client = get_gspread_client()
-        sh = client.open_by_key(SPREADSHEET_ID)
-        worksheet = sh.worksheet("Settings")
-        cell = worksheet.find("app_password")
-        if cell: 
-            worksheet.update_cell(cell.row, 2, new_hash)
-        else: 
-            worksheet.append_row(["app_password", new_hash])
-        get_saved_password_hash.clear() # 변경 즉시 캐시 초기화
-        return True
-    except Exception as e:
-        st.error(f"비밀번호 저장 오류: {e}")
-        return False
-
-# 로그인 인터페이스
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
 if not st.session_state["authenticated"]:
     st.markdown("<h2 style='text-align: center;'>🔒 퀀트 대시보드 보안 인증</h2>", unsafe_allow_html=True)
     pwd = st.text_input("비밀번호를 입력하세요", type="password")
+    correct_pwd = st.secrets.get("app_password", "0000") 
     
     if pwd:
-        saved_hash = get_saved_password_hash()
-        if hash_password(pwd) == saved_hash:
+        if pwd == correct_pwd:
             st.session_state["authenticated"] = True
             st.rerun()
         else:
@@ -107,6 +54,14 @@ def send_telegram_message(message):
         else: return False, f"API 오류: {res.text}"
     except Exception as e:
         return False, str(e)
+
+SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
+
+@st.cache_resource
+def get_gspread_client():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets_json"]), scopes=scopes)
+    return gspread.authorize(creds)
 
 def load_all_portfolios_from_sheets():
     try:
@@ -515,10 +470,6 @@ if p_data:
         SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
         SYS_IS_MOCK = kis_account_data.get("is_mock", False)
 
-# 텔레그램 알림 수신 설정 
-tg_noti_signal = p_data.get('tg_noti_signal', True) if p_data else True
-tg_noti_order = p_data.get('tg_noti_order', True) if p_data else True
-
 # 토큰 파싱 및 11시간 캐싱 로직
 kis_token_global = None
 if SYS_APP_KEY and SYS_APP_SECRET and p_data:
@@ -626,28 +577,11 @@ st.sidebar.header("📱 텔레그램 및 오토파일럿")
 tg_token, tg_chat_id = st.secrets.get("telegram", {}).get("bot_token", ""), st.secrets.get("telegram", {}).get("chat_id", "")
 
 if tg_token and tg_chat_id:
-    st.sidebar.success("✅ 텔레그램 봇 연동 완료")
     if st.sidebar.button("🔔 연동 테스트 알림 발송"):
         success, msg = send_telegram_message("🤖 *Core-Satellite Quant System*\n텔레그램 정상 연결!")
         if success: st.toast("알림 발송 성공!")
         else: st.sidebar.error(f"발송 실패: {msg}")
-
-    with st.sidebar.expander("⚙️ 텔레그램 알림 수신 항목", expanded=False):
-        if p_data:
-            init_tg_sig = p_data.get('tg_noti_signal', True)
-            init_tg_ord = p_data.get('tg_noti_order', True)
             
-            new_tg_sig = st.checkbox("💡 신규 매매 시그널 포착", value=init_tg_sig)
-            new_tg_ord = st.checkbox("🛒 매수/매도 체결 결과", value=init_tg_ord)
-            
-            if new_tg_sig != init_tg_sig or new_tg_ord != init_tg_ord:
-                p_data['tg_noti_signal'] = new_tg_sig
-                p_data['tg_noti_order'] = new_tg_ord
-                save_portfolio_to_sheets(selected_port, p_data)
-                st.rerun()
-        else:
-            st.info("포트폴리오 선택 후 설정 가능합니다.")
-
     st.sidebar.markdown("---")
     st.sidebar.subheader("🚨 긴급 제어 및 자동매매")
     
@@ -712,23 +646,6 @@ with st.sidebar.expander("🧪 시뮬레이션 상세 설정"):
     ts_drop_pct = st.slider("트레일링 스탑 하락허용 (%)", -20, -5, -10 if active_strat == '대형주 (Core)' else -5, 1)
     bull_market_boost = st.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
-# [V4.6 핵심] 사이드바 보안 및 시스템 설정
-st.sidebar.markdown("---")
-with st.sidebar.expander("🔐 보안 및 시스템 설정", expanded=False):
-    st.markdown("**비밀번호 변경**")
-    curr_pwd = st.text_input("현재 비밀번호", type="password")
-    new_pwd = st.text_input("새 비밀번호", type="password")
-    confirm_pwd = st.text_input("새 비밀번호 확인", type="password")
-    if st.button("비밀번호 변경 저장", use_container_width=True):
-        if not curr_pwd or not new_pwd or not confirm_pwd:
-            st.error("모든 항목을 입력해주세요.")
-        elif new_pwd != confirm_pwd:
-            st.error("새 비밀번호가 일치하지 않습니다.")
-        elif hash_password(curr_pwd) != get_saved_password_hash():
-            st.error("현재 비밀번호가 틀렸습니다.")
-        else:
-            if save_password_hash(hash_password(new_pwd)):
-                st.success("✅ 비밀번호가 변경되었습니다! (다음 로그인 시 적용)")
 
 # ==========================================
 # 4. 메인 화면 구성 (모든 준비 완료 후 렌더링)
@@ -824,21 +741,21 @@ with tab1:
                         entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
                         exit_cond_trend = (ma20 < ma60 * (1 - buf/2))
                         if exit_cond_trend or (use_ma200_filter and not is_above_ma200):
-                            action, easy_desc = "🔴 유니버스 제외 (추세 붕괴)", "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
+                            action, easy_desc = "🔴 유니버스 제외 (추세 붕괴)", "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다."
                         elif entry_cond:
-                            action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
+                            action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", "[매수 시그널 발생] 중장기 정배열 및 모멘텀 강세. 신규 편입 유효 구간입니다."
                         else:
-                            action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
+                            action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 유효한 매매 시그널 미발생. 추가 가격 및 추세 확인 필요."
                     else:
                         ai_score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
                         is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
                         entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
                         if not vol_surged or drawdown < -30.0 or (use_ma200_filter and not is_above_ma200):
-                            action, easy_desc = "🔴 유니버스 제외 (수급/추세 상실)", "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
+                            action, easy_desc = "🔴 유니버스 제외 (수급/추세 상실)", "[유니버스 제외] 수급/지지선 이탈 및 모멘텀 소멸이 확인되었습니다."
                         elif entry_cond:
-                            action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
+                            action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", "[매수 시그널 발생] 중장기 정배열 및 모멘텀 강세. 신규 편입 유효 구간입니다."
                         else:
-                            action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
+                            action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 유효한 매매 시그널 미발생. 추가 가격 및 추세 확인 필요."
 
                 eval_actions_cache[ticker] = action
                 display_records.append({
@@ -888,30 +805,9 @@ with tab1:
                     st.rerun()
                 else: st.warning("⚠️ 삭제할 종목을 체크박스로 선택해주세요.")
 
-        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
-            changed_msgs, needs_save = [], False
-            for idx, r_dict in enumerate(p_data['stocks']):
-                s_name = r_dict['종목명']
-                curr_action = next((r['🤖 AI 액션 플랜'] for r in display_records if r['종목명'] == s_name), "기록없음 (실계좌이동)")
-                
-                if "기록없음" in curr_action: continue 
-
-                if curr_action != r_dict.get('last_action', "기록없음"):
-                    p_data['stocks'][idx]['last_action'] = curr_action 
-                    needs_save = True
-                    if "모니터링 유지" not in curr_action:
-                        changed_msgs.append(f"▪️ *{s_name}*: {curr_action}")
-            
-            if changed_msgs:
-                if tg_noti_signal:
-                    send_telegram_message(f"🤖 *[{selected_port} 관심종목] 시그널 감지!*\n" + "\n".join(changed_msgs))
-                    st.toast("오토파일럿 알림 발송 완료!")
-                elif not auto_pilot:
-                    st.toast("새로운 신규 시그널이 감지되었습니다. (알림 OFF 설정됨)")
-            elif not auto_pilot: st.toast("새로운 신규 시그널이 없습니다.")
-            
-            if needs_save: save_portfolio_to_sheets(selected_port, p_data)
-
+# ==========================================
+# [V4.7 핵심] 실전 계좌 모니터링 탭 (평가금액 & 평가총액 탑재)
+# ==========================================
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 전용 모니터링")
     st.markdown("한국투자증권에 실제로 매수(보유) 중인 종목만 표시되며, AI가 타점을 집중 감시합니다.")
@@ -947,6 +843,11 @@ with tab2:
                     current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
                     target_buy_amt = real_total_eval * (current_max_alloc_pct / 100.0)
                     
+                    # V4.7 평가총액 집계용 총합 변수
+                    total_eval_sum = 0.0
+                    total_pnl_sum = 0.0
+                    total_buy_sum = 0.0
+                    
                     for idx, row in real_stocks_df.iterrows():
                         live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
                         if live_c_price == 0: continue
@@ -954,18 +855,31 @@ with tab2:
                         qty_str = str(row.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
                         try: qty_num = int(float(qty_str))
                         except: qty_num = 0
+                        
                         profit_amt = (live_c_price - buy_price) * qty_num
                         current_holding_amt = live_c_price * qty_num
+                        buy_tot_amt = buy_price * qty_num
+                        
+                        total_eval_sum += current_holding_amt
+                        total_pnl_sum += profit_amt
+                        total_buy_sum += buy_tot_amt
 
                         res = fetch_stock_status(row['티커'])
                         user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                         
+                        # [V4.7 핵심] 종목별 평가금액 컬럼 추가 및 집계
                         if not res or res[0] is None:
                             live_results.append({
-                                '보유 종목명': row['종목명'], '티커': row['티커'], '🔥 매력도 점수': 0.0, '보유수량': f"{qty_num:,} 주",
-                                '매수평균가': f"{buy_price:,.0f} 원", '실시간 현재가': f"{live_c_price:,.0f} 원", 
-                                '평가손익': f"{profit_amt:+,.0f} 원", '수익률': f"{user_ret:+.2f}%", 
-                                '🤖 실계좌 전용 액션 플랜': "⚪ 모니터링 불가", '📊 판단 근거': "AI 분석용 과거 데이터 수신 실패"
+                                '보유 종목명': row['종목명'], 
+                                '🔥 매력도 점수': 0.0, 
+                                '보유수량': f"{qty_num:,} 주",
+                                '매수평균가': f"{buy_price:,.0f} 원", 
+                                '실시간 현재가': f"{live_c_price:,.0f} 원", 
+                                '평가금액': f"{current_holding_amt:,.0f} 원",
+                                '평가손익': f"{profit_amt:+,.0f} 원", 
+                                '수익률': f"{user_ret:+.2f}%", 
+                                '🤖 실계좌 전용 액션 플랜': "⚪ 모니터링 불가", 
+                                '📊 판단 근거': "AI 분석용 과거 데이터 수신 실패"
                             })
                             continue
                             
@@ -1001,16 +915,38 @@ with tab2:
                             else: action, reason = "🟡 포지션 홀딩", f"손절선 이탈 없음 및 추세 유지 중"
 
                         live_results.append({
-                            '보유 종목명': row['종목명'], '티커': row['티커'], '🔥 매력도 점수': ai_score, '보유수량': f"{qty_num:,} 주",
-                            '매수평균가': f"{buy_price:,.0f} 원", '실시간 현재가': f"{live_c_price:,.0f} 원", 
-                            '평가손익': f"{profit_amt:+,.0f} 원", '수익률': f"{user_ret:+.2f}%", 
-                            '🤖 실계좌 전용 액션 플랜': action, '📊 판단 근거': reason
+                            '보유 종목명': row['종목명'], 
+                            '🔥 매력도 점수': ai_score, 
+                            '보유수량': f"{qty_num:,} 주",
+                            '매수평균가': f"{buy_price:,.0f} 원", 
+                            '실시간 현재가': f"{live_c_price:,.0f} 원", 
+                            '평가금액': f"{current_holding_amt:,.0f} 원",
+                            '평가손익': f"{profit_amt:+,.0f} 원", 
+                            '수익률': f"{user_ret:+.2f}%", 
+                            '🤖 실계좌 전용 액션 플랜': action, 
+                            '📊 판단 근거': reason
                         })
                     
                     live_df = pd.DataFrame(live_results)
                     if not live_df.empty:
                         live_df = live_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
-                        st.table(live_df.drop(columns=['티커']))
+                        
+                        # [V4.7 핵심] 최하단 평가총액 합계 요약 행 추가
+                        total_ret_sum_pct = (total_pnl_sum / total_buy_sum * 100) if total_buy_sum > 0 else 0.0
+                        summary_row = pd.DataFrame([{
+                            '보유 종목명': '💡 [평가총액 합계]',
+                            '🔥 매력도 점수': '-',
+                            '보유수량': '-',
+                            '매수평균가': '-',
+                            '실시간 현재가': '-',
+                            '평가금액': f"{total_eval_sum:,.0f} 원",
+                            '평가손익': f"{total_pnl_sum:+,.0f} 원",
+                            '수익률': f"{total_ret_sum_pct:+.2f}%",
+                            '🤖 실계좌 전용 액션 플랜': '-',
+                            '📊 판단 근거': '-'
+                        }])
+                        live_df = pd.concat([live_df, summary_row], ignore_index=True)
+                        st.table(live_df)
             else:
                 st.info("현재 실전 계좌에 매수(보유) 중인 종목이 없습니다. [탭 1]의 관심종목 리스트에서 타점을 대기하세요.")
 
@@ -1276,7 +1212,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.6)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v4.7)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1357,4 +1293,5 @@ with tab5:
     *   **무작위 재시도 금지 (No Blind Retry):** 주문 실패 시 이전 조건을 맹목적으로 반복하지 않으며, 실시간 호가 및 조건을 재검증합니다.
     *   **하드코딩 킬 스위치 (Kill Switch):** 활성화 즉시 어떠한 상황에서도 모든 KIS API 매매 호출이 차단되어 계좌를 안전하게 보호합니다.
     *   **수학적 팩트 기반 입출금 추적:** 기존의 부정확한 수동 입출금 입력 방식을 폐기하고, `현재 계좌 총 평가금 - 보유 주식 평가손익 - 봇 누적 실현손익` 공식을 통해 외부에서 입출금된 순수 투입 원금을 1원 단위까지 100% 정확하게 자동 역산합니다.
+    *   **통합 평가총액 집계 및 무결성 표출:** 보유 종목별 개별 평가금액(`수량 × 현재가`)과 실계좌 보유 주식의 전체 평가총액/평가손익/수익률을 자동 집계하여 최하단 요약행에 직관적으로 표시합니다.
     """, unsafe_allow_html=True)
