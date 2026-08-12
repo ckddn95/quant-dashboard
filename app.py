@@ -467,20 +467,16 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         '총 발생 수수료': f"{sum_fee:,.0f} 원", '기말 포트폴리오 비중': f"{(sum_hval/final_asset)*100 if final_asset>0 else 0:.2f}%"
     })
     
-    # [V2.14 핵심 에러 수정] 가장 안전한 날짜 인덱싱 및 리샘플링
     history_df = pd.DataFrame(history_records)
     if history_df.empty: return None
     
     history_df['Date'] = pd.to_datetime(history_df['Date'])
     history_df = history_df.set_index('Date')
     
-    try:
-        eom_val_df = history_df.resample('ME').last()
-    except Exception:
-        eom_val_df = history_df.resample('M').last()
+    try: eom_val_df = history_df.resample('ME').last()
+    except Exception: eom_val_df = history_df.resample('M').last()
         
-    if eom_val_df.empty:
-        eom_val_df = history_df.tail(1)
+    if eom_val_df.empty: eom_val_df = history_df.tail(1)
         
     eom_weights = (eom_val_df.div(eom_val_df.sum(axis=1), axis=0) * 100).fillna(0)
     eom_weights.index = eom_weights.index.strftime('%Y-%m')
@@ -859,42 +855,79 @@ with tab3:
         except: created_date = datetime.date(2024, 1, 1)
         today_date = datetime.date.today()
 
+        # 실계좌 지표 사전 로드
+        kis_data = st.session_state.get(cache_key)
+        real_tot_eval, real_tot_pnl, real_ret_pct = 0, 0, 0
+        real_summary = {}
+        
+        if kis_data and SYS_APP_KEY:
+            real_tot_eval = kis_data.get('total_eval', 0)
+            real_tot_pnl = kis_data.get('total_pnl', 0)
+            real_principal = real_tot_eval - real_tot_pnl
+            real_ret_pct = (real_tot_pnl / real_principal * 100) if real_principal > 0 else 0
+            real_summary = {item['종목명']: item for item in kis_data['stocks']}
+
+        # [V2.15 핵심] 포워드 테스트 (이론 vs 실제 비교) UI 전면 개편
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
-        st.markdown(f"포트폴리오 생성일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 성적**과, 고객님의 **실제 계좌 성적**을 나란히 비교합니다.")
+        st.markdown(f"포트폴리오 생성일(`{created_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실제 계좌 누적 수익률**을 나란히 비교합니다.")
 
-        fw_col1, fw_col2 = st.columns(2)
-
-        with fw_col1:
-            st.markdown("### 📈 AI 포워드 테스트 (이론)")
-            if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
-                if stocks_df.empty: 
-                    st.error("관심종목 리스트에 종목이 없습니다.")
-                else:
-                    with st.spinner(f"{created_date} 부터 현재까지 AI 시뮬레이션 중..."):
-                        fw_result = run_quant_simulation(stocks_df, current_strategy, total_cash, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                        if fw_result:
-                            fw_profit = fw_result['final_asset'] - total_cash
-                            st.metric("AI 시뮬레이션 기말 자산", f"{fw_result['final_asset']:,.0f} 원", f"{fw_result['final_port_ret']:+.2f}%")
-                            st.caption(f"이론 누적 순수익: {fw_profit:+,.0f} 원")
-                        else:
-                            st.warning("데이터가 부족하여 기간 내 시뮬레이션을 완료할 수 없습니다.")
-
-        with fw_col2:
-            st.markdown("### 🔌 나의 실전 계좌 (실제)")
-            kis_data = st.session_state.get(cache_key)
-            if kis_data and SYS_APP_KEY:
-                real_tot_eval = kis_data.get('total_eval', 0)
-                real_tot_pnl = kis_data.get('total_pnl', 0)
-                real_principal = real_tot_eval - real_tot_pnl
-                real_ret_pct = (real_tot_pnl / real_principal * 100) if real_principal > 0 else 0
-                
-                st.metric("실계좌 현재 평가 자산", f"{real_tot_eval:,.0f} 원", f"{real_ret_pct:+.2f}%")
-                st.caption(f"현재 총 평가손익: {real_tot_pnl:+,.0f} 원")
+        if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
+            if stocks_df.empty: 
+                st.error("관심종목 리스트에 종목이 없습니다.")
             else:
-                st.info("좌측 사이드바에서 한국투자증권 API 연동을 완료해주세요.")
+                with st.spinner(f"{created_date} 부터 현재까지 AI 시뮬레이션 중..."):
+                    fw_result = run_quant_simulation(stocks_df, current_strategy, total_cash, created_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    
+                    if fw_result:
+                        ai_ret = fw_result['final_port_ret']
+                        
+                        st.markdown("### 🏆 누적 수익률 비교 (Yield Comparison)")
+                        col_fw1, col_fw2 = st.columns(2)
+                        col_fw1.metric("📈 AI 포워드 테스트 (이론)", f"{ai_ret:+.2f}%", f"기말 자산: {fw_result['final_asset']:,.0f} 원")
+                        if SYS_APP_KEY:
+                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {real_tot_eval:,.0f} 원")
+                        else:
+                            col_fw2.info("한국투자증권 API 연동이 필요합니다.")
+                            
+                        st.markdown("---")
+                        st.markdown("### 🔍 종목별 상세 매매 & 보유 현황 비교")
+                        st.caption("AI가 알고리즘에 따라 이론적으로 매매한 결과와 실제 계좌의 보유 상태를 나란히 보여줍니다.")
+
+                        # AI 요약 결과와 실계좌 요약 결과 병합
+                        ai_summary = {item['종목명']: item for item in fw_result['summary_rows'] if item['종목명'] != '💡 [전체 합계]'}
+                        all_stocks = sorted(list(set(list(ai_summary.keys()) + list(real_summary.keys()))))
+
+                        comp_data = []
+                        for name in all_stocks:
+                            ai_data = ai_summary.get(name)
+                            rl_data = real_summary.get(name)
+
+                            # AI 데이터 추출 (미보유 처리)
+                            ai_yld = ai_data['수익률 (%)'] if ai_data and ai_data['최종 보유 주수'] != "0.00 주" else "미보유/매도완료"
+                            ai_amt = ai_data['최종 보유 주수'] if ai_data and ai_data['최종 보유 주수'] != "0.00 주" else "-"
+                            ai_trades = ai_data['매매 횟수'] if ai_data else "-"
+
+                            # 실계좌 데이터 추출 (미보유 처리)
+                            rl_yld = rl_data['평가손익률'] if rl_data else "미보유/매도완료"
+                            rl_amt = rl_data['보유수량'] if rl_data else "-"
+
+                            comp_data.append({
+                                "종목명": name,
+                                "AI 이론 수익률": ai_yld,
+                                "내 실제 수익률": rl_yld,
+                                "AI 보유 수량": ai_amt,
+                                "내 실제 수량": rl_amt,
+                                "AI 시뮬레이션 매매 횟수": ai_trades
+                            })
+
+                        st.dataframe(pd.DataFrame(comp_data), use_container_width=True)
+
+                    else:
+                        st.warning("데이터가 부족하여 기간 내 시뮬레이션을 완료할 수 없습니다.")
 
         st.markdown("---")
         
+        # 장기 백테스트 기능
         st.subheader("📊 장기 초과수익 검증 (Long-Term Backtest)")
         st.caption("※ 관심종목 유니버스를 바탕으로 수년 전부터 현재까지 장기 운용했을 때의 성과를 검증합니다.")
         
