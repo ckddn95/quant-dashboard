@@ -17,13 +17,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 0. 페이지 설정 및 보안 (Authentication)
+# 0. 페이지 설정, 보안 및 타임존(KST) 셋팅
 # ==========================================
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 
-# 세션 초기화 (V6.2 수동 검색 기능용)
-if 'search_q' not in st.session_state: st.session_state.search_q = None
-if 'search_sec' not in st.session_state: st.session_state.search_sec = None
+# 클라우드 서버 위치와 무관하게 한국 표준시(KST) 강제 적용
+KST = datetime.timezone(datetime.timedelta(hours=9))
 
 SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
 
@@ -74,7 +73,7 @@ def save_password_hash(new_hash):
 
 def get_daily_auth_token():
     saved_hash = get_saved_password_hash()
-    today_str = datetime.date.today().strftime('%Y-%m-%d')
+    today_str = datetime.datetime.now(KST).strftime('%Y-%m-%d')
     return hashlib.sha256((saved_hash + today_str).encode('utf-8')).hexdigest()
 
 daily_token = get_daily_auth_token()
@@ -228,8 +227,9 @@ def execute_kis_order(app_key, app_secret, token, cano, acnt_prdt_cd, ticker, qt
         return False, f"API 예외 발생: {str(e)}"
 
 def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0, status="✅ 체결완료", msg=""):
-    today_str = datetime.date.today().strftime('%Y-%m-%d')
-    now_str = datetime.datetime.now().strftime('%H:%M:%S')
+    today_str = datetime.datetime.now(KST).strftime('%Y-%m-%d')
+    now_str = datetime.datetime.now(KST).strftime('%H:%M:%S')
+    
     if p_data.get('daily_trades_date') != today_str:
         p_data['daily_trades'] = []
         p_data['daily_trades_date'] = today_str
@@ -278,11 +278,12 @@ def fetch_market_data():
             return 20.0, v_con, v_safe, kospi_ret_60, kosdaq_ret_60
         except: return 20.0, False, True, kospi_ret_60, kosdaq_ret_60
 
+# [V6.4 핵심 패치] 고점 형성 경과일수(Recency) 및 거래량 감쇄(Volume Contraction) 추출 추가
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
     try:
         tc = str(ticker_code).strip().zfill(6)
-        start_dt = (datetime.date.today() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
+        start_dt = (datetime.datetime.now(KST).date() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
         
         df = fdr.DataReader(tc, start=start_dt)
         if not df.empty and len(df) > 0:
@@ -295,11 +296,20 @@ def fetch_stock_status(ticker_code):
             ma60 = float(close_p.rolling(60).mean().iloc[-1]) if len(close_p) >= 60 else y_p
             ma60_10 = float(close_p.rolling(60).mean().iloc[-11]) if len(close_p) >= 70 else ma60
             ma20 = float(close_p.rolling(20).mean().iloc[-1]) if len(close_p) >= 20 else y_p
-            rh = float(close_p.tail(120).max())
+            
+            tail_120 = close_p.tail(120)
+            rh = float(tail_120.max())
             dd = ((y_p / rh) - 1) * 100 if rh > 0 else 0.0
+            
+            # 1. 고점 경과일수 판독
+            days_since_peak = len(tail_120) - 1 - int(np.argmax(tail_120.values))
             
             vol_5ma = float(vol.tail(6).iloc[:-1].mean()) if len(vol) >= 6 else float(vol.iloc[-1])
             avg_trade_val = vol_5ma * y_p 
+            
+            # 2. 거래량 감쇄율 판독
+            peak_vol_20 = float(vol.tail(20).max())
+            vol_contraction = float(vol_5ma / peak_vol_20) if peak_vol_20 > 0 else 1.0
             
             vr = (float(vol.iloc[-1]) / vol_5ma * 100) if vol_5ma > 0 else 100.0
             r60 = ((y_p / float(close_p.iloc[-60])) - 1) * 100 if len(close_p) >= 60 else 0.0
@@ -307,11 +317,12 @@ def fetch_stock_status(ticker_code):
             vr_s = pd.Series(np.where(vol.rolling(5).mean().shift(1) > 0, vol / vol.rolling(5).mean().shift(1) * 100, 100.0), index=vol.index)
             rvm = float(vr_s.tail(20).max())
             
-            return (y_p, ma200, ma60, ma20, dd, vr, r60, r20, (ma60 > ma60_10), (y_p >= ma200), rvm >= 200.0, y_l, rvm, avg_trade_val)
+            return (y_p, ma200, ma60, ma20, dd, vr, r60, r20, (ma60 > ma60_10), (y_p >= ma200), rvm >= 200.0, y_l, rvm, avg_trade_val, days_since_peak, vol_contraction)
     except: pass
     return None
 
-def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, buf_pct, ts_target_pct, ts_drop_pct, sat_stop_loss_pct):
+# [V6.4 핵심 패치] 전략 라우터에 Recency & Volume Contraction 로직 삽입
+def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, buf_pct, ts_target_pct, ts_drop_pct, sat_stop_loss_pct, days_since_peak, vol_contraction):
     buf = buf_pct / 100.0 if buf_pct else 0.0
     sat_stop_loss = sat_stop_loss_pct / 100.0 if sat_stop_loss_pct else -0.15
     ts_target = ts_target_pct / 100.0 if ts_target_pct else 0.30
@@ -334,7 +345,8 @@ def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200,
         'stop_loss_cond': False, 'trailing_stop_cond': trailing_stop_triggered,
         'diff_ma_pct': diff_ma * 100, 'dist_ma20_pct': dist_ma20 * 100,
         'user_ret_pct': user_ret * 100, 'is_above_ma200': is_above_ma200,
-        'vol_surged': vol_surged, 'drawdown': drawdown
+        'vol_surged': vol_surged, 'drawdown': drawdown,
+        'days_since_peak': days_since_peak, 'vol_contraction': vol_contraction
     }
     
     if strat_name == '대형주 (Core)':
@@ -345,7 +357,11 @@ def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200,
     else: 
         res['ai_score'] = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
         is_dip = (-0.05 <= dist_ma20 <= 0.03) or (current_low <= ma20 * 1.01)
-        res['entry_cond'] = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -0.30 and ma60_slope_positive and ret_20 > -0.03)
+        
+        # [V6.4] 중소형주 엄격 필터링: 고점이 최근 45일 이내여야 하고, 조정시 거래량이 고점의 50% 이하로 말라야 함.
+        sat_normal_buy = is_dip and vol_surged and (days_since_peak <= 45) and (vol_contraction <= 0.50)
+        
+        res['entry_cond'] = (ma200_cond and (sat_normal_buy or vix_contrarian) and drawdown >= -0.30 and ma60_slope_positive and ret_20 > -0.03)
         res['exit_cond_trend'] = (c_price < ma20 * (1 - buf/2)) and not vix_contrarian 
         res['stop_loss_cond'] = (user_ret <= sat_stop_loss)
         
@@ -360,7 +376,7 @@ def run_core_scanner(use_ma200, buf_pct):
         tc = str(row['Code']).strip().zfill(6)
         s = fetch_stock_status(tc)
         if s is None: continue
-        c_p, ma200, ma60, ma20, dd, vr, r60, r20, m60_up, is_a200, vs, c_l, rvm, atv = s
+        c_p, ma200, ma60, ma20, dd, vr, r60, r20, m60_up, is_a200, vs, c_l, rvm, atv, dsp, vc = s
         if ((not use_ma200) or is_a200) and (ma20 >= ma60 * (1 + buf)) and m60_up and (r20 > 0) and atv >= 5000000000:
             res.append({'종목명': row['Name'], '티커': tc, '현재가': f"{c_p:,.0f} 원", '20/60선 이격': f"{((ma20/ma60)-1)*100:+.2f}%", '20일 모멘텀': f"{r20:+.2f}%", '진단 근거': "장기 추세선 방어 및 골든크로스"})
     return pd.DataFrame(res)
@@ -375,10 +391,12 @@ def run_satellite_scanner(use_ma200, top_n=5):
         tc = str(row['Code']).strip().zfill(6)
         s = fetch_stock_status(tc)
         if s is None: continue
-        c_p, ma200, ma60, ma20, dd, vr, r60, r20, m60_up, is_a200, vs, c_l, rvm, atv = s
+        c_p, ma200, ma60, ma20, dd, vr, r60, r20, m60_up, is_a200, vs, c_l, rvm, atv, dsp, vc = s
         d20 = ((c_p / ma20) - 1) * 100 if ma20 > 0 else 0
         is_dip = (-5.0 <= d20 <= 3.0) or ((c_l <= ma20 * 1.01) and (c_p >= ma20 * 0.95))
-        if vs and is_dip and ((not use_ma200) or is_a200) and (dd >= -30.0) and m60_up and (r20 > -3.0) and atv >= 5000000000:
+        sat_normal_buy = is_dip and vs and (dsp <= 45) and (vc <= 0.50)
+        
+        if sat_normal_buy and ((not use_ma200) or is_a200) and (dd >= -30.0) and m60_up and (r20 > -3.0) and atv >= 5000000000:
             sc = (rvm / 100.0)*0.4 + (r60*0.3) + (r20*0.3)
             res.append({'종목명': row['Name'], '티커': tc, '현재가': f"{c_p:,.0f} 원", '20일선 이격도': f"{d20:+.2f}%", '최대 수급': f"{rvm:,.0f}%", 'AI 스코어': round(sc, 2), '_sc': sc})
     if not res: return pd.DataFrame()
@@ -439,6 +457,12 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         df['RVM'] = df['VR'].rolling(20, min_periods=1).max()
         df['V_Srg'] = df['RVM'] >= 200.0
         
+        # [V6.4] 벡터 연산에 Recency 및 Volume Contraction 로직 추가
+        df['Days_Since_Peak'] = df['Close'].rolling(120, min_periods=1).apply(lambda x: len(x) - 1 - np.argmax(x), raw=True)
+        df['Peak_Vol_20'] = df['Volume'].rolling(20, min_periods=1).max()
+        df['V5_mean'] = df['Volume'].rolling(5, min_periods=1).mean()
+        df['Vol_Contraction'] = np.where(df['Peak_Vol_20']>0, df['V5_mean'] / df['Peak_Vol_20'], 1.0)
+        
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df.join(m_df, how='left')
         for c, d in [('V_Safe',True), ('V_Con',False), ('Bm_Ret_60',0.0), ('Bm_Bull',False)]: df[c] = df[c].fillna(d)
@@ -451,7 +475,9 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             df['DD'] = (df['Close']/df['Close'].rolling(120, min_periods=1).max()) - 1
             d20 = ((df['Close']/df['M20'])-1)*100
             idip = ((d20 >= -5.0) & (d20 <= 3.0)) | (df['Low'] <= df['M20']*1.01 if 'Low' in df.columns else d20 <= 0)
-            ec = (m2_c & ((idip & df['V_Srg']) | df['V_Con'])) & (df['DD'] >= -0.30) & df['M60_Up'] & (df['R20'] > -0.03)
+            
+            sat_normal_buy = idip & df['V_Srg'] & (df['Days_Since_Peak'] <= 45) & (df['Vol_Contraction'] <= 0.50)
+            ec = (m2_c & (sat_normal_buy | df['V_Con'])) & (df['DD'] >= -0.30) & df['M60_Up'] & (df['R20'] > -0.03)
             xc = (df['Close'] < df['M20']*(1-buf/2)) & (~df['V_Con'])
             
         df['Sig'] = np.where(ec, 1, np.where(xc, 0, np.nan))
@@ -638,6 +664,9 @@ def mts_metric_html(label, value, delta=None):
 # ==========================================
 # 2. 전역 변수 및 데이터 파싱
 # ==========================================
+if 'search_q' not in st.session_state: st.session_state.search_q = None
+if 'search_sec' not in st.session_state: st.session_state.search_sec = None
+
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 all_ports = load_all_portfolios_from_sheets()
 port_names = list(all_ports.keys())
@@ -709,7 +738,7 @@ if kis_data:
 
 real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
 try: real_base_date = pd.to_datetime(real_base_date_str).date()
-except: real_base_date = datetime.date(2024, 1, 1)
+except: real_base_date = datetime.datetime.now(KST).date()
 
 cumulative_realized_pnl = 0.0
 if p_data and 'daily_trades' in p_data:
@@ -756,7 +785,7 @@ if st.sidebar.button("새 포트폴리오 생성하기", use_container_width=Tru
     if new_p_name:
         safe_name = re.sub(r'[\\/*?:"<>|]', "", new_p_name)
         if safe_name not in all_ports:
-            save_portfolio_to_sheets(safe_name, {'strategy': new_p_strat, 'cash': new_p_cash, 'stocks': [], 'created_at': datetime.date.today().strftime('%Y-%m-%d')})
+            save_portfolio_to_sheets(safe_name, {'strategy': new_p_strat, 'cash': new_p_cash, 'stocks': [], 'created_at': datetime.datetime.now(KST).strftime('%Y-%m-%d')})
             try: st.query_params["auth"] = daily_token
             except: st.experimental_set_query_params(auth=daily_token)
             st.rerun()
@@ -915,7 +944,6 @@ with tab1:
                         st.rerun()
                     else: st.info("현재 퇴출 대상 종목이 없습니다.")
 
-        # [V6.2 핵심 패치] 수동 검색 및 테마별 대표주 (숨김 해제 및 직관적 버튼 레이아웃)
         st.markdown("### 🔎 직접 종목 추가 및 섹터별 대장주 검색")
         st.markdown("AI 스캐너 외에도 원하시는 종목이나 섹터 대장주를 직접 검색하여 관심종목에 등록할 수 있습니다.")
         
@@ -1052,10 +1080,11 @@ with tab1:
                 action, tech_text, easy_desc, ai_score = "분석 불가", "-", "데이터를 불러오지 못했습니다.", 0.0
                 
                 if res and res[0] is not None:
-                    yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, _, vol_surged, yf_low, recent_vol_max, avg_trade_val = res
+                    yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, _, vol_surged, yf_low, recent_vol_max, avg_trade_val, dsp, vc = res
                     if not c_price or c_price == 0: c_price = yf_price
                     
-                    res_q = analyze_quant_strategy(active_strat, c_price, 0.0, 0.0, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss)
+                    # [V6.4 핵심] 라우터 호출 시 dsp, vc 인자 전달
+                    res_q = analyze_quant_strategy(active_strat, c_price, 0.0, 0.0, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, dsp, vc)
                     
                     ai_score = res_q['ai_score']
                     target_shares = int(target_buy_amt // c_price) if c_price > 0 else 0
@@ -1069,13 +1098,13 @@ with tab1:
                         else:
                             action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 거래대금 부족 또는 타점 대기 중입니다."
                     else:
-                        tech_text = f"20일선 이격 {res_q['dist_ma20_pct']:+.2f}%"
+                        tech_text = f"20일선 이격 {res_q['dist_ma20_pct']:+.2f}% / 거래량 축소 {vc*100:.0f}%"
                         if res_q['exit_cond_trend'] or not res_q['vol_surged'] or res_q['drawdown'] < -30.0 or (use_ma200_filter and not res_q['is_above_ma200']):
                             action, easy_desc = "🔴 유니버스 제외 (수급/추세 상실)", "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다."
                         elif res_q['entry_cond'] and avg_trade_val >= 5000000000:
-                            action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", "[매수 시그널 발생] 유동성 충족 및 눌림목 지지가 확인되었습니다."
+                            action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", f"[매수 시그널] 고점 대비 {dsp}일 경과, 거래량 {vc*100:.0f}%로 축소된 완벽한 눌림목입니다."
                         else:
-                            action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 거래대금 부족 또는 타점 대기 중입니다."
+                            action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 거래대금/경과일수 필터 미달 또는 타점 대기 중입니다."
 
                 eval_actions_cache[ticker] = action
                 display_records.append({
@@ -1244,13 +1273,13 @@ with tab2:
                             })
                             continue
                             
-                        yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max, avg_trade_val = res
+                        yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max, avg_trade_val, dsp, vc = res
 
-                        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss)
+                        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, dsp, vc)
                         
                         cd_info = p_data.get('cd_tracker', {}).get(ticker_str, {'losses': 0, 'until': '2000-01-01'})
                         cd_until = pd.to_datetime(cd_info['until']).date()
-                        is_cooldown = datetime.date.today() < cd_until
+                        is_cooldown = datetime.datetime.now(KST).date() < cd_until
                         
                         additional_amt = max(0, target_buy_amt - current_holding_amt)
                         add_qty = int(additional_amt // live_c_price)
@@ -1352,7 +1381,7 @@ with tab3:
         res = fetch_stock_status(ticker)
         if not res or res[0] is None: continue 
         
-        c_p, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max, avg_trade_val = res
+        c_p, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max, avg_trade_val, dsp, vc = res
         
         if qty_num == 0:
             live_c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else c_p
@@ -1372,7 +1401,7 @@ with tab3:
                 need_queue_state_save = True
         else: highest_price = 0.0
 
-        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss)
+        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, dsp, vc)
 
         if pd.isna(res_q['ai_score']) or np.isinf(res_q['ai_score']):
             tab3_anomaly_flag, tab3_anomaly_reason = True, f"[{ticker}] AI 매력도 점수 이상 수치(NaN/Inf) 감지."
@@ -1380,7 +1409,7 @@ with tab3:
 
         cd_info = p_data.get('cd_tracker', {}).get(ticker, {'losses': 0, 'until': '2000-01-01'})
         cd_until = pd.to_datetime(cd_info['until']).date()
-        is_cooldown = datetime.date.today() < cd_until
+        is_cooldown = datetime.datetime.now(KST).date() < cd_until
 
         is_sell, sell_type = False, ""
         if qty_num > 0:
@@ -1519,7 +1548,7 @@ with tab3:
                                     if pnl < 0:
                                         cd_i['losses'] += 1
                                         if cd_i['losses'] >= 2:
-                                            cd_i['until'] = (datetime.date.today() + datetime.timedelta(days=cooldown_days)).strftime('%Y-%m-%d')
+                                            cd_i['until'] = (datetime.datetime.now(KST).date() + datetime.timedelta(days=cooldown_days)).strftime('%Y-%m-%d')
                                     else: cd_i['losses'] = 0
                                     p_data['cd_tracker'][t_code] = cd_i
                                     if 'ts_tracker' in p_data and t_code in p_data['ts_tracker']: del p_data['ts_tracker'][t_code]
@@ -1568,7 +1597,7 @@ with tab3:
 
     st.markdown("---")
     st.subheader("📜 당일 매매(API 전송) 내역 및 실적 요약")
-    today_str = datetime.date.today().strftime('%Y-%m-%d')
+    today_str = datetime.datetime.now(KST).strftime('%Y-%m-%d')
     if p_data and p_data.get('daily_trades_date') == today_str and p_data.get('daily_trades'):
         trades_df = pd.DataFrame(p_data['daily_trades'])
         
@@ -1600,7 +1629,7 @@ with tab4:
         st.warning("포트폴리오가 없습니다.")
     else:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
-        today_date = datetime.date.today()
+        today_date = datetime.datetime.now(KST).date()
         
         st.subheader("🎯 포워드 테스트 (Forward Test) vs 실전 계좌 성적")
         
@@ -1692,7 +1721,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.2 Final Hybrid)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.4 Final)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1731,6 +1760,8 @@ with tab5:
         2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
         3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
         4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 것 (심각한 악재로 인한 폭락 방지).
+        5.  **[V6.4] 고점 형성 경과일수 필터 (Peak Recency):** 최고가가 형성된 시점이 최근 45일 이내여야 함 (장기 역배열 설거지 파동 배제).
+        6.  **[V6.4] 거래량 감쇄 검증 (Volume Contraction):** 조정 구간의 5일 평균 거래량이 고점 당일 폭발했던 거래량의 50% 이하로 감소해야 함 (매도세 소진 확인).
     *   **🔴 AI 이탈(매도/손절/퇴출) 조건:**
         1.  **추세 붕괴 (Support Break):** 주가가 20일 이동평균선을 하향 이탈하면 상승 동력이 꺾인 것으로 간주하여 전량 매도 및 관심종목 퇴출.
         2.  **강제 손절 컷 (Stop Loss):** 매수 단가 대비 수익률이 **`-12%`** (사용자 설정 가능) 도달 시, 지표와 무관하게 즉각적인 기계적 손절 집행.
@@ -1774,11 +1805,12 @@ with tab5:
 
     ## 6. 🚨 하이브리드 종목 발굴 및 통합 페일세이프 관제
     시스템의 100% 무인 운용과 사용자의 주도권을 동시에 보장하는 최첨단 보안 및 관제 기능이 결합되어 있습니다.
-    *   **[V6.2] 100% 직관적인 수동 검색 및 큐레이션 (Hybrid UI):** 사용자가 언제든 대시보드 전면에서 원하는 종목 코드를 직접 검색하여 포트폴리오에 담거나, AI가 사전에 세팅한 8대 핵심 섹터별 대장주 2종목을 원클릭으로 불러와 관심종목에 빠르게 편입시킬 수 있습니다.
-    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다.
+    *   **하이브리드 종목 큐레이션 (Hybrid Curation):** AI 스캐너에만 의존하지 않고, 사용자가 직접 검색창에 '종목명' 또는 '종목코드'를 입력하여 수동으로 발굴한 종목을 관심종목 유니버스에 편입시킬 수 있습니다. 또한 시스템에 사전 등록된 **시장 핵심 8대 테마(반도체, 2차전지, 헬스케어 등)별 대장주 2종목**을 버튼 클릭 한 번으로 손쉽게 추가할 수 있습니다. 
+    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다. (스캐너, 관제, 시뮬레이션의 3위일체 동기화 완벽 달성)
     *   **통합 평가총액 집계 및 무결성 표출:** 보유 종목별 개별 평가금액(`수량 × 현재가`)과 실계좌 보유 주식의 전체 평가총액/평가손익/수익률을 자동 집계하여 최하단 요약행에 직관적으로 표시합니다.
     *   **데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
     *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
     *   **진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
     *   **중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다.
+    *   **MTS UI/UX 100% 스타일링 매칭:** 대한민국 주식 투자자에게 가장 익숙한 적색(수익)/청색(손실) 하이라이트 기능을 모든 데이터프레임과 메트릭 카드에 완벽하게 결합하여 시인성과 가독성을 극대화했습니다.
     """, unsafe_allow_html=True)
