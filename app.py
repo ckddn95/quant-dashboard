@@ -12,6 +12,7 @@ import re
 import requests
 import gspread
 import hashlib
+import concurrent.futures
 from google.oauth2.service_account import Credentials
 import warnings
 warnings.filterwarnings('ignore')
@@ -278,7 +279,6 @@ def fetch_market_data():
             return 20.0, v_con, v_safe, kospi_ret_60, kosdaq_ret_60
         except: return 20.0, False, True, kospi_ret_60, kosdaq_ret_60
 
-# [V6.4 핵심 패치] 고점 형성 경과일수(Recency) 및 거래량 감쇄(Volume Contraction) 추출 추가
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
     try:
@@ -301,13 +301,11 @@ def fetch_stock_status(ticker_code):
             rh = float(tail_120.max())
             dd = ((y_p / rh) - 1) * 100 if rh > 0 else 0.0
             
-            # 1. 고점 경과일수 판독
             days_since_peak = len(tail_120) - 1 - int(np.argmax(tail_120.values))
             
             vol_5ma = float(vol.tail(6).iloc[:-1].mean()) if len(vol) >= 6 else float(vol.iloc[-1])
             avg_trade_val = vol_5ma * y_p 
             
-            # 2. 거래량 감쇄율 판독
             peak_vol_20 = float(vol.tail(20).max())
             vol_contraction = float(vol_5ma / peak_vol_20) if peak_vol_20 > 0 else 1.0
             
@@ -321,7 +319,6 @@ def fetch_stock_status(ticker_code):
     except: pass
     return None
 
-# [V6.4 핵심 패치] 전략 라우터에 Recency & Volume Contraction 로직 삽입
 def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, buf_pct, ts_target_pct, ts_drop_pct, sat_stop_loss_pct, days_since_peak, vol_contraction):
     buf = buf_pct / 100.0 if buf_pct else 0.0
     sat_stop_loss = sat_stop_loss_pct / 100.0 if sat_stop_loss_pct else -0.15
@@ -357,10 +354,7 @@ def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200,
     else: 
         res['ai_score'] = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
         is_dip = (-0.05 <= dist_ma20 <= 0.03) or (current_low <= ma20 * 1.01)
-        
-        # [V6.4] 중소형주 엄격 필터링: 고점이 최근 45일 이내여야 하고, 조정시 거래량이 고점의 50% 이하로 말라야 함.
         sat_normal_buy = is_dip and vol_surged and (days_since_peak <= 45) and (vol_contraction <= 0.50)
-        
         res['entry_cond'] = (ma200_cond and (sat_normal_buy or vix_contrarian) and drawdown >= -0.30 and ma60_slope_positive and ret_20 > -0.03)
         res['exit_cond_trend'] = (c_price < ma20 * (1 - buf/2)) and not vix_contrarian 
         res['stop_loss_cond'] = (user_ret <= sat_stop_loss)
@@ -369,28 +363,40 @@ def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200,
 
 @st.cache_data(ttl=3600)
 def run_core_scanner(use_ma200, buf_pct):
-    res, krx, buf = [], load_krx_universe(), buf_pct / 100.0
+    krx = load_krx_universe()
+    buf = buf_pct / 100.0
     if krx.empty: return pd.DataFrame()
     cands = krx[krx['Market'] == 'KOSPI'].sort_values('Marcap', ascending=False).head(100) if 'Marcap' in krx.columns else krx[krx['Market'] == 'KOSPI'].head(100)
-    for _, row in cands.iterrows():
+    
+    def process_stock(row):
         tc = str(row['Code']).strip().zfill(6)
         s = fetch_stock_status(tc)
-        if s is None: continue
+        if s is None: return None
         c_p, ma200, ma60, ma20, dd, vr, r60, r20, m60_up, is_a200, vs, c_l, rvm, atv, dsp, vc = s
         if ((not use_ma200) or is_a200) and (ma20 >= ma60 * (1 + buf)) and m60_up and (r20 > 0) and atv >= 5000000000:
-            res.append({'종목명': row['Name'], '티커': tc, '현재가': f"{c_p:,.0f} 원", '20/60선 이격': f"{((ma20/ma60)-1)*100:+.2f}%", '20일 모멘텀': f"{r20:+.2f}%", '진단 근거': "장기 추세선 방어 및 골든크로스"})
+            return {'종목명': row['Name'], '티커': tc, '현재가': f"{c_p:,.0f} 원", '20/60선 이격': f"{((ma20/ma60)-1)*100:+.2f}%", '20일 모멘텀': f"{r20:+.2f}%", '진단 근거': "장기 추세선 방어 및 골든크로스"}
+        return None
+
+    res = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        results = executor.map(process_stock, cands.to_dict('records'))
+        for r in results:
+            if r is not None:
+                res.append(r)
+                
     return pd.DataFrame(res)
 
 @st.cache_data(ttl=3600)
 def run_satellite_scanner(use_ma200, top_n=5):
-    res, krx = [], load_krx_universe()
+    krx = load_krx_universe()
     if krx.empty: return pd.DataFrame()
     kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
     cands = kosdaq[kosdaq['Marcap'] >= 100000000000].sort_values('Marcap', ascending=False).head(100) if 'Marcap' in krx.columns else kosdaq.head(100)
-    for _, row in cands.iterrows():
+    
+    def process_stock(row):
         tc = str(row['Code']).strip().zfill(6)
         s = fetch_stock_status(tc)
-        if s is None: continue
+        if s is None: return None
         c_p, ma200, ma60, ma20, dd, vr, r60, r20, m60_up, is_a200, vs, c_l, rvm, atv, dsp, vc = s
         d20 = ((c_p / ma20) - 1) * 100 if ma20 > 0 else 0
         is_dip = (-5.0 <= d20 <= 3.0) or ((c_l <= ma20 * 1.01) and (c_p >= ma20 * 0.95))
@@ -398,7 +404,16 @@ def run_satellite_scanner(use_ma200, top_n=5):
         
         if sat_normal_buy and ((not use_ma200) or is_a200) and (dd >= -30.0) and m60_up and (r20 > -3.0) and atv >= 5000000000:
             sc = (rvm / 100.0)*0.4 + (r60*0.3) + (r20*0.3)
-            res.append({'종목명': row['Name'], '티커': tc, '현재가': f"{c_p:,.0f} 원", '20일선 이격도': f"{d20:+.2f}%", '최대 수급': f"{rvm:,.0f}%", 'AI 스코어': round(sc, 2), '_sc': sc})
+            return {'종목명': row['Name'], '티커': tc, '현재가': f"{c_p:,.0f} 원", '20일선 이격도': f"{d20:+.2f}%", '최대 수급': f"{rvm:,.0f}%", 'AI 스코어': round(sc, 2), '_sc': sc}
+        return None
+
+    res = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        results = executor.map(process_stock, cands.to_dict('records'))
+        for r in results:
+            if r is not None:
+                res.append(r)
+                
     if not res: return pd.DataFrame()
     return pd.DataFrame(res).sort_values('_sc', ascending=False).head(top_n).drop(columns=['_sc'])
 
@@ -457,7 +472,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         df['RVM'] = df['VR'].rolling(20, min_periods=1).max()
         df['V_Srg'] = df['RVM'] >= 200.0
         
-        # [V6.4] 벡터 연산에 Recency 및 Volume Contraction 로직 추가
         df['Days_Since_Peak'] = df['Close'].rolling(120, min_periods=1).apply(lambda x: len(x) - 1 - np.argmax(x), raw=True)
         df['Peak_Vol_20'] = df['Volume'].rolling(20, min_periods=1).max()
         df['V5_mean'] = df['Volume'].rolling(5, min_periods=1).mean()
@@ -1083,7 +1097,6 @@ with tab1:
                     yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, _, vol_surged, yf_low, recent_vol_max, avg_trade_val, dsp, vc = res
                     if not c_price or c_price == 0: c_price = yf_price
                     
-                    # [V6.4 핵심] 라우터 호출 시 dsp, vc 인자 전달
                     res_q = analyze_quant_strategy(active_strat, c_price, 0.0, 0.0, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, dsp, vc)
                     
                     ai_score = res_q['ai_score']
@@ -1423,7 +1436,7 @@ with tab3:
             elif not auto_trade_enabled: status_text = "⏸️ 자동주문 비활성"
             temp_queue.append({
                 '우선순위_분류': 0, '🔥 점수': 999.0, '종목명': s_name, '티커': ticker, '구분': sell_type,
-                '목표 주가': f"{live_c_price:,.0f} 원", '목표 주문 수량': f"{qty_num:,} 주", '필요 자금': f"-{live_c_price * qty_num:,.0f} 원 (회수)",
+                '주문 단가': f"{live_c_price:,.0f} 원", '주문 수량': f"{qty_num:,} 주", '필요 자금': f"-{live_c_price * qty_num:,.0f} 원 (회수)",
                 '_raw_price': live_c_price, '_buy_price': buy_price, '_qty': qty_num, '_req_fund': 0, '주문 실행 상태': status_text
             })
             continue 
@@ -1451,7 +1464,7 @@ with tab3:
                 
                 temp_queue.append({
                     '우선순위_분류': 1, '🔥 점수': res_q['ai_score'], '종목명': s_name, '티커': ticker, '구분': buy_type,
-                    '목표 주가': f"{live_c_price:,.0f} 원", '목표 주문 수량': f"{add_qty:,} 주", '필요 자금': f"{req_fund:,.0f} 원",
+                    '주문 단가': f"{live_c_price:,.0f} 원", '주문 수량': f"{add_qty:,} 주", '필요 자금': f"{req_fund:,.0f} 원",
                     '_raw_price': live_c_price, '_buy_price': 0, '_qty': add_qty, '_req_fund': req_fund, '주문 실행 상태': status_text
                 })
 
@@ -1487,7 +1500,7 @@ with tab3:
                     if aff_qty > 0:
                         if not kill_switch and auto_trade_enabled:
                             q['주문 실행 상태'] = f"🔄 부분 매수 대기 (가능: {aff_qty}주)"
-                        q['목표 주문 수량'] = f"{q['_qty']} 주 ➡️ {aff_qty} 주"
+                        q['주문 수량'] = f"{q['_qty']} 주 ➡️ {aff_qty} 주"
                         sim_cash -= (aff_qty * q['_raw_price'])
                         q['_qty'] = aff_qty
                         q['_req_fund'] = aff_qty * q['_raw_price']
@@ -1506,7 +1519,7 @@ with tab3:
             display_queue['🔥 점수'] = display_queue['🔥 점수'].apply(lambda x: "🚨 최우선 (매도)" if float(x) >= 900.0 else f"{float(x):.2f}")
             
             st.subheader("📋 AI 매매 우선순위 대기열 (Order Queue)")
-            st.table(display_queue[['우선순위', '종목명', '구분', '🔥 점수', '목표 주가', '목표 주문 수량', '필요 자금', '주문 실행 상태']])
+            st.table(display_queue[['우선순위', '종목명', '구분', '🔥 점수', '주문 단가', '주문 수량', '필요 자금', '주문 실행 상태']])
             
             st.markdown("---")
             
@@ -1721,7 +1734,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.4 Final)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.6)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1760,8 +1773,8 @@ with tab5:
         2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
         3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
         4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 것 (심각한 악재로 인한 폭락 방지).
-        5.  **[V6.4] 고점 형성 경과일수 필터 (Peak Recency):** 최고가가 형성된 시점이 최근 45일 이내여야 함 (장기 역배열 설거지 파동 배제).
-        6.  **[V6.4] 거래량 감쇄 검증 (Volume Contraction):** 조정 구간의 5일 평균 거래량이 고점 당일 폭발했던 거래량의 50% 이하로 감소해야 함 (매도세 소진 확인).
+        5.  **고점 형성 경과일수 필터 (Peak Recency):** 최고가가 형성된 시점이 최근 45일 이내여야 함 (장기 역배열 설거지 파동 배제).
+        6.  **거래량 감쇄 검증 (Volume Contraction):** 조정 구간의 5일 평균 거래량이 고점 당일 폭발했던 거래량의 50% 이하로 감소해야 함 (매도세 소진 확인).
     *   **🔴 AI 이탈(매도/손절/퇴출) 조건:**
         1.  **추세 붕괴 (Support Break):** 주가가 20일 이동평균선을 하향 이탈하면 상승 동력이 꺾인 것으로 간주하여 전량 매도 및 관심종목 퇴출.
         2.  **강제 손절 컷 (Stop Loss):** 매수 단가 대비 수익률이 **`-12%`** (사용자 설정 가능) 도달 시, 지표와 무관하게 즉각적인 기계적 손절 집행.
@@ -1799,7 +1812,7 @@ with tab5:
     *   **1순위 매도 (Emergency Exit & Override):** 손절 및 추세 이탈 종목을 최우선 청산하여 현금을 확보합니다. 매수보다 무조건 선행하도록 내부 시스템 점수 **`🚨 최우선 (매도)`**를 강제 할당합니다.
     *   **2순위 매수 (Score-based Allocation):** AI 매력도 점수가 높은 종목 순서대로 한정된 가용 예수금을 순차적 배분합니다.
     *   **다이내믹 자금 배분 (Dynamic Position Sizing & Skip):** 매수 큐 진행 중 예수금이 부족해지면 무조건 매수를 포기하지 않습니다. 가용 현금 내에서 살 수 있는 만큼 수량을 깎아서 **부분 매수(Partial Fill)**를 진행하며, 1주도 살 수 없는 경우 즉시 **스킵(Skip)**하고 다음 차순위 유망 종목의 매수를 시도하는 지능형 자금 융통 알고리즘이 적용되어 있습니다.
-    *   **매수/매도 지정 로직:** 시장가 주문 시 증권사에서 요구하는 과도한 상한가 증거금 차단 현상을 우려해, 모든 신규 매수는 타겟팅된 가격의 **지정가(Limit Order)**로 쏘아 예수금 누수를 방어하며, 손절/익절 등 청산 주문은 1초라도 빨리 탈출하기 위해 **시장가(Market Order)**로 강제 집행됩니다.
+    *   **[V6.6] UI 용어 교정 (목표주가 ➡️ 주문단가):** 대기열 표에서 AI가 당장 진입하고자 하는 지정가 기준 가격을 전통적 의미의 '목표주가(Target Price)'로 표기하여 발생하던 오해를 방지하고자, 직관적인 트레이딩 용어인 **`주문 단가`**로 전면 수정하였습니다.
 
     ---
 
