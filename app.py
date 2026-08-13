@@ -223,7 +223,6 @@ def execute_kis_order(app_key, app_secret, token, cano, acnt_prdt_cd, ticker, qt
     except Exception as e:
         return False, f"API 예외 발생: {str(e)}"
 
-# [V5.7 핵심] 체결 상태(성공/실패/스킵) 및 사유 로깅 기능 추가
 def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0, status="✅ 체결완료", msg=""):
     today_str = datetime.date.today().strftime('%Y-%m-%d')
     now_str = datetime.datetime.now().strftime('%H:%M:%S')
@@ -671,7 +670,6 @@ except: real_base_date = datetime.date(2024, 1, 1)
 
 cumulative_realized_pnl = 0.0
 if p_data and 'daily_trades' in p_data:
-    # 성공한 매도 거래의 손익만 합산
     for trade in p_data['daily_trades']:
         status = trade.get('상태', '✅ 체결')
         if '✅' in status:
@@ -909,7 +907,11 @@ with tab1:
         if kis_token_global: st.caption("⚡ **KIS API 연결됨:** 한국투자증권 실시간 호가 및 AI 진단 반영 중입니다.")
             
         display_records, eval_actions_cache = [], {}
+        
+        # [V5.8 패치] 탭 1에서도 현재 기준 자산을 동적으로 적용
         current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
+        if current_asset_base <= 0: current_asset_base = total_cash
+            
         is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
         current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
         target_buy_amt = current_asset_base * (current_max_alloc_pct / 100.0)
@@ -926,6 +928,7 @@ with tab1:
                     if not c_price or c_price == 0: c_price = yf_price
                     
                     res_q = analyze_quant_strategy(active_strat, c_price, 0.0, 0.0, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss)
+                    
                     ai_score = res_q['ai_score']
                     target_shares = int(target_buy_amt // c_price) if c_price > 0 else 0
 
@@ -1059,9 +1062,13 @@ with tab2:
                 need_live_state_save = False
                 
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
+                    # [V5.8 패치] 탭 2에서도 현재 기준 자산을 명확히 정의 (오작동 방지)
+                    current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
+                    if current_asset_base <= 0: current_asset_base = total_cash
+                        
                     is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
                     current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
-                    target_buy_amt = real_total_eval * (current_max_alloc_pct / 100.0)
+                    target_buy_amt = current_asset_base * (current_max_alloc_pct / 100.0)
                     
                     total_eval_sum = 0.0
                     total_pnl_sum = 0.0
@@ -1143,9 +1150,10 @@ with tab2:
                             tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] AI 매력도 점수가 비정상(NaN/Inf)으로 도출되었습니다."
                             break
                             
+                        # [V5.8 패치] 팻핑거 로직: 실계좌 평가금이 아닌 현재 기준 자산(current_asset_base)과 비교
                         if res_q['entry_cond'] and add_qty > 0:
-                            if (add_qty * live_c_price) > (real_total_eval * 1.0):
-                                tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 계좌 총 자산을 초과하는 팻핑거 로직 감지."
+                            if (add_qty * live_c_price) > (current_asset_base * 1.0):
+                                tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 설정된 계좌 총 자산({current_asset_base:,.0f}원)을 초과하는 팻핑거 로직 감지."
                                 break
 
                         live_results.append({
@@ -1266,7 +1274,10 @@ with tab3:
             continue 
 
         if res_q['entry_cond'] and not is_cooldown and avg_trade_val >= 5000000000:
+            # [V5.8 패치] 탭 3에서도 현재 기준 자산을 명확히 정의
             current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
+            if current_asset_base <= 0: current_asset_base = total_cash
+                
             is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
             current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
             
@@ -1275,8 +1286,9 @@ with tab3:
             additional_amt = max(0, target_buy_amt - current_holding_amt)
             add_qty = int(additional_amt // live_c_price)
             
-            if add_qty > 0 and (add_qty * live_c_price) > (real_total_eval * 1.0):
-                tab3_anomaly_flag, tab3_anomaly_reason = True, f"[{ticker}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 계좌 총 자산을 초과하는 팻핑거 로직 감지."
+            # [V5.8 패치] 팻핑거 비교 대상을 current_asset_base 로 완벽 교체
+            if add_qty > 0 and (add_qty * live_c_price) > (current_asset_base * 1.0):
+                tab3_anomaly_flag, tab3_anomaly_reason = True, f"[{ticker}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 설정된 계좌 총 자산({current_asset_base:,.0f}원)을 초과하는 팻핑거 로직 감지."
                 break
             
             if add_qty > 0:
@@ -1415,7 +1427,6 @@ with tab3:
     if p_data and p_data.get('daily_trades_date') == today_str and p_data.get('daily_trades'):
         trades_df = pd.DataFrame(p_data['daily_trades'])
         
-        # [V5.7] 성공한 체결 건만 통계에 반영
         succ_df = trades_df[trades_df['상태'].str.contains('✅')] if '상태' in trades_df.columns else trades_df
         total_buy = succ_df[succ_df['주문 구분'] == '매수(진입)']['체결 금액'].sum() if not succ_df.empty else 0
         total_sell = succ_df[succ_df['주문 구분'] == '매도(청산)']['체결 금액'].sum() if not succ_df.empty else 0
@@ -1531,7 +1542,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.7)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.8 Final Master)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1607,11 +1618,11 @@ with tab5:
     *   **1순위 매도 (Emergency Exit & Override):** 손절 및 추세 이탈 종목을 최우선 청산하여 현금을 확보합니다. 매수보다 무조건 선행하도록 내부 시스템 점수 **`🚨 최우선 (매도)`**를 강제 할당합니다.
     *   **2순위 매수 (Score-based Allocation):** AI 매력도 점수가 높은 종목 순서대로 한정된 가용 예수금을 순차적 배분합니다.
     *   **다이내믹 자금 배분 (Dynamic Position Sizing & Skip):** 매수 큐 진행 중 예수금이 부족해지면 무조건 매수를 포기하지 않습니다. 가용 현금 내에서 살 수 있는 만큼 수량을 깎아서 **부분 매수(Partial Fill)**를 진행하며, 1주도 살 수 없는 경우 즉시 **스킵(Skip)**하고 다음 차순위 유망 종목의 매수를 시도하는 지능형 자금 융통 알고리즘이 적용되어 있습니다.
-    *   **[V5.7] 매수/매도 지정 로직:** 시장가 주문 시 증권사에서 요구하는 과도한 상한가 증거금 차단 현상을 우려해, 모든 신규 매수는 타겟팅된 가격의 **지정가(Limit Order)**로 쏘아 예수금 누수를 방어하며, 손절/익절 등 청산 주문은 1초라도 빨리 탈출하기 위해 **시장가(Market Order)**로 강제 집행됩니다.
+    *   **매수/매도 지정 로직:** 시장가 주문 시 증권사에서 요구하는 과도한 상한가 증거금 차단 현상을 우려해, 모든 신규 매수는 타겟팅된 가격의 **지정가(Limit Order)**로 쏘아 예수금 누수를 방어하며, 손절/익절 등 청산 주문은 1초라도 빨리 탈출하기 위해 **시장가(Market Order)**로 강제 집행됩니다.
 
     ---
 
-    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 로깅 통합 관제
+    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 통합 관제
     자동매매가 예상치 못한 시장 상황이나 프로그램 오류로 인해 계좌를 망가뜨리지 않도록 최우선 보안 장치가 결합되어 있습니다.
     *   **무작위 재시도 금지 (No Blind Retry):** 주문 실패 시 이전 조건을 맹목적으로 반복하지 않으며, 실시간 호가 및 조건을 재검증합니다.
     *   **하드코딩 킬 스위치 (Kill Switch):** 활성화 즉시 어떠한 상황에서도 모든 KIS API 매매 호출이 차단되어 계좌를 안전하게 보호합니다.
@@ -1620,5 +1631,6 @@ with tab5:
     *   **보안 로그인 및 세션 영구 보존:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다.
     *   **데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
     *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 단 1개라도 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
-    *   **[V5.7] 실패 로그 완전 기록(Full Trace Logging):** 증권사 API 통신 실패, 잔고 부족 등 모든 주문 거절 사유가 "당일 매매 일지"에 실시간으로 상세히(Status, Reason) 기록되어, 사용자가 HTS를 켜지 않고도 대시보드 내에서 즉각적인 원인 분석 및 대처가 가능하도록 설계되었습니다.
+    *   **[V5.8] 팻핑거 오탐지 방지 동적 스위칭:** 실전 API 연동 전 가상 시뮬레이션 상태일 경우, 팻핑거 관제 로직이 실계좌 잔고(0원)가 아닌 현재 설정된 가상 투자금을 기준으로 동적 비교하도록 완벽하게 교정되었습니다.
+    *   **실패 로그 완전 기록(Full Trace Logging):** 증권사 API 통신 실패, 잔고 부족 등 모든 주문 거절 사유가 "당일 매매 일지"에 실시간으로 상세히(Status, Reason) 기록되어, 사용자가 HTS를 켜지 않고도 대시보드 내에서 즉각적인 원인 분석 및 대처가 가능하도록 설계되었습니다.
     """, unsafe_allow_html=True)
