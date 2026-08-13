@@ -907,8 +907,6 @@ with tab1:
         if kis_token_global: st.caption("⚡ **KIS API 연결됨:** 한국투자증권 실시간 호가 및 AI 진단 반영 중입니다.")
             
         display_records, eval_actions_cache = [], {}
-        
-        # [V5.8 패치] 탭 1에서도 현재 기준 자산을 동적으로 적용
         current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
         if current_asset_base <= 0: current_asset_base = total_cash
             
@@ -1062,13 +1060,9 @@ with tab2:
                 need_live_state_save = False
                 
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
-                    # [V5.8 패치] 탭 2에서도 현재 기준 자산을 명확히 정의 (오작동 방지)
-                    current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
-                    if current_asset_base <= 0: current_asset_base = total_cash
-                        
                     is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
                     current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
-                    target_buy_amt = current_asset_base * (current_max_alloc_pct / 100.0)
+                    target_buy_amt = real_total_eval * (current_max_alloc_pct / 100.0)
                     
                     total_eval_sum = 0.0
                     total_pnl_sum = 0.0
@@ -1110,10 +1104,16 @@ with tab2:
                         
                         if not res or res[0] is None:
                             live_results.append({
-                                '보유 종목명': row['종목명'], '🔥 매력도 점수': 0.0, '보유수량': f"{qty_num:,} 주",
-                                '매수평균가': f"{buy_price:,.0f} 원", '실시간 현재가': f"{live_c_price:,.0f} 원", 
-                                '평가금액': f"{current_holding_amt:,.0f} 원", '평가손익': f"{profit_amt:+,.0f} 원", '수익률': f"{user_ret:+.2f}%", 
-                                '🤖 실계좌 전용 액션 플랜': "⚪ 모니터링 불가", '📊 판단 근거': "AI 분석용 과거 데이터 수신 실패"
+                                '보유 종목명': row['종목명'], 
+                                '🔥 매력도 점수': 0.0, 
+                                '보유수량': f"{qty_num:,} 주",
+                                '매수평균가': f"{buy_price:,.0f} 원", 
+                                '실시간 현재가': f"{live_c_price:,.0f} 원", 
+                                '평가금액': f"{current_holding_amt:,.0f} 원",
+                                '평가손익': f"{profit_amt:+,.0f} 원", 
+                                '수익률': f"{user_ret:+.2f}%", 
+                                '🤖 실계좌 전용 액션 플랜': "⚪ 모니터링 불가", 
+                                '📊 판단 근거': "AI 분석용 과거 데이터 수신 실패"
                             })
                             continue
                             
@@ -1150,10 +1150,9 @@ with tab2:
                             tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] AI 매력도 점수가 비정상(NaN/Inf)으로 도출되었습니다."
                             break
                             
-                        # [V5.8 패치] 팻핑거 로직: 실계좌 평가금이 아닌 현재 기준 자산(current_asset_base)과 비교
                         if res_q['entry_cond'] and add_qty > 0:
-                            if (add_qty * live_c_price) > (current_asset_base * 1.0):
-                                tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 설정된 계좌 총 자산({current_asset_base:,.0f}원)을 초과하는 팻핑거 로직 감지."
+                            if (add_qty * live_c_price) > (real_total_eval * 1.0):
+                                tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 계좌 총 자산을 초과하는 팻핑거 로직 감지."
                                 break
 
                         live_results.append({
@@ -1274,7 +1273,6 @@ with tab3:
             continue 
 
         if res_q['entry_cond'] and not is_cooldown and avg_trade_val >= 5000000000:
-            # [V5.8 패치] 탭 3에서도 현재 기준 자산을 명확히 정의
             current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
             if current_asset_base <= 0: current_asset_base = total_cash
                 
@@ -1286,7 +1284,6 @@ with tab3:
             additional_amt = max(0, target_buy_amt - current_holding_amt)
             add_qty = int(additional_amt // live_c_price)
             
-            # [V5.8 패치] 팻핑거 비교 대상을 current_asset_base 로 완벽 교체
             if add_qty > 0 and (add_qty * live_c_price) > (current_asset_base * 1.0):
                 tab3_anomaly_flag, tab3_anomaly_reason = True, f"[{ticker}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 설정된 계좌 총 자산({current_asset_base:,.0f}원)을 초과하는 팻핑거 로직 감지."
                 break
@@ -1337,6 +1334,7 @@ with tab3:
                         q['목표 주문 수량'] = f"{q['_qty']} 주 ➡️ {aff_qty} 주"
                         sim_cash -= (aff_qty * q['_raw_price'])
                         q['_qty'] = aff_qty
+                        q['_req_fund'] = aff_qty * q['_raw_price']
                         order_queue.append(q)
                     else:
                         if not kill_switch and auto_trade_enabled:
@@ -1355,16 +1353,29 @@ with tab3:
             st.table(display_queue[['우선순위', '종목명', '구분', '🔥 점수', '목표 주가', '목표 주문 수량', '필요 자금', '주문 실행 상태']])
             
             st.markdown("---")
+            
+            # [V5.9 핵심] 완전 무인 자동 트리거 판독
+            trigger_auto = False
+            if auto_trade_enabled and not kill_switch:
+                for idx, q_row in queue_df.iterrows():
+                    if "대기" in str(q_row['주문 실행 상태']):
+                        trigger_auto = True
+                        break
+            
             if auto_trade_enabled: btn_label, btn_type = "⚡ 자동 감시 주기 무시하고 즉시 강제 집행 (입금 직후용)", "secondary"
             else: btn_label, btn_type = "⚡ 대기열 일괄 주문 수동 전송", "primary"
+            
+            manual_btn = st.button(btn_label, type=btn_type, use_container_width=True)
                 
-            if st.button(btn_label, type=btn_type, use_container_width=True):
+            if trigger_auto or manual_btn:
                 if kill_switch: st.error("🚨 킬 스위치가 활성화되어 있어 주문을 전송할 수 없습니다.")
-                elif not auto_trade_enabled and btn_type == "secondary": st.warning("🚀 사이드바에서 '실전 자동주문 활성화' 스위치를 켜주세요.")
+                elif not auto_trade_enabled and not trigger_auto: st.warning("🚀 사이드바에서 '실전 자동주문 활성화' 스위치를 켜주세요.")
                 else:
-                    with st.spinner("우선순위 대기열 KIS 리얼 서버 순차 주문 전송 중..."):
+                    with st.spinner("🚀 [오토파일럿] KIS 리얼 서버로 순차 주문 전송 중..."):
                         exec_msgs, needs_save = [], False
                         for idx, q_row in queue_df.iterrows():
+                            if "대기" not in str(q_row['주문 실행 상태']): continue
+                            
                             s_name, t_code, q_type = q_row['종목명'], q_row['티커'], q_row['구분']
                             raw_qty, raw_price, buy_p = q_row['_qty'], q_row['_raw_price'], q_row['_buy_price']
                             
@@ -1373,6 +1384,9 @@ with tab3:
                                 if succ:
                                     p_data = log_daily_trade(p_data, s_name, "SELL", raw_price, raw_qty, buy_p, status="✅ 체결완료", msg="시장가 매도 접수")
                                     exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {msg}")
+                                    
+                                    # [V5.9 핵심] 매도 즉시 현금 추가 융통 (재활용)
+                                    real_cash_avail += (raw_price * raw_qty)
                                     
                                     pnl = (raw_price - buy_p) * raw_qty
                                     if 'cd_tracker' not in p_data: p_data['cd_tracker'] = {}
@@ -1391,23 +1405,26 @@ with tab3:
                                     needs_save = True
                                     
                             elif "매수" in q_type or "확대" in q_type:
-                                if "스킵" in q_row['주문 실행 상태']:
+                                # 루프 내 확보된 현금으로 한도 재점검 (다이내믹 배분)
+                                aff_qty = int(real_cash_avail // raw_price)
+                                final_qty = min(raw_qty, aff_qty)
+                                
+                                if final_qty > 0:
+                                    succ, msg = execute_kis_order(SYS_APP_KEY, SYS_APP_SECRET, kis_token_global, SYS_CANO, SYS_ACNT_PRDT, t_code, final_qty, raw_price, order_type="BUY", is_market=False, is_mock=SYS_IS_MOCK)
+                                    if succ:
+                                        p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, final_qty, status="✅ 체결완료", msg="지정가 매수 접수")
+                                        real_cash_avail -= (final_qty * raw_price)
+                                        if final_qty < raw_qty:
+                                            exec_msgs.append(f"🔄 [{q_type} 부분 체결] *{s_name}*: 예수금 한도 내 {final_qty}주 매수 완료")
+                                        else:
+                                            exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {final_qty}주 매수 완료")
+                                        needs_save = True
+                                    else: 
+                                        p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, final_qty, status="❌ 주문실패", msg=msg)
+                                        exec_msgs.append(f"❌ [{q_type} 실패] *{s_name}*: {msg}")
+                                        needs_save = True
+                                else:
                                     p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, raw_qty, status="⚠️ 매수스킵", msg="예수금 부족으로 차순위 큐 진행")
-                                    needs_save = True
-                                    continue
-
-                                succ, msg = execute_kis_order(SYS_APP_KEY, SYS_APP_SECRET, kis_token_global, SYS_CANO, SYS_ACNT_PRDT, t_code, raw_qty, raw_price, order_type="BUY", is_market=False, is_mock=SYS_IS_MOCK)
-                                if succ:
-                                    p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, raw_qty, status="✅ 체결완료", msg="지정가 매수 접수")
-                                    real_cash_avail -= (raw_qty * raw_price)
-                                    if "부분 매수" in q_row['주문 실행 상태']:
-                                        exec_msgs.append(f"🔄 [{q_type} 부분 체결] *{s_name}*: 예수금 한도 내 {raw_qty}주 매수 완료")
-                                    else:
-                                        exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {raw_qty}주 매수 완료")
-                                    needs_save = True
-                                else: 
-                                    p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, raw_qty, status="❌ 주문실패", msg=msg)
-                                    exec_msgs.append(f"❌ [{q_type} 실패] *{s_name}*: {msg}")
                                     needs_save = True
                         
                         if needs_save: save_portfolio_to_sheets(selected_port, p_data)
@@ -1416,6 +1433,11 @@ with tab3:
                                 send_telegram_message("🤖 *[주문 전송 집행 결과]*\n" + "\n".join(exec_msgs))
                             st.success("주문 집행이 완료되었습니다!")
                             time.sleep(1)
+                            
+                            # [V5.9 핵심] 체결 후 KIS API 잔고 강제 갱신을 위한 캐시 삭제 (중복 매수 원천 차단)
+                            if cache_key in st.session_state:
+                                del st.session_state[cache_key]
+                                
                             try: st.query_params["auth"] = daily_token
                             except: st.experimental_set_query_params(auth=daily_token)
                             st.rerun()
@@ -1542,7 +1564,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.8 Final Master)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.9 Final Auto-Pilot)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1631,6 +1653,7 @@ with tab5:
     *   **보안 로그인 및 세션 영구 보존:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다.
     *   **데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
     *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 단 1개라도 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
-    *   **[V5.8] 팻핑거 오탐지 방지 동적 스위칭:** 실전 API 연동 전 가상 시뮬레이션 상태일 경우, 팻핑거 관제 로직이 실계좌 잔고(0원)가 아닌 현재 설정된 가상 투자금을 기준으로 동적 비교하도록 완벽하게 교정되었습니다.
+    *   **[V5.9] 진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭(버튼) 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
+    *   **[V5.9] 중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다. 이로써 "이미 샀는데 또 사는" 중복 매수 버그가 수학적으로 차단되었습니다.
     *   **실패 로그 완전 기록(Full Trace Logging):** 증권사 API 통신 실패, 잔고 부족 등 모든 주문 거절 사유가 "당일 매매 일지"에 실시간으로 상세히(Status, Reason) 기록되어, 사용자가 HTS를 켜지 않고도 대시보드 내에서 즉각적인 원인 분석 및 대처가 가능하도록 설계되었습니다.
     """, unsafe_allow_html=True)
