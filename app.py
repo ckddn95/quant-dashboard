@@ -593,6 +593,48 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
 if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
 
 # ==========================================
+# [V6.0 핵심 패치] UI / UX 헬퍼 함수 (MTS 스타일 적색/청색 컬러링)
+# ==========================================
+def color_profit_loss(val):
+    color = ''
+    val_str = str(val)
+    if val_str.startswith('+'):
+        color = 'color: #FF5050; font-weight: bold;'
+    elif val_str.startswith('-') and len(val_str) > 1 and val_str != '-':
+        color = 'color: #3b82f6; font-weight: bold;'
+    return color
+
+def apply_mts_style(df, subset_cols):
+    valid_cols = [c for c in subset_cols if c in df.columns]
+    if not valid_cols: return df
+    if hasattr(df.style, 'map'): return df.style.map(color_profit_loss, subset=valid_cols)
+    else: return df.style.applymap(color_profit_loss, subset=valid_cols)
+
+def mts_metric_html(label, value, delta=None):
+    val_color = "white"
+    val_str = str(value)
+    if not delta: 
+        if val_str.startswith('+'): val_color = "#FF5050"
+        elif val_str.startswith('-') and val_str != '-': val_color = "#3b82f6"
+        
+    if delta:
+        delta_str = str(delta)
+        if delta_str.startswith('+'): d_color = "#FF5050"
+        elif delta_str.startswith('-') and delta_str != '-': d_color = "#3b82f6"
+        else: d_color = "#a3a8b8"
+        delta_html = f'<div style="color: {d_color}; font-size: 1rem; font-weight: bold; margin-top: 4px;">{delta_str}</div>'
+    else:
+        delta_html = ""
+        
+    return f"""
+    <div style="background-color: rgba(255, 255, 255, 0.05); padding: 1.2rem; border-radius: 0.5rem; margin-bottom: 1rem; border: 1px solid rgba(250, 250, 250, 0.1);">
+        <div style="color: #a3a8b8; font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem;">{label}</div>
+        <div style="font-size: 1.8rem; font-weight: 700; color: {val_color};">{val_str}</div>
+        {delta_html}
+    </div>
+    """
+
+# ==========================================
 # 2. 전역 변수 및 데이터 파싱
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
@@ -907,6 +949,7 @@ with tab1:
         if kis_token_global: st.caption("⚡ **KIS API 연결됨:** 한국투자증권 실시간 호가 및 AI 진단 반영 중입니다.")
             
         display_records, eval_actions_cache = [], {}
+        
         current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
         if current_asset_base <= 0: current_asset_base = total_cash
             
@@ -1036,10 +1079,10 @@ with tab2:
             real_ret_pct = (total_pnl_all / total_invested_principal * 100) if total_invested_principal > 0 else 0
             
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            col_m1.metric("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원")
-            col_m2.metric("📥 자동 역산 투입 원금 (입출금 감지)", f"{total_invested_principal:,.0f} 원")
-            col_m3.metric("📈 누적 실현/평가 수익금", f"{total_pnl_all:+,.0f} 원", f"{real_ret_pct:+.2f}%")
-            col_m4.metric("💵 가용 현금", f"{real_cash_avail:,.0f} 원")
+            with col_m1: st.markdown(mts_metric_html("💰 계좌 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
+            with col_m2: st.markdown(mts_metric_html("📥 투자 원금 (입출금 감지)", f"{total_invested_principal:,.0f} 원"), unsafe_allow_html=True)
+            with col_m3: st.markdown(mts_metric_html("📈 누적 수익금 (실현+평가)", f"{total_pnl_all:+,.0f} 원", f"{real_ret_pct:+.2f}%"), unsafe_allow_html=True)
+            with col_m4: st.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
                 
             with st.expander("⚙️ 과거 실적 보정 (선택 사항)", expanded=False):
                 st.markdown("봇 가동 전에 이미 발생했던 과거 수익/손실 누적액이 있다면 보정값으로 입력해 주세요.")
@@ -1104,16 +1147,10 @@ with tab2:
                         
                         if not res or res[0] is None:
                             live_results.append({
-                                '보유 종목명': row['종목명'], 
-                                '🔥 매력도 점수': 0.0, 
-                                '보유수량': f"{qty_num:,} 주",
-                                '매수평균가': f"{buy_price:,.0f} 원", 
-                                '실시간 현재가': f"{live_c_price:,.0f} 원", 
-                                '평가금액': f"{current_holding_amt:,.0f} 원",
-                                '평가손익': f"{profit_amt:+,.0f} 원", 
-                                '수익률': f"{user_ret:+.2f}%", 
-                                '🤖 실계좌 전용 액션 플랜': "⚪ 모니터링 불가", 
-                                '📊 판단 근거': "AI 분석용 과거 데이터 수신 실패"
+                                '보유 종목명': row['종목명'], '🔥 매력도 점수': 0.0, '보유수량': f"{qty_num:,} 주",
+                                '매수평균가': f"{buy_price:,.0f} 원", '실시간 현재가': f"{live_c_price:,.0f} 원", 
+                                '평가금액': f"{current_holding_amt:,.0f} 원", '평가손익': f"{profit_amt:+,.0f} 원", '수익률': f"{user_ret:+.2f}%", 
+                                '🤖 실계좌 전용 액션 플랜': "⚪ 모니터링 불가", '📊 판단 근거': "AI 분석용 과거 데이터 수신 실패"
                             })
                             continue
                             
@@ -1151,8 +1188,8 @@ with tab2:
                             break
                             
                         if res_q['entry_cond'] and add_qty > 0:
-                            if (add_qty * live_c_price) > (real_total_eval * 1.0):
-                                tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 계좌 총 자산을 초과하는 팻핑거 로직 감지."
+                            if (add_qty * live_c_price) > (current_asset_base * 1.0):
+                                tab2_anomaly_flag, tab2_anomaly_reason = True, f"[{ticker_str}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 설정된 계좌 총 자산({current_asset_base:,.0f}원)을 초과하는 팻핑거 로직 감지."
                                 break
 
                         live_results.append({
@@ -1184,7 +1221,7 @@ with tab2:
                                 '🤖 실계좌 전용 액션 플랜': '-', '📊 판단 근거': '-'
                             }])
                             live_df = pd.concat([live_df, summary_row], ignore_index=True)
-                            st.table(live_df)
+                            st.dataframe(apply_mts_style(live_df, ['평가손익', '수익률']), use_container_width=True, hide_index=True)
             else:
                 st.info("현재 실전 계좌에 매수(보유) 중인 종목이 없습니다. [탭 1]의 관심종목 리스트에서 타점을 대기하세요.")
 
@@ -1354,7 +1391,6 @@ with tab3:
             
             st.markdown("---")
             
-            # [V5.9 핵심] 완전 무인 자동 트리거 판독
             trigger_auto = False
             if auto_trade_enabled and not kill_switch:
                 for idx, q_row in queue_df.iterrows():
@@ -1385,7 +1421,6 @@ with tab3:
                                     p_data = log_daily_trade(p_data, s_name, "SELL", raw_price, raw_qty, buy_p, status="✅ 체결완료", msg="시장가 매도 접수")
                                     exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {msg}")
                                     
-                                    # [V5.9 핵심] 매도 즉시 현금 추가 융통 (재활용)
                                     real_cash_avail += (raw_price * raw_qty)
                                     
                                     pnl = (raw_price - buy_p) * raw_qty
@@ -1405,7 +1440,6 @@ with tab3:
                                     needs_save = True
                                     
                             elif "매수" in q_type or "확대" in q_type:
-                                # 루프 내 확보된 현금으로 한도 재점검 (다이내믹 배분)
                                 aff_qty = int(real_cash_avail // raw_price)
                                 final_qty = min(raw_qty, aff_qty)
                                 
@@ -1434,7 +1468,6 @@ with tab3:
                             st.success("주문 집행이 완료되었습니다!")
                             time.sleep(1)
                             
-                            # [V5.9 핵심] 체결 후 KIS API 잔고 강제 갱신을 위한 캐시 삭제 (중복 매수 원천 차단)
                             if cache_key in st.session_state:
                                 del st.session_state[cache_key]
                                 
@@ -1455,9 +1488,9 @@ with tab3:
         total_pnl = succ_df['실현 손익'].sum() if not succ_df.empty else 0
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("🛒 당일 체결된 총 매수대금", f"{total_buy:,.0f} 원")
-        c2.metric("💸 당일 체결된 총 매도대금", f"{total_sell:,.0f} 원")
-        c3.metric("🎯 당일 확정 실현손익", f"{total_pnl:+,.0f} 원")
+        with c1: st.markdown(mts_metric_html("🛒 당일 체결된 총 매수대금", f"{total_buy:,.0f} 원"), unsafe_allow_html=True)
+        with c2: st.markdown(mts_metric_html("💸 당일 체결된 총 매도대금", f"{total_sell:,.0f} 원"), unsafe_allow_html=True)
+        with c3: st.markdown(mts_metric_html("🎯 당일 확정 실현손익", f"{total_pnl:+,.0f} 원", f"{total_pnl:+,.0f} 원"), unsafe_allow_html=True)
         
         display_trades = trades_df.copy()
         if '상태' not in display_trades.columns: display_trades['상태'] = "✅ 체결완료"
@@ -1468,7 +1501,7 @@ with tab3:
         display_trades['체결 금액'] = display_trades['체결 금액'].apply(lambda x: f"{x:,.0f} 원")
         display_trades['실현 손익'] = display_trades.apply(lambda row: f"{row['실현 손익']:+,.0f} 원" if row['주문 구분'] == '매도(청산)' and '✅' in row['상태'] else "-", axis=1)
         
-        st.dataframe(display_trades, use_container_width=True)
+        st.dataframe(apply_mts_style(display_trades, ['실현 손익']), use_container_width=True, hide_index=True)
     else: st.info("오늘 KIS API 엔진을 통해 체결 시도된 거래 내역이 없습니다.")
 
 with tab4:
@@ -1506,11 +1539,11 @@ with tab4:
                     if fw_result:
                         st.markdown("### 🏆 누적 수익률 비교 (Yield Comparison)")
                         col_fw1, col_fw2 = st.columns(2)
-                        col_fw1.metric("📈 AI 포워드 테스트 (이론)", f"{fw_result['final_port_ret']:+.2f}%", f"기말 자산: {fw_result['final_asset']:,.0f} 원")
+                        with col_fw1: st.markdown(mts_metric_html("📈 AI 포워드 테스트 (이론)", f"{fw_result['final_port_ret']:+.2f}%", f"기말 자산: {fw_result['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                         if SYS_APP_KEY and kis_data:
                             total_pnl_all = real_eval_pnl + cumulative_realized_pnl + manual_offset
                             real_ret_pct_custom = (total_pnl_all / total_invested_principal * 100) if total_invested_principal > 0 else 0
-                            col_fw2.metric("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct_custom:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원")
+                            with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct_custom:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
                         else: col_fw2.info("한국투자증권 API 연동이 필요합니다.")
                             
                         st.markdown("---")
@@ -1536,7 +1569,9 @@ with tab4:
                             else: rl_qty, rl_display = "0 주", "0원 (0.00%)"
 
                             comp_data.append({"종목명": name, "🤖 AI 잔고": ai_qty, "🤖 누적손익": ai_display, "🔌 실계좌 잔고": rl_qty, "🔌 평가손익": rl_display})
-                        st.dataframe(pd.DataFrame(comp_data), use_container_width=True)
+                        
+                        comp_df = pd.DataFrame(comp_data)
+                        st.dataframe(apply_mts_style(comp_df, ['🤖 누적손익', '🔌 평가손익']), use_container_width=True, hide_index=True)
                     else: st.warning("데이터가 부족하여 시뮬레이션을 완료할 수 없습니다.")
 
         st.markdown("---")
@@ -1553,9 +1588,12 @@ with tab4:
                     if bt_result:
                         st.success(f"✅ 장기 백테스트 실행 완료!")
                         col_r1, col_r2 = st.columns(2)
-                        col_r1.metric("총 초기 투입 자산", f"{total_cash:,.0f} 원")
-                        col_r2.metric("AI 초과수익 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%")
-                        st.table(pd.DataFrame(bt_result['summary_rows']))
+                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                        with col_r2: st.markdown(mts_metric_html("AI 초과수익 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        
+                        summary_df = pd.DataFrame(bt_result['summary_rows'])
+                        st.dataframe(apply_mts_style(summary_df, ['총 순수익 (원)', '수익률 (%)']), use_container_width=True, hide_index=True)
+                        
                         chart = alt.Chart(bt_result['eom_weights_reset']).mark_bar().encode(
                             x=alt.X('Date:O', title=''), y=alt.Y('Weight:Q', title='비중 (%)', stack='zero'),
                             color=alt.Color('Asset:N', scale=alt.Scale(domain=bt_result['cols_ordered'], range=bt_result['color_range'])), order=alt.Order('Order:Q')
@@ -1564,7 +1602,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.9 Final Auto-Pilot)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.0 Final Master)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1653,7 +1691,8 @@ with tab5:
     *   **보안 로그인 및 세션 영구 보존:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다.
     *   **데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
     *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 단 1개라도 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
-    *   **[V5.9] 진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭(버튼) 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
-    *   **[V5.9] 중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다. 이로써 "이미 샀는데 또 사는" 중복 매수 버그가 수학적으로 차단되었습니다.
+    *   **진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭(버튼) 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
+    *   **중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다. 이로써 "이미 샀는데 또 사는" 중복 매수 버그가 수학적으로 차단되었습니다.
     *   **실패 로그 완전 기록(Full Trace Logging):** 증권사 API 통신 실패, 잔고 부족 등 모든 주문 거절 사유가 "당일 매매 일지"에 실시간으로 상세히(Status, Reason) 기록되어, 사용자가 HTS를 켜지 않고도 대시보드 내에서 즉각적인 원인 분석 및 대처가 가능하도록 설계되었습니다.
+    *   **[V6.0] MTS UI/UX 100% 스타일링 매칭:** 대한민국 주식 투자자에게 가장 익숙한 적색(수익)/청색(손실) 하이라이트 기능을 모든 데이터프레임과 메트릭 카드에 완벽하게 결합하여 시인성과 가독성을 극대화했습니다.
     """, unsafe_allow_html=True)
