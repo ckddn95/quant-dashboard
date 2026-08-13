@@ -416,7 +416,6 @@ def run_satellite_scanner(use_ma200, top_n=5):
     if not res: return pd.DataFrame()
     return pd.DataFrame(res).sort_values('_sc', ascending=False).head(top_n).drop(columns=['_sc'])
 
-# [V6.7 핵심 패치] 시뮬레이션 데이터 수집 구간에 멀티스레딩(병렬 처리) 적용
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -498,7 +497,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         df['Sc'] = np.where(ec, 1.0 + np.where(df['V_Str'], 1.0 if strat!='대형주 (Core)' else 0.5, 0.0) + np.where(df['R60']>df['Bm_Ret_60'], 0.5, 0.0) + np.where(df['V_Con'], 1.0, 0.0), 0.0)
         return nm, df[df.index >= s_dt].copy()
 
-    # [V6.7] 초고속 데이터 다운로드 및 가공 (15개 스레드)
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         results = executor.map(fetch_sim_data, [row for _, row in sim_stocks.iterrows()])
         for r in results:
@@ -1746,10 +1744,16 @@ with tab4:
         st.markdown("---")
         
         # ----------------------------------------
-        # Test 3: [V6.7 신규] 동적 유니버스 블라인드 백테스트
+        # Test 3: [V6.8 패치] 동적 유니버스 블라인드 백테스트 안내 문구 동적 스위칭
         # ----------------------------------------
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
-        st.markdown("현재 내 관심종목이 아닌, 과거 특정 시점의 **시가총액 상위 50개 종목(대형주/중소형주)**을 대상으로 AI가 100% 자율적으로 종목을 발굴하고 매매했을 때의 실전 운용 성과를 검증합니다.")
+        
+        if active_strat == '대형주 (Core)':
+            univ_text = "**KOSPI 시가총액 상위 50개 대형주**"
+        else:
+            univ_text = "**KOSDAQ 시가총액 상위 50개 중소형주**"
+            
+        st.markdown(f"현재 내 관심종목이 아닌, 과거 특정 시점의 {univ_text}를 대상으로 AI가 100% 자율적으로 종목을 발굴하고 매매했을 때의 실전 운용 성과를 검증합니다.")
         
         col_d1, col_d2 = st.columns(2)
         with col_d1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
@@ -1793,7 +1797,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.7 Final Backtest)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.8 Final Text-Fixed)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1875,13 +1879,15 @@ with tab5:
 
     ---
 
-    ## 6. 🚨 [V6.7] 하이브리드 종목 발굴 및 통합 페일세이프 관제
+    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 통합 관제
     시스템의 100% 무인 운용과 사용자의 주도권을 동시에 보장하는 최첨단 보안 및 관제 기능이 결합되어 있습니다.
     *   **동적 유니버스 블라인드 백테스트 (Dynamic Universe Blind Test):** 사용자가 선택해 둔 '현재 생존 종목'이 아니라, **과거 특정 시점의 KOSPI/KOSDAQ 시가총액 상위 50종목 전체를 대상으로 AI가 스스로 종목을 찾고 샀다 팔았다를 반복하는 실전과 가장 유사한 시뮬레이션 기능**이 탭 4에 탑재되었습니다.
     *   **초고속 멀티스레딩 스캐너 (Parallel Engine):** 파이썬의 `concurrent.futures`를 활용한 멀티스레딩 병렬 처리 아키텍처를 스캐너 및 백테스트 전반에 도입하여, 100개의 종목을 하나씩 스캔하던 기존 방식의 병목을 해결하고 **검색 속도를 기존 대비 10배 이상 극적으로 단축**시켰습니다.
     *   **하이브리드 종목 큐레이션 (Hybrid Curation):** AI 스캐너에만 의존하지 않고, 사용자가 직접 검색창에 '종목명' 또는 '종목코드'를 입력하여 수동으로 발굴한 종목을 관심종목 유니버스에 편입시킬 수 있습니다. 또한 시스템에 사전 등록된 **시장 핵심 8대 테마별 대장주 2종목**을 버튼 클릭 한 번으로 손쉽게 추가할 수 있습니다. 
     *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다.
-    *   **데이터 무결성 스위칭:** 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
+    *   **통합 평가총액 집계 및 무결성 표출:** 보유 종목별 개별 평가금액(`수량 × 현재가`)과 실계좌 보유 주식의 전체 평가총액/평가손익/수익률을 자동 집계하여 최하단 요약행에 직관적으로 표시합니다.
+    *   **보안 로그인 및 타임존 동기화:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다. 글로벌 클라우드 서버의 UTC 시차 문제로 인해 체결 시간이 9시간 느리게 기록되는 현상을 완벽 차단하기 위해, 시스템 전역에 **KST(한국 표준시)를 강제 맵핑**하여 한국 개장 시간에 오차 없이 동작하도록 설계되었습니다.
+    *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
     *   **진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
     *   **중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다.
     *   **MTS UI/UX 100% 스타일링 매칭:** 대한민국 주식 투자자에게 가장 익숙한 적색(수익)/청색(손실) 하이라이트 기능을 모든 데이터프레임과 메트릭 카드에 완벽하게 결합하여 시인성과 가독성을 극대화했습니다.
