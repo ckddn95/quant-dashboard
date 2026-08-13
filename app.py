@@ -21,6 +21,10 @@ warnings.filterwarnings('ignore')
 # ==========================================
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 
+# 세션 초기화 (V6.2 수동 검색 기능용)
+if 'search_q' not in st.session_state: st.session_state.search_q = None
+if 'search_sec' not in st.session_state: st.session_state.search_sec = None
+
 SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
 
 @st.cache_resource
@@ -592,9 +596,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
 
 if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
 
-# ==========================================
-# [V6.0 핵심 패치] UI / UX 헬퍼 함수 (MTS 스타일 적색/청색 컬러링)
-# ==========================================
 def color_profit_loss(val):
     color = ''
     val_str = str(val)
@@ -914,6 +915,92 @@ with tab1:
                         st.rerun()
                     else: st.info("현재 퇴출 대상 종목이 없습니다.")
 
+        # [V6.2 핵심 패치] 수동 검색 및 테마별 대표주 (숨김 해제 및 직관적 버튼 레이아웃)
+        st.markdown("### 🔎 직접 종목 추가 및 섹터별 대장주 검색")
+        st.markdown("AI 스캐너 외에도 원하시는 종목이나 섹터 대장주를 직접 검색하여 관심종목에 등록할 수 있습니다.")
+        
+        c_search, c_theme = st.columns([1, 1])
+        
+        with c_search:
+            st.markdown("#### ⌨️ 직접 종목 검색")
+            with st.form("manual_search_form"):
+                search_query = st.text_input("종목명 또는 종목코드(6자리) 입력", placeholder="예: 삼성전자, 005930")
+                if st.form_submit_button("🔍 검색하기"):
+                    st.session_state.search_q = search_query
+                    st.session_state.search_sec = None
+        
+        with c_theme:
+            st.markdown("#### 🏭 주요 섹터별 대장주 보기")
+            b1, b2, b3, b4 = st.columns(4)
+            if b1.button("💻 반도체", use_container_width=True): 
+                st.session_state.search_sec = "반도체"; st.session_state.search_q = None
+            if b2.button("🔋 2차전지", use_container_width=True): 
+                st.session_state.search_sec = "2차전지"; st.session_state.search_q = None
+            if b3.button("🧬 바이오", use_container_width=True): 
+                st.session_state.search_sec = "바이오"; st.session_state.search_q = None
+            if b4.button("🌐 플랫폼", use_container_width=True): 
+                st.session_state.search_sec = "플랫폼"; st.session_state.search_q = None
+                
+            b5, b6, b7, b8 = st.columns(4)
+            if b5.button("🚗 자동차", use_container_width=True): 
+                st.session_state.search_sec = "자동차"; st.session_state.search_q = None
+            if b6.button("🏦 금융", use_container_width=True): 
+                st.session_state.search_sec = "금융"; st.session_state.search_q = None
+            if b7.button("🚀 방산", use_container_width=True): 
+                st.session_state.search_sec = "방산"; st.session_state.search_q = None
+            if b8.button("💄 화장품", use_container_width=True): 
+                st.session_state.search_sec = "화장품"; st.session_state.search_q = None
+
+        current_watchlist_tickers = [str(s.get('티커')).strip().zfill(6) for s in p_data.get('stocks', [])]
+
+        if st.session_state.search_q:
+            st.markdown(f"##### 🎯 '{st.session_state.search_q}' 검색 결과")
+            krx_df = load_krx_universe()
+            if not krx_df.empty:
+                matched = krx_df[krx_df['Name'].str.contains(st.session_state.search_q, case=False, na=False) | krx_df['Code'].str.contains(st.session_state.search_q, na=False)].head(5)
+                if not matched.empty:
+                    for _, r in matched.iterrows():
+                        m_name, m_code = r['Name'], str(r['Code']).zfill(6)
+                        cc1, cc2 = st.columns([8, 2])
+                        cc1.markdown(f"`{m_code}` **{m_name}**")
+                        if m_code in real_holdings_tickers: cc2.button("✅ 보유중", key=f"add_m_{m_code}", disabled=True, use_container_width=True)
+                        elif m_code in current_watchlist_tickers: cc2.button("✅ 관심종목", key=f"add_m_{m_code}", disabled=True, use_container_width=True)
+                        else:
+                            if cc2.button("➕ 등록", key=f"add_m_{m_code}", use_container_width=True):
+                                p_data['stocks'].append({'종목명': m_name, '티커': m_code, '매수단가': 0, '보유수량': 0})
+                                p_data['stocks'] = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커']).to_dict(orient='records')
+                                save_portfolio_to_sheets(selected_port, p_data)
+                                try: st.query_params["auth"] = daily_token
+                                except: st.experimental_set_query_params(auth=daily_token)
+                                st.rerun()
+                else: st.caption("검색 결과가 없습니다.")
+
+        elif st.session_state.search_sec:
+            st.markdown(f"##### 🎯 '{st.session_state.search_sec}' 섹터 대표주")
+            sector_stocks = {
+                "반도체": [("삼성전자", "005930"), ("SK하이닉스", "000660")],
+                "2차전지": [("LG에너지솔루션", "373220"), ("삼성SDI", "006400")],
+                "바이오": [("삼성바이오로직스", "207940"), ("셀트리온", "068270")],
+                "플랫폼": [("NAVER", "035420"), ("카카오", "035720")],
+                "자동차": [("현대차", "005380"), ("기아", "000270")],
+                "금융": [("KB금융", "105560"), ("신한지주", "055550")],
+                "방산": [("한화에어로스페이스", "012450"), ("LIG넥스원", "079550")],
+                "화장품": [("아모레퍼시픽", "090430"), ("LG생활건강", "090530")]
+            }
+            for t_name, t_code in sector_stocks[st.session_state.search_sec]:
+                tc1, tc2 = st.columns([8, 2])
+                tc1.markdown(f"`{t_code}` **{t_name}**")
+                if t_code in real_holdings_tickers: tc2.button("✅ 보유중", key=f"add_t_{t_code}", disabled=True, use_container_width=True)
+                elif t_code in current_watchlist_tickers: tc2.button("✅ 관심종목", key=f"add_t_{t_code}", disabled=True, use_container_width=True)
+                else:
+                    if tc2.button("➕ 등록", key=f"add_t_{t_code}", use_container_width=True):
+                        p_data['stocks'].append({'종목명': t_name, '티커': t_code, '매수단가': 0, '보유수량': 0})
+                        p_data['stocks'] = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커']).to_dict(orient='records')
+                        save_portfolio_to_sheets(selected_port, p_data)
+                        try: st.query_params["auth"] = daily_token
+                        except: st.experimental_set_query_params(auth=daily_token)
+                        st.rerun()
+
         if st.session_state.show_scanner:
             with st.spinner("AI 퀀트 필터 검색 중..."):
                 scan_result = run_core_scanner(use_ma200_filter, whipsaw_buffer) if active_strat == '대형주 (Core)' else run_satellite_scanner(use_ma200_filter)
@@ -925,10 +1012,10 @@ with tab1:
                         c1.write(f"**{row['종목명']}** (`{row['티커']}`)")
                         c2.write(f"현재가: {row['현재가']}")
                         ticker_str = str(row['티커']).strip().zfill(6)
-                        if ticker_str in real_holdings_tickers: c3.button("🔌 실계좌 보유", key=f"add_{row['티커']}", disabled=True)
-                        elif ticker_str in current_watchlist_tickers: c3.button("📝 관심종목", key=f"add_{row['티커']}", disabled=True)
+                        if ticker_str in real_holdings_tickers: c3.button("🔌 실계좌 보유", key=f"add_scan_{row['티커']}", disabled=True)
+                        elif ticker_str in current_watchlist_tickers: c3.button("📝 관심종목", key=f"add_scan_{row['티커']}", disabled=True)
                         else:
-                            if c3.button("➕ 담기", key=f"add_{row['티커']}"):
+                            if c3.button("➕ 담기", key=f"add_scan_{row['티커']}"):
                                 p_data['stocks'].append({'종목명': row['종목명'], '티커': ticker_str, '매수단가': 0, '보유수량': 0})
                                 p_data['stocks'] = pd.DataFrame(p_data['stocks']).drop_duplicates(subset=['티커']).to_dict(orient='records')
                                 save_portfolio_to_sheets(selected_port, p_data)
@@ -1103,9 +1190,12 @@ with tab2:
                 need_live_state_save = False
                 
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
+                    current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
+                    if current_asset_base <= 0: current_asset_base = total_cash
+                        
                     is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
                     current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
-                    target_buy_amt = real_total_eval * (current_max_alloc_pct / 100.0)
+                    target_buy_amt = current_asset_base * (current_max_alloc_pct / 100.0)
                     
                     total_eval_sum = 0.0
                     total_pnl_sum = 0.0
@@ -1602,7 +1692,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.0 Final Master)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.2 Final Hybrid)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1682,17 +1772,13 @@ with tab5:
 
     ---
 
-    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 통합 관제
-    자동매매가 예상치 못한 시장 상황이나 프로그램 오류로 인해 계좌를 망가뜨리지 않도록 최우선 보안 장치가 결합되어 있습니다.
-    *   **무작위 재시도 금지 (No Blind Retry):** 주문 실패 시 이전 조건을 맹목적으로 반복하지 않으며, 실시간 호가 및 조건을 재검증합니다.
-    *   **하드코딩 킬 스위치 (Kill Switch):** 활성화 즉시 어떠한 상황에서도 모든 KIS API 매매 호출이 차단되어 계좌를 안전하게 보호합니다.
-    *   **수학적 팩트 기반 입출금 추적:** 기존의 부정확한 수동 입출금 입력 방식을 폐기하고, `현재 계좌 총 평가금 - 보유 주식 평가손익 - 봇 누적 실현손익` 공식을 통해 외부에서 입출금된 순수 투입 원금을 1원 단위까지 100% 정확하게 자동 역산합니다.
+    ## 6. 🚨 하이브리드 종목 발굴 및 통합 페일세이프 관제
+    시스템의 100% 무인 운용과 사용자의 주도권을 동시에 보장하는 최첨단 보안 및 관제 기능이 결합되어 있습니다.
+    *   **[V6.2] 100% 직관적인 수동 검색 및 큐레이션 (Hybrid UI):** 사용자가 언제든 대시보드 전면에서 원하는 종목 코드를 직접 검색하여 포트폴리오에 담거나, AI가 사전에 세팅한 8대 핵심 섹터별 대장주 2종목을 원클릭으로 불러와 관심종목에 빠르게 편입시킬 수 있습니다.
+    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다.
     *   **통합 평가총액 집계 및 무결성 표출:** 보유 종목별 개별 평가금액(`수량 × 현재가`)과 실계좌 보유 주식의 전체 평가총액/평가손익/수익률을 자동 집계하여 최하단 요약행에 직관적으로 표시합니다.
-    *   **보안 로그인 및 세션 영구 보존:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다.
     *   **데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
-    *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 단 1개라도 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
-    *   **진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭(버튼) 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
-    *   **중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다. 이로써 "이미 샀는데 또 사는" 중복 매수 버그가 수학적으로 차단되었습니다.
-    *   **실패 로그 완전 기록(Full Trace Logging):** 증권사 API 통신 실패, 잔고 부족 등 모든 주문 거절 사유가 "당일 매매 일지"에 실시간으로 상세히(Status, Reason) 기록되어, 사용자가 HTS를 켜지 않고도 대시보드 내에서 즉각적인 원인 분석 및 대처가 가능하도록 설계되었습니다.
-    *   **[V6.0] MTS UI/UX 100% 스타일링 매칭:** 대한민국 주식 투자자에게 가장 익숙한 적색(수익)/청색(손실) 하이라이트 기능을 모든 데이터프레임과 메트릭 카드에 완벽하게 결합하여 시인성과 가독성을 극대화했습니다.
+    *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
+    *   **진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
+    *   **중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다.
     """, unsafe_allow_html=True)
