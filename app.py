@@ -268,6 +268,53 @@ def fetch_stock_status(ticker_code):
     except: pass
     return None
 
+# ==========================================
+# [V5.4 핵심] 중앙 통제 전략 라우터 (교차 오염 영구 차단)
+# ==========================================
+def analyze_quant_strategy(strat_name, c_price, buy_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, buf_pct, ts_target_pct, sat_stop_loss_pct):
+    """
+    대형주(Core)와 중소형주(Satellite)의 매매 원칙이 서로 침범하지 않도록
+    모든 규칙을 독립적인 딕셔너리로 계산하여 반환하는 중앙 통제 함수
+    """
+    buf = buf_pct / 100.0 if buf_pct else 0.0
+    sat_stop_loss = sat_stop_loss_pct / 100.0 if sat_stop_loss_pct else -0.15
+    ts_target = ts_target_pct / 100.0 if ts_target_pct else 0.30
+    
+    user_ret = ((c_price / buy_price) - 1) if buy_price > 0 else 0.0
+    diff_ma = ((ma20 / ma60) - 1) if ma60 > 0 else 0.0
+    dist_ma20 = ((c_price / ma20) - 1) if ma20 > 0 else 0.0
+    
+    is_above_ma200 = (c_price >= ma200)
+    ma200_cond = is_above_ma200 if use_ma200_filter else True
+    current_low = min(yf_low, c_price)
+    
+    res = {
+        'ai_score': 0.0, 'entry_cond': False, 'exit_cond_trend': False,
+        'stop_loss_cond': False, 'trailing_stop_cond': False,
+        'diff_ma_pct': diff_ma * 100, 'dist_ma20_pct': dist_ma20 * 100,
+        'user_ret_pct': user_ret * 100, 'is_above_ma200': is_above_ma200,
+        'vol_surged': vol_surged, 'drawdown': drawdown
+    }
+    
+    # 🏛️ 대형주(Core) 전용 룰
+    if strat_name == '대형주 (Core)':
+        res['ai_score'] = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 100 * 0.2), 2)
+        res['entry_cond'] = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
+        res['exit_cond_trend'] = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian # 20일선이 60일선을 하향 이탈 시 매도
+        res['stop_loss_cond'] = False # 대형주는 긴급손절라인 대신 추세이탈 기준 적용
+        res['trailing_stop_cond'] = (user_ret >= ts_target)
+        
+    # 🚀 중소형주(Satellite) 전용 룰
+    else: 
+        res['ai_score'] = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
+        is_dip = (-0.05 <= dist_ma20 <= 0.03) or (current_low <= ma20 * 1.01)
+        res['entry_cond'] = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
+        res['exit_cond_trend'] = (c_price < ma20 * (1 - buf/2)) and not vix_contrarian # 현재가가 20일선을 하향 이탈 시 매도
+        res['stop_loss_cond'] = (user_ret <= sat_stop_loss)
+        res['trailing_stop_cond'] = (user_ret >= ts_target)
+        
+    return res
+
 @st.cache_data(ttl=3600)
 def run_core_scanner(use_ma200, buf_pct):
     res, krx, buf = [], load_krx_universe(), buf_pct / 100.0
@@ -368,7 +415,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             d20 = ((df['Close']/df['M20'])-1)*100
             idip = ((d20 >= -5.0) & (d20 <= 3.0)) | (df['Low'] <= df['M20']*1.01 if 'Low' in df.columns else d20 <= 0)
             ec = (m2_c & ((idip & df['V_Srg']) | df['V_Con'])) & (df['DD'] >= -0.30)
-            # [V5.3 픽스] 중소형주는 MA20 이탈 시 매도로 수정
             xc = (df['Close'] < df['M20']*(1-buf/2)) & (~df['V_Con'])
             
         df['Sig'] = np.where(ec, 1, np.where(xc, 0, np.nan))
@@ -828,7 +874,6 @@ with tab1:
         if kis_token_global: st.caption("⚡ **KIS API 연결됨:** 한국투자증권 실시간 호가 및 AI 진단 반영 중입니다.")
             
         display_records, eval_actions_cache = [], {}
-        buf = whipsaw_buffer / 100.0
         current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
         is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
         current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
@@ -844,35 +889,26 @@ with tab1:
                 if res and res[0] is not None:
                     yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, _, vol_surged, yf_low, recent_vol_max = res
                     if not c_price or c_price == 0: c_price = yf_price
-                    is_above_ma200 = c_price >= ma200
-                    current_low = min(yf_low, c_price)
-                    dist_ma20 = ((c_price / ma20) - 1) * 100 if ma20 > 0 else 0
-                    diff_ma = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0
-                    tech_text = f"20/60선 이격 {diff_ma:+.2f}%" if active_strat == '대형주 (Core)' else f"20일선 이격 {dist_ma20:+.2f}%"
-                    ma200_cond = is_above_ma200 if use_ma200_filter else True
+                    
+                    # [V5.4 핵심] 중앙 통제 라우터 호출
+                    res_q = analyze_quant_strategy(active_strat, c_price, 0.0, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, sat_stop_loss)
+                    
+                    ai_score = res_q['ai_score']
                     target_shares = int(target_buy_amt // c_price) if c_price > 0 else 0
 
                     if active_strat == '대형주 (Core)':
-                        ai_score = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 0.2), 2)
-                        entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
-                        exit_cond_trend = (ma20 < ma60 * (1 - buf/2))
-                        if exit_cond_trend or (use_ma200_filter and not is_above_ma200):
+                        tech_text = f"20/60선 이격 {res_q['diff_ma_pct']:+.2f}%"
+                        if res_q['exit_cond_trend'] or (use_ma200_filter and not res_q['is_above_ma200']):
                             action, easy_desc = "🔴 유니버스 제외 (추세 붕괴)", "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
-                        elif entry_cond:
+                        elif res_q['entry_cond']:
                             action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
                         else:
                             action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
                     else:
-                        ai_score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
-                        is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
-                        entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
-                        
-                        # [V5.3] 위성전략: 실시간 현재가가 20일선을 깨고 내려가면 추세 이탈로 판정
-                        exit_cond_trend = (c_price < ma20 * (1 - buf/2))
-                        
-                        if not vol_surged or drawdown < -30.0 or (use_ma200_filter and not is_above_ma200):
+                        tech_text = f"20일선 이격 {res_q['dist_ma20_pct']:+.2f}%"
+                        if res_q['exit_cond_trend'] or not res_q['vol_surged'] or res_q['drawdown'] < -30.0 or (use_ma200_filter and not res_q['is_above_ma200']):
                             action, easy_desc = "🔴 유니버스 제외 (수급/추세 상실)", "[유니버스 제외] 핵심 지지선 하향 이탈 및 모멘텀 소멸이 확인되었습니다. 관심종목 리스트에서 추방할 것을 권고합니다."
-                        elif entry_cond:
+                        elif res_q['entry_cond']:
                             action, easy_desc = f"🟢 매수 시그널 발생 (목표: {target_shares:,}주)", "[매수 시그널 발생] 중장기 이동평균선 정배열 및 모멘텀 강세가 확인되었습니다. 포트폴리오 신규 편입이 유효한 구간입니다."
                         else:
                             action, easy_desc = "🟡 모니터링 유지", "[모니터링 유지] 시스템 상 유효한 매매 시그널이 발생하지 않았습니다. 추가적인 가격 및 추세 확인이 필요합니다."
@@ -989,7 +1025,6 @@ with tab2:
                 tab2_anomaly_reason = ""
                 
                 with st.spinner("실계좌 종목 AI 집중 분석 중..."):
-                    buf, live_results = whipsaw_buffer / 100.0, []
                     is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
                     current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
                     target_buy_amt = real_total_eval * (current_max_alloc_pct / 100.0)
@@ -997,6 +1032,7 @@ with tab2:
                     total_eval_sum = 0.0
                     total_pnl_sum = 0.0
                     total_buy_sum = 0.0
+                    live_results = []
                     
                     for idx, row in real_stocks_df.iterrows():
                         live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
@@ -1040,45 +1076,32 @@ with tab2:
                             
                         yf_price, ma200, ma60, ma20, drawdown, _, _, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max = res
 
-                        diff_ma = ((ma20 / ma60) - 1) * 100 if (ma20 and ma60) else 0
-                        dist_ma20 = ((live_c_price / ma20) - 1) * 100 if ma20 else 0
-                        ma200_cond = is_above_ma200 if use_ma200_filter else True
+                        # [V5.4 핵심] 중앙 통제 라우터 호출
+                        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, sat_stop_loss)
                         
                         additional_amt = max(0, target_buy_amt - current_holding_amt)
                         add_qty = int(additional_amt // live_c_price)
 
-                        # [V5.3 픽스] 중소형주(Satellite) 전략의 엑시트 룰을 20일선 데드크로스가 아닌 현재가 이탈로 수정
-                        if active_strat == '대형주 (Core)': 
-                            ai_score = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 0.2), 2)
-                            entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
-                            exit_cond_trend = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian
-                            
-                            if user_ret >= ts_target_pct: action, reason = "🔵 트레일링 스탑 가동", f"목표 수익률({ts_target_pct}%) 도달"
-                            elif exit_cond_trend: action, reason = "🔴 전량 청산 (추세 이탈)", f"20/60선 데드크로스 이탈"
-                            elif entry_cond:
-                                if add_qty > 0: action, reason = f"🟢 비중 확대 유효 (+{add_qty:,}주)", f"신규 진입 타점 조건 충족"
-                                else: action, reason = "🟡 비중 도달 (포지션 홀딩)", f"목표 비중({current_max_alloc_pct}%) 기충족"
-                            else: action, reason = "🟡 포지션 홀딩", f"추세 방어 중 및 지지선 이탈 없음"
-                        else:
-                            ai_score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
-                            is_dip = (-5.0 <= dist_ma20 <= 3.0) or (min(yf_low, live_c_price) <= ma20 * 1.01)
-                            entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
-                            exit_cond_trend = (live_c_price < ma20 * (1 - buf/2)) and not vix_contrarian
-                            
-                            if user_ret <= sat_stop_loss: action, reason = "🔴 손절 매도 집행", f"손절 기준선({sat_stop_loss}%) 도달"
-                            elif user_ret >= ts_target_pct: action, reason = "🔵 트레일링 스탑 가동", f"목표 수익률({ts_target_pct}%) 돌파"
-                            elif exit_cond_trend: action, reason = "🔴 전량 청산 (추세 이탈)", f"20일선 지지선 하향 이탈"
-                            elif entry_cond:
-                                if add_qty > 0: action, reason = f"🟢 비중 확대 유효 (+{add_qty:,}주)", f"수급 유입 후 20일선 눌림목 지지 중"
-                                else: action, reason = "🟡 비중 도달 (포지션 홀딩)", f"목표 비중({current_max_alloc_pct}%) 기충족"
-                            else: action, reason = "🟡 포지션 홀딩", f"손절선 이탈 없음 및 추세 유지 중"
+                        action, reason = "-", "-"
+                        
+                        if res_q['stop_loss_cond']: 
+                            action, reason = "🔴 긴급 손절 매도", f"손절 기준선({sat_stop_loss}%) 도달"
+                        elif res_q['trailing_stop_cond']: 
+                            action, reason = "🔵 트레일링 익절", f"목표 수익률({ts_target_pct}%) 돌파"
+                        elif res_q['exit_cond_trend']: 
+                            action, reason = "🔴 전량 청산 (추세 이탈)", "핵심 지지선(추세) 하향 이탈"
+                        elif res_q['entry_cond']:
+                            if add_qty > 0: action, reason = f"🟢 비중 확대 유효 (+{add_qty:,}주)", "신규 진입 타점 조건 충족"
+                            else: action, reason = "🟡 비중 도달 (포지션 홀딩)", f"목표 비중({current_max_alloc_pct}%) 기충족"
+                        else: 
+                            action, reason = "🟡 포지션 홀딩", "추세 방어 중 및 타점 대기"
 
-                        if pd.isna(ai_score) or np.isinf(ai_score):
+                        if pd.isna(res_q['ai_score']) or np.isinf(res_q['ai_score']):
                             tab2_anomaly_flag = True
                             tab2_anomaly_reason = f"[{ticker_str}] AI 매력도 점수가 비정상(NaN/Inf)으로 도출되었습니다."
                             break
                             
-                        if entry_cond and add_qty > 0:
+                        if res_q['entry_cond'] and add_qty > 0:
                             if (add_qty * live_c_price) > (real_total_eval * 1.0):
                                 tab2_anomaly_flag = True
                                 tab2_anomaly_reason = f"[{ticker_str}] 산출 매수 금액({add_qty * live_c_price:,.0f}원)이 계좌 총 자산을 초과하는 팻핑거 로직 감지."
@@ -1086,7 +1109,7 @@ with tab2:
 
                         live_results.append({
                             '보유 종목명': row['종목명'], 
-                            '🔥 매력도 점수': ai_score, 
+                            '🔥 매력도 점수': res_q['ai_score'], 
                             '보유수량': f"{qty_num:,} 주",
                             '매수평균가': f"{buy_price:,.0f} 원", 
                             '실시간 현재가': f"{live_c_price:,.0f} 원", 
@@ -1175,37 +1198,19 @@ with tab3:
             tab3_anomaly_reason = f"[{ticker}] 실시간 현재가가 0원 이하({live_c_price}원)로 수신되었습니다. API 오류 의심."
             break
 
-        user_ret = ((live_c_price / buy_price) - 1) * 100 if buy_price > 0 else 0
-        diff_ma = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0
-        dist_ma20 = ((live_c_price / ma20) - 1) * 100 if ma20 > 0 else 0
-        ma200_cond = is_above_ma200 if use_ma200_filter else True
-        current_low = min(yf_low, live_c_price)
-        
-        # [V5.3 픽스] 중소형주는 ma20과 ma60 비교가 아닌 실시간 가격 이탈 여부로 매도 판단
-        if active_strat == '대형주 (Core)':
-            ai_score = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 0.2), 2)
-            entry_cond = (ma200_cond and (ma20 >= ma60 * (1 + whipsaw_buffer/100.0)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
-            exit_cond_trend = (ma20 < ma60 * (1 - whipsaw_buffer/200.0)) and not vix_contrarian
-        else:
-            ai_score = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
-            is_dip = (-5.0 <= dist_ma20 <= 3.0) or (current_low <= ma20 * 1.01)
-            entry_cond = (ma200_cond and ((is_dip and vol_surged) or vix_contrarian) and drawdown >= -30.0)
-            exit_cond_trend = (live_c_price < ma20 * (1 - whipsaw_buffer/200.0)) and not vix_contrarian
+        # [V5.4 핵심] 중앙 통제 라우터 호출
+        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, sat_stop_loss)
 
-        if pd.isna(ai_score) or np.isinf(ai_score):
+        if pd.isna(res_q['ai_score']) or np.isinf(res_q['ai_score']):
             tab3_anomaly_flag = True
             tab3_anomaly_reason = f"[{ticker}] AI 매력도 점수 이상 수치(NaN/Inf) 감지."
             break
 
         is_sell, sell_type = False, ""
         if qty_num > 0:
-            if active_strat == '대형주 (Core)':
-                if user_ret >= ts_target_pct: is_sell, sell_type = True, "🔵 트레일링 익절"
-                elif exit_cond_trend: is_sell, sell_type = True, "🔴 추세 이탈 매도"
-            else:
-                if user_ret <= sat_stop_loss: is_sell, sell_type = True, "🔴 긴급 손절 매도"
-                elif user_ret >= ts_target_pct: is_sell, sell_type = True, "🔵 트레일링 익절"
-                elif exit_cond_trend: is_sell, sell_type = True, "🔴 추세 이탈 매도"
+            if res_q['stop_loss_cond']: is_sell, sell_type = True, "🔴 긴급 손절 매도"
+            elif res_q['trailing_stop_cond']: is_sell, sell_type = True, "🔵 트레일링 익절"
+            elif res_q['exit_cond_trend']: is_sell, sell_type = True, "🔴 추세 이탈 매도"
                 
         if is_sell:
             status_text = "대기 중"
@@ -1218,7 +1223,7 @@ with tab3:
             })
             continue 
 
-        if entry_cond:
+        if res_q['entry_cond']:
             current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
             is_bull_market = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
             current_max_alloc_pct = min(max_alloc_pct * 1.5 if (bull_market_boost and is_bull_market) else max_alloc_pct, 100.0)
@@ -1242,7 +1247,7 @@ with tab3:
                 buy_type = "🛒 신규 매수" if qty_num == 0 else "🟢 비중 확대"
                 
                 order_queue.append({
-                    '우선순위_분류': 1, '🔥 점수': ai_score, '종목명': s_name, '티커': ticker, '구분': buy_type,
+                    '우선순위_분류': 1, '🔥 점수': res_q['ai_score'], '종목명': s_name, '티커': ticker, '구분': buy_type,
                     '목표 주가': f"{live_c_price:,.0f} 원", '목표 주문 수량': f"{add_qty:,} 주", '필요 자금': f"{req_fund:,.0f} 원",
                     '_raw_price': live_c_price, '_buy_price': 0, '_qty': add_qty, '_req_fund': req_fund, '주문 실행 상태': status_text
                 })
@@ -1263,9 +1268,8 @@ with tab3:
             queue_df = queue_df.sort_values(by=['우선순위_분류', '🔥 점수'], ascending=[True, False]).reset_index(drop=True)
             queue_df['우선순위'] = [f"{i+1}위" for i in range(len(queue_df))]
             
-            # [V5.3 픽스] UI 표기 방식 보완: 문자열 치환 오류 완벽 수정
             display_queue = queue_df.copy()
-            display_queue['🔥 점수'] = display_queue['🔥 점수'].apply(lambda x: "🚨 최우선 (매도)" if x >= 900.0 else f"{float(x):.2f}")
+            display_queue['🔥 점수'] = display_queue['🔥 점수'].apply(lambda x: "🚨 최우선 (매도)" if float(x) >= 900.0 else f"{float(x):.2f}")
             
             st.subheader("📋 AI 매매 우선순위 대기열 (Order Queue)")
             st.table(display_queue[['우선순위', '종목명', '구분', '🔥 점수', '목표 주가', '목표 주문 수량', '필요 자금', '주문 실행 상태']])
@@ -1428,7 +1432,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.3 Final Master)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v5.4 Final Master)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1504,13 +1508,12 @@ with tab5:
 
     ---
 
-    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 입출금 자동 감지
-    자동매매가 예상치 못한 시장 상황이나 프로그램 오류로 인해 계좌를 망가뜨리지 않도록 최우선 보안 장치가 결합되어 있습니다.
-    *   **무작위 재시도 금지 (No Blind Retry):** 주문 실패 시 이전 조건을 맹목적으로 반복하지 않으며, 실시간 호가 및 조건을 재검증합니다.
+    ## 6. 🚨 전략 중앙 통제 센터 (Strategy Router) 및 무결성 검증
+    전략 원칙 훼손 방지 및 예상치 못한 프로그램 오류로 인해 계좌를 망가뜨리지 않도록 최우선 보안 장치가 결합되어 있습니다.
+    *   **[V5.4] 전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염(Cross-Contamination)되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수(`analyze_quant_strategy`)에서 전략을 완벽히 격리하여 판정합니다.
     *   **하드코딩 킬 스위치 (Kill Switch):** 활성화 즉시 어떠한 상황에서도 모든 KIS API 매매 호출이 차단되어 계좌를 안전하게 보호합니다.
-    *   **수학적 팩트 기반 입출금 추적:** 기존의 부정확한 수동 입출금 입력 방식을 폐기하고, `현재 계좌 총 평가금 - 보유 주식 평가손익 - 봇 누적 실현손익` 공식을 통해 외부에서 입출금된 순수 투입 원금을 1원 단위까지 100% 정확하게 자동 역산합니다.
+    *   **수학적 팩트 기반 입출금 추적:** `현재 계좌 총 평가금 - 보유 주식 평가손익 - 봇 누적 실현손익` 공식을 통해 외부에서 입출금된 순수 투입 원금을 1원 단위까지 100% 정확하게 자동 역산합니다.
     *   **통합 평가총액 집계 및 무결성 표출:** 보유 종목별 개별 평가금액(`수량 × 현재가`)과 실계좌 보유 주식의 전체 평가총액/평가손익/수익률을 자동 집계하여 최하단 요약행에 직관적으로 표시합니다.
     *   **보안 로그인 및 세션 영구 보존:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다.
-    *   **데이터 무결성 스위칭:** 클라우드 서버의 잦은 IP 차단에 대비하여 불안정한 Yahoo Finance를 배제하고, 한국거래소(KRX)와 Naver 데이터를 직접 파싱하는 FinanceDataReader 전용 엔진으로 데이터 소스를 전면 교체하여 끊김 없는 시그널 분석을 제공합니다.
-    *   **[V5.1] AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 단 1개라도 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
+    *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 단 1개라도 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
     """, unsafe_allow_html=True)
