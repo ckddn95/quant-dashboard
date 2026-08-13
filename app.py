@@ -1644,7 +1644,18 @@ with tab4:
     if not p_data or not selected_port: 
         st.warning("포트폴리오가 없습니다.")
     else:
-        stocks_df = pd.DataFrame(p_data.get('stocks', []))
+        # [V6.9 핵심 패치] 관심종목 유니버스와 실전 보유 종목 유니버스를 합쳐서(Merge) 백테스트에 전달
+        raw_port_stocks = p_data.get('stocks', [])
+        raw_real_stocks = kis_data.get('stocks', []) if kis_data else []
+        
+        merged_stocks = []
+        for s in raw_port_stocks:
+            merged_stocks.append({'종목명': s.get('종목명'), '티커': str(s.get('티커')).strip().zfill(6)})
+        for s in raw_real_stocks:
+            merged_stocks.append({'종목명': s.get('종목명'), '티커': str(s.get('티커')).strip().zfill(6)})
+            
+        stocks_df = pd.DataFrame(merged_stocks).drop_duplicates(subset=['티커']) if merged_stocks else pd.DataFrame()
+        
         today_date = datetime.datetime.now(KST).date()
         
         # ----------------------------------------
@@ -1671,7 +1682,7 @@ with tab4:
             if stocks_df.empty: 
                 st.error("관심종목 리스트에 종목이 없습니다.")
             else:
-                with st.spinner(f"{real_base_date} 부터 현재까지 관심종목 1:1 백테스트 구동 중..."):
+                with st.spinner(f"{real_base_date} 부터 현재까지 통합 유니버스 1:1 백테스트 구동 중..."):
                     fw_result = run_quant_simulation(stocks_df, active_strat, total_invested_principal, real_base_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if fw_result:
                         st.markdown("### 🏆 누적 수익률 비교 (Yield Comparison)")
@@ -1724,7 +1735,7 @@ with tab4:
         if st.button(f"🚀 관심종목 대상 장기 Backtest 실행", type="secondary", use_container_width=True):
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
-                with st.spinner(f"초고속 벡터 연산 AI 시뮬레이션 중... (약 5초 소요)"):
+                with st.spinner(f"통합 유니버스 초고속 벡터 연산 AI 시뮬레이션 중... (약 5초 소요)"):
                     bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if bt_result:
                         st.success(f"✅ 장기 백테스트 실행 완료!")
@@ -1744,7 +1755,7 @@ with tab4:
         st.markdown("---")
         
         # ----------------------------------------
-        # Test 3: [V6.8 패치] 동적 유니버스 블라인드 백테스트 안내 문구 동적 스위칭
+        # Test 3: 동적 유니버스 블라인드 백테스트
         # ----------------------------------------
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
         
@@ -1797,7 +1808,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.8 Final Text-Fixed)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.9 Final Validation)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1879,16 +1890,13 @@ with tab5:
 
     ---
 
-    ## 6. 🚨 자동매매 페일세이프 (Fail-Safe) 및 통합 관제
+    ## 6. 🚨 [V6.9] 통합 유니버스 검증 및 페일세이프 관제
     시스템의 100% 무인 운용과 사용자의 주도권을 동시에 보장하는 최첨단 보안 및 관제 기능이 결합되어 있습니다.
+    *   **시뮬레이션 통합 유니버스 (Merged Universe Testing):** UI 편의를 위해 매수 완료된 종목을 관심종목 탭에서 숨기더라도, AI 시뮬레이터는 **관심종목과 실전 보유 종목을 완벽히 하나로 통합(Merge)하여 백테스트를 수행**합니다. 이로써 논리적 누락 없는 100% 무결한 성과 검증이 가능합니다.
     *   **동적 유니버스 블라인드 백테스트 (Dynamic Universe Blind Test):** 사용자가 선택해 둔 '현재 생존 종목'이 아니라, **과거 특정 시점의 KOSPI/KOSDAQ 시가총액 상위 50종목 전체를 대상으로 AI가 스스로 종목을 찾고 샀다 팔았다를 반복하는 실전과 가장 유사한 시뮬레이션 기능**이 탭 4에 탑재되었습니다.
     *   **초고속 멀티스레딩 스캐너 (Parallel Engine):** 파이썬의 `concurrent.futures`를 활용한 멀티스레딩 병렬 처리 아키텍처를 스캐너 및 백테스트 전반에 도입하여, 100개의 종목을 하나씩 스캔하던 기존 방식의 병목을 해결하고 **검색 속도를 기존 대비 10배 이상 극적으로 단축**시켰습니다.
     *   **하이브리드 종목 큐레이션 (Hybrid Curation):** AI 스캐너에만 의존하지 않고, 사용자가 직접 검색창에 '종목명' 또는 '종목코드'를 입력하여 수동으로 발굴한 종목을 관심종목 유니버스에 편입시킬 수 있습니다. 또한 시스템에 사전 등록된 **시장 핵심 8대 테마별 대장주 2종목**을 버튼 클릭 한 번으로 손쉽게 추가할 수 있습니다. 
-    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다.
-    *   **통합 평가총액 집계 및 무결성 표출:** 보유 종목별 개별 평가금액(`수량 × 현재가`)과 실계좌 보유 주식의 전체 평가총액/평가손익/수익률을 자동 집계하여 최하단 요약행에 직관적으로 표시합니다.
-    *   **보안 로그인 및 타임존 동기화:** SHA-256 해시 기반의 보안 로그인 기능과 Daily URL 인증 토큰을 통해, 모바일 화면 꺼짐이나 오토파일럿의 브라우저 새로고침 발생 시에도 로그인 세션이 절대 해제되지 않도록 방어합니다. 글로벌 클라우드 서버의 UTC 시차 문제로 인해 체결 시간이 9시간 느리게 기록되는 현상을 완벽 차단하기 위해, 시스템 전역에 **KST(한국 표준시)를 강제 맵핑**하여 한국 개장 시간에 오차 없이 동작하도록 설계되었습니다.
+    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다. (스캐너, 관제, 시뮬레이션의 3위일체 동기화 완벽 달성)
     *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
     *   **진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
-    *   **중복 주문 원천 차단 (Cache Invalidation):** 주문 체결 직후 증권사 잔고 캐시 데이터를 강제로 삭제하여 다음번 스캔 시 무조건 KIS API에서 최신 체결 내역과 잔고를 받아오도록 강제합니다.
-    *   **MTS UI/UX 100% 스타일링 매칭:** 대한민국 주식 투자자에게 가장 익숙한 적색(수익)/청색(손실) 하이라이트 기능을 모든 데이터프레임과 메트릭 카드에 완벽하게 결합하여 시인성과 가독성을 극대화했습니다.
     """, unsafe_allow_html=True)
