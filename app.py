@@ -28,7 +28,6 @@ st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", l
 KST = datetime.timezone(datetime.timedelta(hours=9))
 SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
 
-# 🛑 [에러 방지 핵심] 세션 상태 초기화
 if 'search_q' not in st.session_state: st.session_state.search_q = None
 if 'search_sec' not in st.session_state: st.session_state.search_sec = None
 if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
@@ -111,7 +110,7 @@ st.title("Core-Satellite Independent Asset Allocation Quant System")
 st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **오토파일럿 무인 감시**, **실계좌 자동매매**, **시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
-# 1. 헬퍼 함수 모음 (통신, DB)
+# 1. 헬퍼 함수 모음
 # ==========================================
 def send_telegram_message(message):
     try:
@@ -205,6 +204,40 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
         if res.status_code == 200 and res.json().get('rt_cd') == '0': return res.json().get('output1', []), res.json().get('output2', [])
     except: pass
     return None, None
+
+def execute_kis_order(app_key, app_secret, token, cano, acnt_prdt_cd, ticker, qty, price, order_type="BUY", is_market=False, is_mock=True):
+    if int(qty) <= 0: return False, "주문 수량 오류"
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash"
+    tr_id = ("VTTC0802U" if order_type == "BUY" else "VTTC0801U") if is_mock else ("TTTC0802U" if order_type == "BUY" else "TTTC0801U")
+    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id}
+    ord_dvsn = "01" if is_market else "00"
+    ord_unpr = "0" if is_market else str(int(price))
+    body = {"CANO": str(cano).replace("-", "").strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "PDNO": str(ticker).strip().zfill(6), "ORD_DVSN": ord_dvsn, "ORD_QTY": str(int(qty)), "ORD_UNPR": ord_unpr}
+    try:
+        res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
+        if res.status_code == 200:
+            rj = res.json()
+            if rj.get('rt_cd') == '0': return True, f"[{'시장가' if is_market else '지정가'}] 주문 완료: {rj.get('msg1')}"
+            else: return False, f"주문 거부: {rj.get('msg1')} ({rj.get('msg_cd')})"
+        else: return False, f"API 통신 오류: {res.text}"
+    except Exception as e:
+        return False, f"API 예외 발생: {str(e)}"
+
+def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0, status="✅ 체결완료", msg=""):
+    today_str = datetime.datetime.now(KST).strftime('%Y-%m-%d')
+    now_str = datetime.datetime.now(KST).strftime('%H:%M:%S')
+    if p_data.get('daily_trades_date') != today_str:
+        p_data['daily_trades'] = []
+        p_data['daily_trades_date'] = today_str
+    pnl = (price - buy_price) * qty if order_type == "SELL" else 0.0
+    p_data.setdefault('daily_trades', []).append({
+        '체결 시간': now_str, '종목명': s_name, '주문 구분': '매도(청산)' if order_type == "SELL" else '매수(진입)',
+        '상태': status, '체결 단가': price, '체결 수량': qty, '체결 금액': price * qty, '실현 손익': pnl, '비고 (API 메시지)': msg
+    })
+    if len(p_data['daily_trades']) > 30:
+        p_data['daily_trades'] = p_data['daily_trades'][-30:]
+    return p_data
 
 # ==========================================
 # 2. 공통 두뇌(quant_engine) 연결 브릿지 안전 래퍼
@@ -517,8 +550,31 @@ p_data = all_ports.get(selected_port) if selected_port else None
 active_strat = p_data.get('strategy', '대형주 (Core)') if p_data else "대형주 (Core)"
 total_cash = int(p_data.get('cash', 10000000)) if p_data else 10000000
 
+# 🛑 [복원] 사이드바에서 앱 키를 비밀번호형태로 직접 입력/관리할 수 있도록 보완
+with st.sidebar.expander("🔑 KIS API 키 직접 입력 (선택)", expanded=False):
+    manual_app_key = st.text_input("APP KEY", value=p_data.get('manual_app_key', '') if p_data else '', type="password")
+    manual_app_secret = st.text_input("APP SECRET", value=p_data.get('manual_app_secret', '') if p_data else '', type="password")
+    manual_cano = st.text_input("계좌번호 (앞 8자리)", value=p_data.get('manual_cano', '') if p_data else '')
+    if st.button("키 정보 저장"):
+        if p_data:
+            p_data['manual_app_key'] = manual_app_key
+            p_data['manual_app_secret'] = manual_app_secret
+            p_data['manual_cano'] = manual_cano
+            save_portfolio_to_sheets(selected_port, p_data)
+            st.success("API 키 저장 완료!")
+            try: st.query_params["auth"] = daily_token
+            except: st.experimental_set_query_params(auth=daily_token)
+            st.rerun()
+
+# KIS 계좌 정보 우선순위: 수동 입력값 -> secrets.toml 값
 SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
-if p_data:
+if p_data and p_data.get('manual_app_key'):
+    SYS_APP_KEY = p_data.get('manual_app_key')
+    SYS_APP_SECRET = p_data.get('manual_app_secret')
+    SYS_CANO = str(p_data.get('manual_cano'))
+    SYS_ACNT_PRDT = "01"
+    SYS_IS_MOCK = True
+elif p_data:
     kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
     kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
     if kis_account_data:
@@ -527,6 +583,9 @@ if p_data:
         SYS_CANO = str(kis_account_data.get("cano"))
         SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
         SYS_IS_MOCK = kis_account_data.get("is_mock", False)
+
+tg_noti_signal = p_data.get('tg_noti_signal', True) if p_data else True
+tg_noti_order = p_data.get('tg_noti_order', True) if p_data else True
 
 kis_token_global = None
 if SYS_APP_KEY and SYS_APP_SECRET and p_data:
@@ -596,8 +655,8 @@ if p_data:
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔌 한국투자증권 실계좌 연동")
-if SYS_APP_KEY and kis_account_data: st.sidebar.success(f"✅ **{kis_account_data.get('name', f'{active_strat} 계좌')}** 연동됨")
-else: st.sidebar.warning("🔑 **KIS API 미연동 (Secrets 확인)**")
+if SYS_APP_KEY: st.sidebar.success(f"✅ **{active_strat} 계좌** 연동됨")
+else: st.sidebar.warning("🔑 **KIS API 미연동**")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📱 텔레그램 및 오토파일럿")
@@ -651,7 +710,7 @@ with st.sidebar.expander("🧪 시뮬레이션 상세 설정"):
     bull_market_boost = st.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
 # ==========================================
-# 4. 메인 화면 구성 (5개 탭 완벽 복원)
+# 4. 메인 화면 구성 (5개 탭 및 대기열 순위표 복원)
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📝 관심종목 유니버스 & AI 진단", 
@@ -730,7 +789,7 @@ with tab1:
             ticker = str(row.get('티커', '')).strip().zfill(6)
             c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else None
             res = fetch_stock_status(ticker)
-            action, tech_text, easy_desc, ai_score = "분석 불가", "-", "데이터 로드 실패", 0.0
+            action, ai_score = "분석 불가", 0.0
             if res and res[0] is not None:
                 yf_price, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, _, vol_surged, yf_low, recent_vol_max, avg_trade_val, dsp, vc = res
                 if not c_price or c_price == 0: c_price = yf_price
@@ -755,7 +814,7 @@ with tab1:
 
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 모니터링")
-    if not SYS_APP_KEY: st.warning("사이드바 또는 Secrets 설정을 확인하세요.")
+    if not SYS_APP_KEY: st.warning("사이드바 또는 API 키 설정을 확인하세요.")
     elif kis_data:
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.markdown(mts_metric_html("💰 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
@@ -772,13 +831,83 @@ with tab3:
     col_c2.metric("🚀 자동주문", "활성화" if auto_trade_enabled else "비활성화")
     col_c3.metric("💵 가용 예수금", f"{real_cash_avail:,.0f} 원")
     st.markdown("---")
+    
+    # 🛑 [복원] 자동매매 우선순위 큐(순위표) 로직 계산 및 렌더링
+    temp_queue = []
+    eligible_stocks = {str(s['티커']).strip().zfill(6): s.get('종목명', '') for s in p_data.get('stocks', [])} if p_data else {}
+    
+    current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
+    if current_asset_base <= 0: current_asset_base = total_cash
+    target_buy_amt = current_asset_base * (max_alloc_pct / 100.0)
+
+    for ticker, s_name in eligible_stocks.items():
+        qty_num, buy_price, live_c_price = 0, 0.0, 0.0
+        if SYS_APP_KEY and kis_data and not real_stocks_df.empty:
+            match_row = real_stocks_df[real_stocks_df['티커'] == ticker]
+            if not match_row.empty:
+                r = match_row.iloc[0]
+                qty_str = str(r.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
+                try: qty_num = int(float(qty_str))
+                except: qty_num = 0
+                buy_price = float(r.get('_raw_buy', 0))
+                live_c_price = float(r.get('_raw_price', 0))
+
+        res = fetch_stock_status(ticker)
+        if not res or res[0] is None: continue 
+        c_p, ma200, ma60, ma20, drawdown, vol_ratio, ret_60, ret_20, ma60_slope_positive, is_above_ma200, vol_surged, yf_low, recent_vol_max, avg_trade_val, dsp, vc = res
+        if qty_num == 0:
+            live_c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if kis_token_global else c_p
+            if not live_c_price: live_c_price = c_p
+
+        highest_price = p_data.get('ts_tracker', {}).get(ticker, buy_price) if p_data else buy_price
+        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, dsp, vc)
+
+        is_sell, sell_type = False, ""
+        if qty_num > 0:
+            if res_q['stop_loss_cond']: is_sell, sell_type = True, "🔴 긴급 손절 매도"
+            elif res_q['trailing_stop_cond']: is_sell, sell_type = True, "🔵 트레일링 익절"
+            elif res_q['exit_cond_trend']: is_sell, sell_type = True, "🔴 추세 이탈 매도"
+                
+        if is_sell:
+            temp_queue.append({
+                '우선순위_분류': 0, '🔥 점수': 999.0, '종목명': s_name, '티커': ticker, '구분': sell_type,
+                '주문 단가': f"{live_c_price:,.0f} 원", '주문 수량': f"{qty_num:,} 주", '필요 자금': f"-{live_c_price * qty_num:,.0f} 원 (회수)",
+                '_raw_price': live_c_price, '_qty': qty_num, '_req_fund': 0, '주문 실행 상태': '대기 중'
+            })
+            continue 
+
+        if res_q['entry_cond'] and avg_trade_val >= 5000000000:
+            current_holding_amt = qty_num * live_c_price
+            additional_amt = max(0, target_buy_amt - current_holding_amt)
+            add_qty = int(additional_amt // live_c_price)
+            if add_qty > 0:
+                req_fund = add_qty * live_c_price
+                buy_type = "🛒 신규 매수" if qty_num == 0 else "🟢 비중 확대"
+                temp_queue.append({
+                    '우선순위_분류': 1, '🔥 점수': res_q['ai_score'], '종목명': s_name, '티커': ticker, '구분': buy_type,
+                    '주문 단가': f"{live_c_price:,.0f} 원", '주문 수량': f"{add_qty:,} 주", '필요 자금': f"{req_fund:,.0f} 원",
+                    '_raw_price': live_c_price, '_qty': add_qty, '_req_fund': req_fund, '주문 실행 상태': '대기 중'
+                })
+
+    temp_queue = sorted(temp_queue, key=lambda x: (x['우선순위_분류'], -x['🔥 점수']))
+    queue_df = pd.DataFrame(temp_queue)
+
+    if not queue_df.empty:
+        queue_df['우선순위'] = [f"{i+1}위" for i in range(len(queue_df))]
+        display_queue = queue_df.copy()
+        display_queue['🔥 점수'] = display_queue['🔥 점수'].apply(lambda x: "🚨 최우선 (매도)" if float(x) >= 900.0 else f"{float(x):.2f}")
+        st.subheader("📋 AI 매매 우선순위 대기열 (Order Queue)")
+        st.table(display_queue[['우선순위', '종목명', '구분', '🔥 점수', '주문 단가', '주문 수량', '필요 자금', '주문 실행 상태']])
+    else:
+        st.info("💡 현재 AI 퀀트 엔진이 포착한 대기 중인 매수/매도 시그널이 없습니다.")
+
+    st.markdown("---")
     st.info("💡 안전을 위해 화면 대시보드에서는 자동 발사 기능이 제거되었으며, 수동 전송 버튼을 누를 때만 안전하게 전송됩니다.")
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
-        st.success("주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
+        st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트")
-    st.markdown("관심종목 유니버스를 바탕으로 과거 성과를 검증합니다.")
     stocks_df = pd.DataFrame(p_data.get('stocks', [])) if p_data else pd.DataFrame()
     if st.button("🚀 장기 백테스트 실행", type="primary", use_container_width=True):
         if not stocks_df.empty:
