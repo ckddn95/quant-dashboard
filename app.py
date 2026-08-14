@@ -95,6 +95,18 @@ st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성�
 # ==========================================
 # 1. 헬퍼 함수 모음
 # ==========================================
+def send_telegram_message(message):
+    try:
+        tg_token = st.secrets.get("telegram", {}).get("bot_token")
+        tg_chat_id = st.secrets.get("telegram", {}).get("chat_id")
+        if not tg_token or not tg_chat_id: return False, "Secrets에 텔레그램 정보가 없습니다."
+        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+        payload = {"chat_id": tg_chat_id, "text": message, "parse_mode": "Markdown"}
+        res = requests.post(url, json=payload, timeout=5)
+        return res.status_code == 200, "발송 성공" if res.status_code == 200 else f"API 오류: {res.text}"
+    except Exception as e:
+        return False, str(e)
+
 @st.cache_data(ttl=120, show_spinner=False)
 def load_all_portfolios_from_sheets():
     try:
@@ -145,7 +157,7 @@ def get_kis_access_token(app_key, app_secret, is_mock=True):
     try:
         res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
         if res.status_code == 200: return res.json().get("access_token"), "OK"
-        else: return None, f"토큰 발급 실패: {res.text}"
+        else: return None, f"토큰 발급 실패 (HTTP {res.status_code}): {res.text}"
     except Exception as e:
         return None, f"통신 에러: {str(e)}"
 
@@ -162,7 +174,6 @@ def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
     except: pass
     return 0.0
 
-# 🛑 [에러 추적용] KIS API 에러 메시지를 반환하도록 수정
 def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     if not token: return None, None, "토큰이 없습니다."
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
@@ -176,7 +187,7 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
             rj = res.json()
             if rj.get('rt_cd') == '0': return rj.get('output1', []), rj.get('output2', []), "OK"
             else: return None, None, f"KIS 응답 거절: {rj.get('msg1')}"
-        else: return None, None, f"HTTP 에러: {res.status_code}"
+        else: return None, None, f"HTTP 에러 {res.status_code}: {res.text}"
     except Exception as e:
         return None, None, f"서버 통신 에러: {str(e)}"
 
@@ -184,7 +195,7 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
         if df is None or len(df) < 60:
-            return c_price, "분석 불가", 0.0, "과거 OHLCV 데이터 부족"
+            return c_price, "분석 불가", 0.0, "과거 데이터 부족"
         
         close_p = float(df['Close'].iloc[-1])
         if c_price <= 0: c_price = close_p
@@ -369,42 +380,47 @@ p_data = all_ports.get(selected_port) if selected_port else None
 active_strat = p_data.get('strategy', '대형주 (Core)') if p_data else "대형주 (Core)"
 total_cash = int(p_data.get('cash', 10000000)) if p_data else 10000000
 
-# 🛑 [수정] 모의투자 / 실투자 선택 기능 및 키 에러 추적 UI 적용
-with st.sidebar.expander("🔑 KIS API 키 직접 입력 (선택)", expanded=False):
-    has_saved_keys = bool(p_data and p_data.get('manual_app_key'))
+# 🛑 [완벽 보안 패치] 저장 후 입력 칸 완전 숨김 처리
+has_saved_keys = bool(p_data and p_data.get('manual_app_key'))
+with st.sidebar.expander("🔑 KIS API 설정", expanded=not has_saved_keys):
     if has_saved_keys:
         curr_is_mock = p_data.get('manual_is_mock', True)
-        st.success(f"✅ 현재 **{'모의투자' if curr_is_mock else '실계좌'}** API 키가 작동 중입니다.")
-    
-    st.markdown("<span style='font-size: 0.85em; color: #a3a8b8;'>* 변경/신규 등록 시에만 입력하세요.</span>", unsafe_allow_html=True)
-    manual_app_key = st.text_input("새 APP KEY 입력", value="", type="password", placeholder="유지하려면 비워두세요")
-    manual_app_secret = st.text_input("새 APP SECRET 입력", value="", type="password", placeholder="유지하려면 비워두세요")
-    manual_cano = st.text_input("새 계좌번호 (앞 8자리)", value="", placeholder="유지하려면 비워두세요")
-    manual_is_mock = st.checkbox("이 키는 모의투자(Mock) 전용입니다.", value=p_data.get('manual_is_mock', True) if p_data else True)
-    
-    col_k1, col_k2 = st.columns(2)
-    if col_k1.button("✅ 저장"):
-        if p_data is not None:
-            if manual_app_key.strip(): p_data['manual_app_key'] = manual_app_key.strip()
-            if manual_app_secret.strip(): p_data['manual_app_secret'] = manual_app_secret.strip()
-            if manual_cano.strip(): p_data['manual_cano'] = manual_cano.strip()
-            p_data['manual_is_mock'] = manual_is_mock
-            save_portfolio_to_sheets(selected_port, p_data)
-            st.success("API 키 저장 완료!")
-            try: st.query_params["auth"] = daily_token
-            except: st.experimental_set_query_params(auth=daily_token)
-            st.rerun()
-            
-    if col_k2.button("🗑️ 삭제"):
-        if p_data is not None:
-            p_data.pop('manual_app_key', None)
-            p_data.pop('manual_app_secret', None)
-            p_data.pop('manual_cano', None)
-            save_portfolio_to_sheets(selected_port, p_data)
-            st.warning("저장된 API 키가 삭제되었습니다.")
-            try: st.query_params["auth"] = daily_token
-            except: st.experimental_set_query_params(auth=daily_token)
-            st.rerun()
+        st.success(f"✅ 현재 **{'모의투자' if curr_is_mock else '실계좌'}** API 키가 안전하게 작동 중입니다.")
+        st.info("💡 보안을 위해 키 입력창이 완벽하게 숨김 처리되었습니다.")
+        
+        # 키를 바꾸고 싶을 때만 이 버튼을 눌러서 초기화 후 다시 칸을 띄움
+        if st.button("🗑️ 저장된 키 삭제 및 재설정"):
+            if p_data is not None:
+                p_data.pop('manual_app_key', None)
+                p_data.pop('manual_app_secret', None)
+                p_data.pop('manual_cano', None)
+                p_data.pop('manual_is_mock', None)
+                save_portfolio_to_sheets(selected_port, p_data)
+                st.warning("저장된 API 키가 삭제되었습니다.")
+                try: st.query_params["auth"] = daily_token
+                except: st.experimental_set_query_params(auth=daily_token)
+                st.rerun()
+    else:
+        st.markdown("<span style='font-size: 0.85em; color: #a3a8b8;'>* 신규 API 키 정보를 입력하세요.</span>", unsafe_allow_html=True)
+        manual_app_key = st.text_input("새 APP KEY 입력", type="password")
+        manual_app_secret = st.text_input("새 APP SECRET 입력", type="password")
+        manual_cano = st.text_input("새 계좌번호 (앞 8자리)")
+        manual_is_mock = st.checkbox("이 키는 모의투자(Mock) 전용입니다.", value=True)
+        
+        if st.button("✅ 저장"):
+            if p_data is not None:
+                if manual_app_key.strip() and manual_app_secret.strip() and manual_cano.strip():
+                    p_data['manual_app_key'] = manual_app_key.strip()
+                    p_data['manual_app_secret'] = manual_app_secret.strip()
+                    p_data['manual_cano'] = manual_cano.strip()
+                    p_data['manual_is_mock'] = manual_is_mock
+                    save_portfolio_to_sheets(selected_port, p_data)
+                    st.success("API 키 저장 완료!")
+                    try: st.query_params["auth"] = daily_token
+                    except: st.experimental_set_query_params(auth=daily_token)
+                    st.rerun()
+                else:
+                    st.error("빈칸 없이 모든 정보를 정확히 입력해주세요.")
 
 SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, SYS_IS_MOCK = None, None, None, None, True
 if p_data and p_data.get('manual_app_key'):
@@ -431,7 +447,6 @@ if SYS_APP_KEY and SYS_APP_SECRET and p_data:
         else:
             st.sidebar.error(f"⚠️ KIS 인증 실패: {token_err}")
 
-# 🛑 [에러 추적] 실계좌 데이터 동기화 버튼 오류 알림 로직 추가
 cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
 if SYS_APP_KEY and kis_token_global:
     if st.sidebar.button("🔄 실계좌 데이터 동기화") or cache_key not in st.session_state:
@@ -445,7 +460,7 @@ if SYS_APP_KEY and kis_token_global:
             st.sidebar.success("✅ 최신 잔고 동기화 완료!")
         else:
             st.sidebar.error(f"❌ 동기화 실패: {err_msg}")
-            st.sidebar.info("키의 모의/실계좌 설정이나 파이썬애니웨어 IP 등록 여부를 확인하세요.")
+            st.sidebar.info("API 설정(실계좌/모의)을 다시 확인해 주세요.")
 
 kis_data = st.session_state.get(cache_key)
 real_holdings_tickers = []
@@ -498,7 +513,7 @@ if p_data:
         p_data['kill_switch'], p_data['auto_trade_enabled'], p_data['auto_pilot'] = kill_switch, auto_trade_enabled, auto_pilot
         save_portfolio_to_sheets(selected_port, p_data)
         st.rerun()
-    if kill_switch: st.sidebar.error("⚠️ 킬 스위치 작동 중!")
+    if kill_switch: st.sidebar.error("⚠️ 킬 스위 작동 중!")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
@@ -602,7 +617,7 @@ with tab2:
         if not real_stocks_df.empty:
             st.dataframe(real_stocks_df, use_container_width=True, hide_index=True)
     else:
-        st.info("💡 실전 계좌 연동 키가 입력되지 않았거나 잔고 데이터를 불러오지 못했습니다. 왼쪽 사이드바에서 계좌를 연동하거나, 에러 메시지를 확인해주세요.")
+        st.info("💡 실전 계좌 연동 키가 입력되지 않았거나 잔고 데이터를 불러오지 못했습니다. 왼쪽 사이드바에서 계좌를 연동해주세요.")
 
 with tab3:
     st.header("🤖 실전 자동매매 관제센터 & 우선순위 주문 대기열")
