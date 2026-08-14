@@ -553,7 +553,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📄 알고리즘 백서"
 ])
 
-# 🛑 [핵심 패치 1] Tab 1 병렬 처리 적용 (화면 어두워짐 해결) 및 '삭제' 명칭 명확화
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
     st.markdown("관심 종목을 추가하면 AI가 실시간으로 타점을 진단합니다.")
@@ -566,7 +565,6 @@ with tab1:
                 st.session_state.show_scanner = True
         with col_s2:
             if st.button("🧹 일괄 퇴출 (체크된 종목)", type="secondary", use_container_width=True):
-                # 일괄 삭제 버튼 역할 명확화 (기능은 아래 저장버튼에 통합)
                 st.info("표 안의 '🗑️ 삭제' 열을 체크하고 아래 [저장] 버튼을 누르면 삭제됩니다.")
 
         st.markdown("### ⌨️ 직접 종목 검색")
@@ -618,7 +616,6 @@ with tab1:
         visible_stocks = p_data.get('stocks', [])
         display_records = []
         
-        # 병렬 처리 도입 (화면 지연/어두워짐 현상 완벽 제거)
         def process_watchlist_row(row):
             ticker = str(row.get('티커', '')).strip().zfill(6)
             c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
@@ -635,7 +632,6 @@ with tab1:
             display_df = display_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
             edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}")
             if st.button("💾 변경된 내용 반영", type="primary", use_container_width=True):
-                # '🗑️ 삭제' 열에 체크 안 된(False) 종목만 살려서 저장
                 keep_df = edited_df[edited_df['🗑️ 삭제'] == False]
                 save_df = keep_df[['종목명', '티커']].copy()
                 save_df['티커'] = save_df['티커'].astype(str).str.strip().str.zfill(6)
@@ -654,11 +650,12 @@ with tab2:
         col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
         col_m4.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
         if not real_stocks_df.empty:
-            st.dataframe(real_stocks_df, use_container_width=True, hide_index=True)
+            # 🛑 [수정 완료] 내부 계산용 _raw_ 데이터 열 화면에서 숨김 처리
+            display_real_df = real_stocks_df.drop(columns=['_raw_price', '_raw_buy'], errors='ignore')
+            st.dataframe(display_real_df, use_container_width=True, hide_index=True)
     else:
         st.info("💡 실전 계좌 연동 키가 입력되지 않았거나 잔고 데이터를 불러오지 못했습니다. 왼쪽 사이드바에서 계좌를 연동해주세요.")
 
-# 🛑 [핵심 패치 2] Tab 3 병렬 처리 적용 및 로직 복원
 with tab3:
     st.header("🤖 실전 자동매매 관제센터 & 우선순위 주문 대기열")
     col_c1, col_c2, col_c3 = st.columns(3)
@@ -673,7 +670,6 @@ with tab3:
 
     temp_queue = []
     
-    # 병렬 처리 도입 (화면 지연/어두워짐 현상 완벽 제거)
     def process_queue_row(row):
         ticker = str(row.get('티커', '')).strip().zfill(6)
         s_name = row.get('종목명', '')
