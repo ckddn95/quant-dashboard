@@ -28,6 +28,11 @@ st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", l
 KST = datetime.timezone(datetime.timedelta(hours=9))
 SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
 
+# 🛑 [에러 방지 핵심] 세션 상태 초기화
+if 'search_q' not in st.session_state: st.session_state.search_q = None
+if 'search_sec' not in st.session_state: st.session_state.search_sec = None
+if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
+
 @st.cache_resource
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
