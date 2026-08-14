@@ -1440,10 +1440,15 @@ with tab3:
             
             st.markdown("---")
             
+            # 🛑 [긴급 패치] 무한 주문 방지용 실패 메모리 (세션 캐시)
+            if 'failed_tickers' not in st.session_state:
+                st.session_state.failed_tickers = []
+            
             trigger_auto = False
             if auto_trade_enabled and not kill_switch:
                 for idx, q_row in queue_df.iterrows():
-                    if "대기" in str(q_row['주문 실행 상태']):
+                    # 대기 중이면서, 방금 전에 실패한 적이 없는 종목일 때만 자동 발동
+                    if "대기" in str(q_row['주문 실행 상태']) and q_row['티커'] not in st.session_state.failed_tickers:
                         trigger_auto = True
                         break
             
@@ -1457,19 +1462,23 @@ with tab3:
                 elif not auto_trade_enabled and not trigger_auto: st.warning("🚀 사이드바에서 '실전 자동주문 활성화' 스위치를 켜주세요.")
                 else:
                     with st.spinner("🚀 [오토파일럿] KIS 리얼 서버로 순차 주문 전송 중..."):
-                        exec_msgs, needs_save = [], False
+                        exec_msgs, needs_save, has_success = [], False, False
                         for idx, q_row in queue_df.iterrows():
                             if "대기" not in str(q_row['주문 실행 상태']): continue
                             
                             s_name, t_code, q_type = q_row['종목명'], q_row['티커'], q_row['구분']
                             raw_qty, raw_price, buy_p = q_row['_qty'], q_row['_raw_price'], q_row['_buy_price']
                             
+                            # 수동 버튼을 누르지 않았는데 이미 실패 이력이 있다면 자동 실행 건너뛰기
+                            if trigger_auto and not manual_btn and t_code in st.session_state.failed_tickers:
+                                continue
+
                             if "매도" in q_type or "익절" in q_type:
                                 succ, msg = execute_kis_order(SYS_APP_KEY, SYS_APP_SECRET, kis_token_global, SYS_CANO, SYS_ACNT_PRDT, t_code, raw_qty, raw_price, order_type="SELL", is_market=True, is_mock=SYS_IS_MOCK)
                                 if succ:
+                                    has_success = True
                                     p_data = log_daily_trade(p_data, s_name, "SELL", raw_price, raw_qty, buy_p, status="✅ 체결완료", msg="시장가 매도 접수")
                                     exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {msg}")
-                                    
                                     real_cash_avail += (raw_price * raw_qty)
                                     
                                     pnl = (raw_price - buy_p) * raw_qty
@@ -1482,10 +1491,12 @@ with tab3:
                                     else: cd_i['losses'] = 0
                                     p_data['cd_tracker'][t_code] = cd_i
                                     if 'ts_tracker' in p_data and t_code in p_data['ts_tracker']: del p_data['ts_tracker'][t_code]
+                                    if t_code in st.session_state.failed_tickers: st.session_state.failed_tickers.remove(t_code)
                                     needs_save = True
                                 else: 
                                     p_data = log_daily_trade(p_data, s_name, "SELL", raw_price, raw_qty, buy_p, status="❌ 주문실패", msg=msg)
                                     exec_msgs.append(f"❌ [{q_type} 실패] *{s_name}*: {msg}")
+                                    st.session_state.failed_tickers.append(t_code)
                                     needs_save = True
                                     
                             elif "매수" in q_type or "확대" in q_type:
@@ -1495,34 +1506,38 @@ with tab3:
                                 if final_qty > 0:
                                     succ, msg = execute_kis_order(SYS_APP_KEY, SYS_APP_SECRET, kis_token_global, SYS_CANO, SYS_ACNT_PRDT, t_code, final_qty, raw_price, order_type="BUY", is_market=False, is_mock=SYS_IS_MOCK)
                                     if succ:
+                                        has_success = True
                                         p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, final_qty, status="✅ 체결완료", msg="지정가 매수 접수")
                                         real_cash_avail -= (final_qty * raw_price)
-                                        if final_qty < raw_qty:
-                                            exec_msgs.append(f"🔄 [{q_type} 부분 체결] *{s_name}*: 예수금 한도 내 {final_qty}주 매수 완료")
-                                        else:
-                                            exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {final_qty}주 매수 완료")
+                                        if final_qty < raw_qty: exec_msgs.append(f"🔄 [{q_type} 부분 체결] *{s_name}*: 예수금 한도 내 {final_qty}주 매수 완료")
+                                        else: exec_msgs.append(f"▪️ [{q_type}] *{s_name}*: {final_qty}주 매수 완료")
+                                        if t_code in st.session_state.failed_tickers: st.session_state.failed_tickers.remove(t_code)
                                         needs_save = True
                                     else: 
                                         p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, final_qty, status="❌ 주문실패", msg=msg)
                                         exec_msgs.append(f"❌ [{q_type} 실패] *{s_name}*: {msg}")
+                                        st.session_state.failed_tickers.append(t_code)
                                         needs_save = True
                                 else:
                                     p_data = log_daily_trade(p_data, s_name, "BUY", raw_price, raw_qty, status="⚠️ 매수스킵", msg="예수금 부족으로 차순위 큐 진행")
+                                    st.session_state.failed_tickers.append(t_code)
                                     needs_save = True
                         
                         if needs_save: save_portfolio_to_sheets(selected_port, p_data)
                         if exec_msgs:
                             if tg_noti_order:
                                 send_telegram_message("🤖 *[주문 전송 집행 결과]*\n" + "\n".join(exec_msgs))
-                            st.success("주문 집행이 완료되었습니다!")
-                            time.sleep(1)
                             
-                            if cache_key in st.session_state:
-                                del st.session_state[cache_key]
-                                
-                            try: st.query_params["auth"] = daily_token
-                            except: st.experimental_set_query_params(auth=daily_token)
-                            st.rerun()
+                            # 성공한 주문이 1개라도 있을 때만 화면을 새로고침합니다!
+                            if has_success:
+                                st.success("✅ 정상적으로 주문 집행이 완료되었습니다!")
+                                time.sleep(1)
+                                if cache_key in st.session_state: del st.session_state[cache_key]
+                                try: st.query_params["auth"] = daily_token
+                                except: st.experimental_set_query_params(auth=daily_token)
+                                st.rerun()
+                            else:
+                                st.error("⚠️ 증권사 API 거절 등으로 모든 주문이 실패했습니다. 무한 반복을 막기 위해 1회만 시도하고 정지합니다.")
         else: st.info("💡 현재 AI 퀀트 엔진이 포착한 신규 매수 또는 매도 시그널이 없습니다.")
 
     st.markdown("---")
