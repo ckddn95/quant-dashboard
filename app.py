@@ -347,14 +347,17 @@ def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200,
     
     if strat_name == '대형주 (Core)':
         res['ai_score'] = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 100 * 0.2), 2)
-        res['entry_cond'] = (ma200_cond and (ma20 >= ma60 * (1 + buf)) and ma60_slope_positive and (ret_20 > 0) and vix_safe) or vix_contrarian
+        # [V6.11 정책2 적용] VIX 역발상에도 MA200 방어조건(is_above_ma200) 강제 적용
+        res['entry_cond'] = is_above_ma200 and ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0 and vix_safe) or vix_contrarian)
         res['exit_cond_trend'] = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian 
-        res['stop_loss_cond'] = False 
+        # [V6.11 정책1 적용] Core 전략 -15% 하드 손절 적용
+        res['stop_loss_cond'] = (user_ret <= -0.15) 
     else: 
         res['ai_score'] = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
         is_dip = (-0.05 <= dist_ma20 <= 0.03) or (current_low <= ma20 * 1.01)
         sat_normal_buy = is_dip and vol_surged and (days_since_peak <= 45) and (vol_contraction <= 0.50)
-        res['entry_cond'] = (ma200_cond and (sat_normal_buy or vix_contrarian) and drawdown >= -0.30 and ma60_slope_positive and ret_20 > -0.03)
+        # [V6.11 정책2 적용] 위성 전략도 MA200 방어는 절대 양보 불가
+        res['entry_cond'] = is_above_ma200 and (sat_normal_buy or vix_contrarian) and drawdown >= -0.30 and ma60_slope_positive and ret_20 > -0.03
         res['exit_cond_trend'] = (c_price < ma20 * (1 - buf/2)) and not vix_contrarian 
         res['stop_loss_cond'] = (user_ret <= sat_stop_loss)
         
@@ -482,14 +485,14 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         
         m2_c = df['Abv200'] if use_ma200 else True
         if strat == '대형주 (Core)':
-            ec = (m2_c & (df['M20'] >= df['M60']*(1+buf)) & df['M60_Up'] & (df['R20']>0) & df['V_Safe']) | df['V_Con']
+            ec = m2_c & (((df['M20'] >= df['M60']*(1+buf)) & df['M60_Up'] & (df['R20']>0) & df['V_Safe']) | df['V_Con'])
             xc = (df['M20'] < df['M60']*(1-buf/2)) & (~df['V_Con'])
         else:
             df['DD'] = (df['Close']/df['Close'].rolling(120, min_periods=1).max()) - 1
             d20 = ((df['Close']/df['M20'])-1)*100
             idip = ((d20 >= -5.0) & (d20 <= 3.0)) | (df['Low'] <= df['M20']*1.01 if 'Low' in df.columns else d20 <= 0)
             sat_normal_buy = idip & df['V_Srg'] & (df['Days_Since_Peak'] <= 45) & (df['Vol_Contraction'] <= 0.50)
-            ec = (m2_c & (sat_normal_buy | df['V_Con'])) & (df['DD'] >= -0.30) & df['M60_Up'] & (df['R20'] > -0.03)
+            ec = m2_c & (sat_normal_buy | df['V_Con']) & (df['DD'] >= -0.30) & df['M60_Up'] & (df['R20'] > -0.03)
             xc = (df['Close'] < df['M20']*(1-buf/2)) & (~df['V_Con'])
             
         df['Sig'] = np.where(ec, 1, np.where(xc, 0, np.nan))
@@ -522,6 +525,9 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     cash = float(init_cash)
     b_ar, t_tgt, t_drp = max_alloc_pct/100.0, ts_target_pct/100.0, ts_drop_pct/100.0
     
+    # [V6.11 정책 1 적용] 백테스트 시뮬레이션 루프 내 Core 하드손절 반영
+    active_sl = -0.15 if strat == '대형주 (Core)' else (sl/100.0)
+    
     for i, d in enumerate(c_idx):
         if i == 0:
             p_hist.append(init_cash)
@@ -542,7 +548,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             if sh[n] > 0 and ab_p[n] > 0:
                 pk_p[n] = max(pk_p[n], c_p)
                 if (c_p/ab_p[n]-1) >= t_tgt and (c_p/pk_p[n]-1) <= t_drp: tse = True
-                if strat != '대형주 (Core)' and (c_p/ab_p[n]-1) <= (sl/100.0): fe = True
+                if (c_p/ab_p[n]-1) <= active_sl: fe = True # 하드손절 발동 체크
             if tse or fe: sig = 0.0
             elif sh[n] > 0 and hd[n] < min_h: sig = 1.0
             
@@ -1247,9 +1253,19 @@ with tab2:
                     total_buy_sum = 0.0
                     live_results = []
                     
+                    # [V6.11 정책 4 적용] 논리적 격리: 수동 보유 주식은 봇이 매도 관제하지 않음
+                    bot_managed_tickers = [str(s.get('티커')).strip().zfill(6) for s in p_data.get('stocks', [])] if p_data else []
+                    manual_holdings = []
+                    
                     for idx, row in real_stocks_df.iterrows():
-                        live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
                         ticker_str = str(row['티커']).strip().zfill(6)
+                        
+                        # [논리적 격리 확인] 봇의 DB에 없는 주식이면 관제 패스
+                        if ticker_str not in bot_managed_tickers:
+                            manual_holdings.append(row.get('종목명', ticker_str))
+                            continue
+                            
+                        live_c_price, buy_price = float(row.get('_raw_price', 0)), float(row.get('_raw_buy', 0))
                         
                         qty_str = str(row.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
                         try: qty_num = int(float(qty_str))
@@ -1351,14 +1367,18 @@ with tab2:
                             
                             total_ret_sum_pct = (total_pnl_sum / total_buy_sum * 100) if total_buy_sum > 0 else 0.0
                             summary_row = pd.DataFrame([{
-                                '보유 종목명': '💡 [평가총액 합계]', '🔥 매력도 점수': '-', '보유수량': '-', '매수평균가': '-', '실시간 현재가': '-',
+                                '보유 종목명': '💡 [평가총액 합계 (봇 관제 대상)]', '🔥 매력도 점수': '-', '보유수량': '-', '매수평균가': '-', '실시간 현재가': '-',
                                 '평가금액': f"{total_eval_sum:,.0f} 원", '평가손익': f"{total_pnl_sum:+,.0f} 원", '수익률': f"{total_ret_sum_pct:+.2f}%",
                                 '🤖 실계좌 전용 액션 플랜': '-', '📊 판단 근거': '-'
                             }])
                             live_df = pd.concat([live_df, summary_row], ignore_index=True)
                             st.dataframe(apply_mts_style(live_df, ['평가손익', '수익률']), use_container_width=True, hide_index=True)
+                            
+                    # [V6.11 정책 4 적용] 수동 보유 종목 안내 UI
+                    if manual_holdings:
+                        st.info(f"🛡️ **[논리적 격리 작동 중]** 수동으로 매수하여 보유 중인 종목({len(manual_holdings)}개: {', '.join(manual_holdings)})은 AI 관제 대상에서 안전하게 제외되어 강제 매도되지 않습니다.")
             else:
-                st.info("현재 실전 계좌에 매수(보유) 중인 종목이 없습니다. [탭 1]의 관심종목 리스트에서 타점을 대기하세요.")
+                st.info("현재 실전 계좌에 매수(보유) 중인 봇 관리 종목이 없습니다. [탭 1]의 관심종목 리스트에서 타점을 대기하세요.")
 
 with tab3:
     st.header("🤖 실전 자동매매 관제센터 & 우선순위 주문 대기열")
@@ -1372,10 +1392,11 @@ with tab3:
     
     temp_queue = []
     eligible_stocks = {}
+    
+    # [V6.11 정책 4 적용] 대기열에도 봇 관리 종목(p_data['stocks'])만 추가하여 격리
     if p_data and 'stocks' in p_data:
-        for s in p_data['stocks']: eligible_stocks[str(s['티커']).strip().zfill(6)] = s.get('종목명', '')
-    if SYS_APP_KEY and kis_data and not real_stocks_df.empty:
-        for idx, row in real_stocks_df.iterrows(): eligible_stocks[str(row['티커']).strip().zfill(6)] = row.get('종목명', '')
+        for s in p_data['stocks']: 
+            eligible_stocks[str(s['티커']).strip().zfill(6)] = s.get('종목명', '')
             
     tab3_anomaly_flag = False
     tab3_anomaly_reason = ""
@@ -1644,19 +1665,18 @@ with tab4:
     if not p_data or not selected_port: 
         st.warning("포트폴리오가 없습니다.")
     else:
-        # [V6.9 핵심 패치] 관심종목 유니버스와 실전 보유 종목 유니버스를 합쳐서(Merge) 백테스트에 전달
+        stocks_df = pd.DataFrame(p_data.get('stocks', []))
+        today_date = datetime.datetime.now(KST).date()
+        
+        # 통합 유니버스 병합
         raw_port_stocks = p_data.get('stocks', [])
         raw_real_stocks = kis_data.get('stocks', []) if kis_data else []
-        
         merged_stocks = []
         for s in raw_port_stocks:
             merged_stocks.append({'종목명': s.get('종목명'), '티커': str(s.get('티커')).strip().zfill(6)})
         for s in raw_real_stocks:
             merged_stocks.append({'종목명': s.get('종목명'), '티커': str(s.get('티커')).strip().zfill(6)})
-            
         stocks_df = pd.DataFrame(merged_stocks).drop_duplicates(subset=['티커']) if merged_stocks else pd.DataFrame()
-        
-        today_date = datetime.datetime.now(KST).date()
         
         # ----------------------------------------
         # Test 1: 포워드 테스트
@@ -1678,7 +1698,7 @@ with tab4:
                 
         st.markdown(f"설정된 기준일(`{real_base_date}`)부터 오늘까지 관심종목 유니버스를 바탕으로 AI 전략을 가동했을 때의 **이론적 누적 수익률**과, 고객님의 **실계좌 수익률**을 나란히 비교합니다.")
 
-        if st.button("▶️ 포워드 테스트 1:1 비교 실행", use_container_width=True):
+        if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
             if stocks_df.empty: 
                 st.error("관심종목 리스트에 종목이 없습니다.")
             else:
@@ -1732,7 +1752,7 @@ with tab4:
         with col_sim1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t2_s")
         with col_sim2: end_date = st.date_input("종료일", today_date, key="t2_e")
 
-        if st.button(f"🚀 관심종목 대상 장기 Backtest 실행", type="secondary", use_container_width=True):
+        if st.button("🚀 관심종목 대상 장기 Backtest 실행", type="primary", use_container_width=True):
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner(f"통합 유니버스 초고속 벡터 연산 AI 시뮬레이션 중... (약 5초 소요)"):
@@ -1758,6 +1778,9 @@ with tab4:
         # Test 3: 동적 유니버스 블라인드 백테스트
         # ----------------------------------------
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
+        
+        # [V6.11 정책 3 적용] 생존자 편향 명시적 경고 추가
+        st.warning("※ 주의: 본 테스트는 '현재 시점에 상장 유지 중인' KOSPI/KOSDAQ 상위 종목만을 대상으로 과거를 회귀하여 시뮬레이션합니다. 상장폐지된 종목이 누락되어 수익률이 실제 과거 성과보다 과대 계상될 수 있는 '생존자 편향(Survivorship Bias)'이 포함되어 있으므로, 매매 로직의 하락장 방어력을 검증하는 용도로만 활용하세요.")
         
         if active_strat == '대형주 (Core)':
             univ_text = "**KOSPI 시가총액 상위 50개 대형주**"
@@ -1808,7 +1831,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.9 Final Validation)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.11 Final Architecture)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1837,6 +1860,7 @@ with tab5:
         5.  **시장 안정:** VIX(공포지수)가 30 미만으로 시장이 패닉 상태가 아닐 것.
     *   **🔴 AI 이탈(매도/퇴출) 조건:**
         1.  **추세 붕괴 (Dead Cross):** 20일 이동평균선이 60일 이동평균선을 하향 이탈하려는 징후 발생 시 전량 기계적 매도 및 관심종목 퇴출. `[MA20 < MA60 * (1 - 0.0075)]`
+        2.  **[V6.11] 강제 손절 컷 (Hard Stop-Loss):** 평단가 대비 수익률이 **`-15%`** 도달 시, 60일선 추세가 살아있더라도 계좌의 치명적 손상을 막기 위해 즉각적인 기계적 손절을 집행합니다.
     
     ### 🚀 [전략 B] 중소형주 (Satellite) - 스마트 수급 눌림목
     시장에 강력한 테마가 형성되어 돈이 몰린 주도주를 필터링하고, 해당 종목이 단기 조정을 받을 때(눌림목) 진입하여 기술적 반등을 노립니다.
@@ -1861,10 +1885,9 @@ with tab5:
     *   **🚨 VIX 공포지수 브레이크 (VIX Safe):**
         *   미국 S&P 500 VIX 지수가 **`30`**을 초과하는 시스템 리스크 구간에서는 모든 신규 매수를 전면 동결합니다.
     *   **🔥 극한의 역발상 매수 (VIX Contrarian):**
-        *   VIX 지수가 **`25 이상`**으로 치솟아 투매가 발생했으나, 단기 이동평균선(3일선)을 깨고 내려오는 **'공포 극점 확인 후 회복 초기'** 단계에서는, 모든 보조지표 조건을 무시하고 시장의 낙폭 과대 반등을 노려 즉시 공격적 매수를 집행합니다.
+        *   VIX 지수가 **`25 이상`**으로 치솟아 투매가 발생했으나, 단기 이동평균선(3일선)을 깨고 내려오는 **'공포 극점 확인 후 회복 초기'** 단계에서는, 시장의 낙폭 과대 반등을 노려 즉시 공격적 매수를 집행합니다. **[V6.11] 단, 종목 자체의 장기 추세인 MA200(200일선 방어) 조건은 어떠한 경우에도 무시하지 않도록 엄격히 통제합니다.**
     *   **🐃 강세장 자금 풀 부스터 (Bull Market Boost):**
         *   KOSPI/KOSDAQ 지수가 60일 이동평균선 위에 있는 완연한 강세장(Bull Market)으로 판별될 경우, 엔진이 자동으로 리스크를 낮게 평가하여 종목당 투입 자금 한도를 **기본값의 1.5배**로 확장합니다. (예: 대형주 35% -> 52.5% 상향)
-    *   **VIX 통신 장애 Fallback 시스템:** 해외 Yahoo Finance 통신 오류 시, KOSPI 지수의 최근 20일 변동성(MDD)을 내부적으로 역산하여 시장 공포도를 대리 판독하는 2중 안전망이 가동됩니다.
 
     ---
     
@@ -1890,13 +1913,13 @@ with tab5:
 
     ---
 
-    ## 6. 🚨 [V6.9] 통합 유니버스 검증 및 페일세이프 관제
+    ## 6. 🚨 통합 페일세이프 관제 및 논리적 망분리
     시스템의 100% 무인 운용과 사용자의 주도권을 동시에 보장하는 최첨단 보안 및 관제 기능이 결합되어 있습니다.
+    *   **[V6.11] 수동 보유 종목의 논리적 격리(Logical Isolation):** 사용자가 직접 증권사 앱을 통해 매수하여 계좌에 보유하고 있는 장기 가치 투자 종목 등은 시스템 DB(`p_data['stocks']`)와 교차 검증하여, 봇이 매수한 종목이 아닐 경우 봇의 매도 관제 대상에서 철저하게 분리 및 보호합니다. 
     *   **시뮬레이션 통합 유니버스 (Merged Universe Testing):** UI 편의를 위해 매수 완료된 종목을 관심종목 탭에서 숨기더라도, AI 시뮬레이터는 **관심종목과 실전 보유 종목을 완벽히 하나로 통합(Merge)하여 백테스트를 수행**합니다. 이로써 논리적 누락 없는 100% 무결한 성과 검증이 가능합니다.
     *   **동적 유니버스 블라인드 백테스트 (Dynamic Universe Blind Test):** 사용자가 선택해 둔 '현재 생존 종목'이 아니라, **과거 특정 시점의 KOSPI/KOSDAQ 시가총액 상위 50종목 전체를 대상으로 AI가 스스로 종목을 찾고 샀다 팔았다를 반복하는 실전과 가장 유사한 시뮬레이션 기능**이 탭 4에 탑재되었습니다.
     *   **초고속 멀티스레딩 스캐너 (Parallel Engine):** 파이썬의 `concurrent.futures`를 활용한 멀티스레딩 병렬 처리 아키텍처를 스캐너 및 백테스트 전반에 도입하여, 100개의 종목을 하나씩 스캔하던 기존 방식의 병목을 해결하고 **검색 속도를 기존 대비 10배 이상 극적으로 단축**시켰습니다.
-    *   **하이브리드 종목 큐레이션 (Hybrid Curation):** AI 스캐너에만 의존하지 않고, 사용자가 직접 검색창에 '종목명' 또는 '종목코드'를 입력하여 수동으로 발굴한 종목을 관심종목 유니버스에 편입시킬 수 있습니다. 또한 시스템에 사전 등록된 **시장 핵심 8대 테마별 대장주 2종목**을 버튼 클릭 한 번으로 손쉽게 추가할 수 있습니다. 
-    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다. (스캐너, 관제, 시뮬레이션의 3위일체 동기화 완벽 달성)
+    *   **하이브리드 종목 큐레이션 (Hybrid Curation):** AI 스캐너에만 의존하지 않고, 사용자가 직접 검색창에 '종목명' 또는 '종목코드'를 입력하여 수동으로 발굴한 종목을 관심종목 유니버스에 편입시킬 수 있습니다.
+    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다.
     *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
-    *   **진정한 무인 자동매매(Auto-Execution) 트리거:** `자동주문 활성화` 스위치가 켜져 있으면, 사용자의 화면 클릭 없이도 대기열 조건에 맞는 주문을 시스템이 백그라운드에서 즉시 강제 집행합니다.
     """, unsafe_allow_html=True)
