@@ -133,6 +133,11 @@ def save_portfolio_to_sheets(name, p_data):
         client = get_gspread_client()
         worksheet = client.open_by_key(SPREADSHEET_ID).worksheet("Portfolios")
         cell = worksheet.find(name)
+        
+        # 포트폴리오 최초 저장 시 개설일(created_at) 주입
+        if 'created_at' not in p_data:
+            p_data['created_at'] = datetime.datetime.now(KST).strftime('%Y-%m-%d')
+            
         data_str = json.dumps(p_data, ensure_ascii=False)
         if cell: worksheet.update_cell(cell.row, 2, data_str)
         else: worksheet.append_row([name, data_str])
@@ -191,7 +196,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e:
         return None, None, f"서버 통신 에러: {str(e)}"
 
-# 🛑 [패치] min_periods=1 적용하여 데이터 누락 방어
 def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
@@ -263,11 +267,9 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
-# 🛑 [핵심 패치] 시뮬레이터 결측치 증발 버그 해결 (min_periods=1 적용 및 dropna 삭제)
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
-    # 200일선 계산을 위해 넉넉하게 과거 400일 데이터 요청
     f_start = pd.to_datetime(start_date) - datetime.timedelta(days=400)
     sim_data = {}
     for _, row in sim_stocks.iterrows():
@@ -279,7 +281,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                 df['MA60'] = df['Close'].rolling(60, min_periods=1).mean()
                 df['MA200'] = df['Close'].rolling(200, min_periods=1).mean()
                 df['M60_Up'] = df['MA60'] > df['MA60'].shift(10).fillna(0)
-                # dropna() 삭제하여 데이터 증발 완전 차단
                 sim_data[nm] = df
         except: pass
         
@@ -292,7 +293,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     for nm, df in sim_data.items():
         sub_df = df[df.index >= pd.to_datetime(start_date)]
         if sub_df.empty: 
-            # 검색 기간에 데이터가 아예 없는 경우 원금 보존 처리 (수익률 0%)
             total_final_val += alloc_cash
             summary_rows.append({
                 '종목명': nm, '최종 보유 주수': "0 주",
@@ -503,13 +503,14 @@ if kis_data:
     real_cash_avail = kis_data.get('cash_avail', total_cash)
     real_stocks_df = pd.DataFrame(kis_data['stocks'])
 
-total_invested_principal = float(total_cash)
+# 🛑 [핵심 패치 1] 실계좌 정확한 원금 역산 (가상 투자 원금 설정과 완벽 분리)
+real_invested_principal = real_total_eval - real_eval_pnl if real_total_eval > 0 else 0.0
 
 if p_data:
     st.sidebar.markdown("---")
     st.sidebar.subheader("💰 Virtual Capital & Settings")
     st.sidebar.markdown(f"**현재 설정 전략:** `{active_strat}`")
-    new_cash = st.sidebar.number_input(f"총 투자 운용 자산", value=int(total_cash), step=1_000_000, format="%d")
+    new_cash = st.sidebar.number_input(f"총 투자 운용 자산 (AI 가상 원금)", value=int(total_cash), step=1_000_000, format="%d")
     if new_cash != total_cash:
         p_data['cash'] = new_cash
         save_portfolio_to_sheets(selected_port, p_data)
@@ -656,7 +657,8 @@ with tab2:
     if SYS_APP_KEY and kis_data:
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.markdown(mts_metric_html("💰 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
-        col_m2.markdown(mts_metric_html("📥 투자 원금", f"{total_invested_principal:,.0f} 원"), unsafe_allow_html=True)
+        # 🛑 진짜 실계좌 원금 표시
+        col_m2.markdown(mts_metric_html("📥 투자 원금", f"{real_invested_principal:,.0f} 원"), unsafe_allow_html=True)
         col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
         col_m4.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
         if not real_stocks_df.empty:
@@ -738,7 +740,6 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
-# 🛑 [핵심 패치 1 & 2] 줄 맞춤 교정 및 데이터 증발 방지
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -747,25 +748,33 @@ with tab4:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         today_date = datetime.datetime.now(KST).date()
         
+        # 🛑 [핵심 패치 2] 시작일 자동 파싱 (개설일 기준)
+        real_base_date_str = p_data.get('created_at', '2024-01-01')
+        try: real_base_date = pd.to_datetime(real_base_date_str).date()
+        except: real_base_date = datetime.datetime.now(KST).date()
+        
         st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
-        st.info("💡 **어떻게 비교하나요?** 내가 지정한 시작일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다. (번거로운 수동 기준 저장 기능을 없애고 직관적으로 자동 계산하도록 개선했습니다.)")
+        st.info("💡 **어떻게 비교하나요?** 포트폴리오 개설일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다.")
         
         col_fw_date, col_fw_btn = st.columns([3, 7])
         with col_fw_date:
-            test1_start_date = st.date_input("📅 가상 운용 시작일", datetime.date(2023, 1, 1), key="t4_date")
+            test1_start_date = st.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
         
         with col_fw_btn:
-            # 버튼 상단 여백을 주어 날짜 칸과 완벽하게 수평 정렬
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
                 if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
                 else:
                     with st.spinner("포워드 테스트 구동 중..."):
-                        res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                        # AI의 이론 운용 자금은 사용자가 설정한 가상 원금(total_cash)을 기준으로 함
+                        res_fw = run_quant_simulation(stocks_df, active_strat, total_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                         if res_fw:
+                            # 🛑 진짜 실계좌 수익률 계산
+                            real_ret_pct = (real_eval_pnl / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
+                            
                             col_fw1, col_fw2 = st.columns(2)
                             with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
-                            with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{((real_total_eval/total_invested_principal)-1)*100 if total_invested_principal>0 else 0:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
+                            with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
                             st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
