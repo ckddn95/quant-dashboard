@@ -294,7 +294,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     trade_stats = {tk: {'buy_cnt': 0, 'sell_cnt': 0, 'total_fee': 0.0, 'realized_pnl': 0.0, 'name': v['name']} for tk, v in sim_data.items()}
     
     for curr_date in all_trade_dates:
-        # 1. 매도 조건 검사
+        # 매도 조건 검사
         for tk in list(positions.keys()):
             pos = positions[tk]
             df = sim_data[tk]['df']
@@ -323,7 +323,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                 trade_stats[tk]['realized_pnl'] += net_proc - (pos['qty'] * pos['buy_price'] * 1.0025)
                 del positions[tk]
                 
-        # 2. 매수 조건 검사 (총자산 비중 할당)
+        # 매수 조건 검사 (총자산 비중 할당)
         stock_eval_sum = sum(pos['qty'] * (sim_data[tk]['df'].loc[curr_date, 'Close'] if curr_date in sim_data[tk]['df'].index else pos['buy_price']) for tk, pos in positions.items())
         total_equity = cash + stock_eval_sum
         target_per_stock = total_equity * (max_alloc_pct / 100.0)
@@ -367,7 +367,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     else:
                         positions[tk] = {'qty': q, 'buy_price': cp, 'highest_price': cp}
                         
-    # 3. 최종 결과 집계
     summary_rows = []
     total_final_val = cash
     
@@ -395,17 +394,25 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             
     return {'final_asset': total_final_val, 'final_port_ret': final_port_ret, 'summary_rows': summary_rows}
 
-# 🛑 [시뮬레이터 2] Test 3: AI 스캐너 발굴 ➡️ 관심종목 등록 ➡️ 동일 비중 매매 파이프라인
+# 🛑 [시뮬레이터 2] Test 3: 완벽한 실전 모사 (주간 스캔 ➡️ 익일 시가 매수 ➡️ 장중 저가 칼손절 로직)
 @st.cache_data(ttl=1800)
-def run_scanner_pipeline_backtest(strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp):
+def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp):
     krx = load_krx_universe()
     if krx.empty: return None
     
-    cands_kospi = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(25) if 'Marcap' in krx.columns else krx.head(25)
-    cands_kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(25) if 'Marcap' in krx.columns else krx.head(25)
+    # 1. 시뮬레이션용 넓은 유니버스 풀 구성 (대형 우량주 위주)
+    cands_kospi = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(30) if 'Marcap' in krx.columns else krx.head(30)
+    cands_kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(30) if 'Marcap' in krx.columns else krx.head(30)
     merged_cands = pd.concat([cands_kospi, cands_kosdaq]).drop_duplicates(subset=['Code'])
     
+    start_date = f"{year}-01-01"
+    end_date = f"{year}-12-31"
+    if year == datetime.datetime.now(KST).year:
+        end_date = datetime.datetime.now(KST).strftime('%Y-%m-%d')
+        
+    # 과거 보조지표 계산을 위해 400일 전 데이터부터 호출
     f_start = pd.to_datetime(start_date) - datetime.timedelta(days=400)
+    
     data_dict = {}
     for _, r in merged_cands.iterrows():
         tc, nm = str(r['Code']).strip().zfill(6), str(r['Name'])
@@ -421,61 +428,135 @@ def run_scanner_pipeline_backtest(strat, init_cash, start_date, end_date, use_ma
         
     if not data_dict: return None
     
-    all_trade_dates = sorted(list(set.union(*[set(v['df'][v['df'].index >= pd.to_datetime(start_date)].index) for v in data_dict.values()])))
+    year_start_dt = pd.to_datetime(start_date)
+    year_end_dt = pd.to_datetime(end_date)
+    all_trade_dates = sorted(list(set.union(*[set(v['df'][ (v['df'].index >= year_start_dt) & (v['df'].index <= year_end_dt) ].index) for v in data_dict.values()])))
     if not all_trade_dates: return None
     
     cash = float(init_cash)
     positions = {}
     trade_logs = []
+    buy_queue = []
+    weekly_watchlist = []
+    max_slots = max(3, int(100 / max_alloc_pct))
     
-    for current_date in all_trade_dates:
-        # [A단계] 보유 종목 청산
+    for i, current_date in enumerate(all_trade_dates):
+        # [A단계] 익일 시가(Open) 매수 체결 (어제 발생한 시그널)
+        for q in buy_queue:
+            tc = q['tk']
+            if tc in positions: continue
+            if len(positions) >= max_slots: break
+            
+            df = data_dict[tc]['df']
+            if current_date not in df.index: continue
+            open_p = df.loc[current_date, 'Open']
+            if pd.isna(open_p) or open_p <= 0: continue
+            
+            # 동적 비중 계산
+            stock_eval_sum = sum(pos['qty'] * data_dict[ptk]['df'].loc[current_date, 'Open'] if current_date in data_dict[ptk]['df'].index else pos['buy_price'] for ptk, pos in positions.items())
+            total_equity = cash + stock_eval_sum
+            target_fund = total_equity * (max_alloc_pct / 100.0)
+            alloc_fund = min(cash, target_fund)
+            
+            q_qty = int(alloc_fund // (open_p * 1.0025))
+            if q_qty > 0 and cash >= q_qty * open_p * 1.0025:
+                cost = q_qty * open_p
+                fee = cost * 0.0025
+                cash -= (cost + fee)
+                positions[tc] = {
+                    'qty': q_qty, 'buy_price': open_p, 'highest_price': df.loc[current_date, 'High'],
+                    'buy_date': current_date, 'name': q['name']
+                }
+        buy_queue = [] # 매수 큐 비우기
+        
+        # [B단계] 주간 AI 스캐너 작동 (매주 월요일마다 관심종목 갱신)
+        if current_date.weekday() == 0 or i == 0:
+            weekly_watchlist = []
+            for tc, val in data_dict.items():
+                df = val['df']
+                if current_date not in df.index: continue
+                row = df.loc[current_date]
+                c_p, ma20, ma60, ma200, m60_up = row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_Up']
+                
+                pass_ma200 = (c_p >= ma200) if use_ma200 else True
+                if not pass_ma200: continue
+                
+                if strat == 'Core':
+                    if ma20 >= ma60 * (1 + w_buf) and m60_up:
+                        score = min(85.0 + max(0, ((ma20/ma60)-1)*100), 99.0)
+                        weekly_watchlist.append({'tk': tc, 'name': val['name'], 'score': score})
+                else:
+                    dist_ma20 = (c_p/ma20) - 1
+                    if -0.05 <= dist_ma20 <= 0.03:
+                        score = min(85.0 + max(0, (0.03 - dist_ma20)*100), 99.0)
+                        weekly_watchlist.append({'tk': tc, 'name': val['name'], 'score': score})
+                        
+            weekly_watchlist = sorted(weekly_watchlist, key=lambda x: x['score'], reverse=True)[:15]
+
+        # [C단계] 보유 종목 실시간 청산 검사 (장중 저가 기준 칼손절)
         for tc in list(positions.keys()):
             pos = positions[tc]
             df = data_dict[tc]['df']
             if current_date not in df.index: continue
             
-            c_p = df.loc[current_date, 'Close']
-            ma20 = df.loc[current_date, 'MA20']
-            ma60 = df.loc[current_date, 'MA60']
+            low_p = df.loc[current_date, 'Low']
+            high_p = df.loc[current_date, 'High']
+            close_p = df.loc[current_date, 'Close']
+            open_p = df.loc[current_date, 'Open']
             
-            pos['highest_price'] = max(pos['highest_price'], c_p)
-            ret = (c_p / pos['buy_price']) - 1
-            sell_reason = None
+            pos['highest_price'] = max(pos['highest_price'], high_p)
+            sell_price = 0.0
+            sell_reason = ""
             
-            if ret <= sl: sell_reason = f"🔴 긴급 손절 ({ret*100:+.1f}%)"
-            elif (pos['highest_price'] / pos['buy_price'] - 1) >= ts_tgt and (c_p / pos['highest_price'] - 1) <= ts_drp:
-                sell_reason = f"🔵 트레일링 익절 ({ret*100:+.1f}%)"
-            elif strat == "Core" and c_p < ma60 * (1 - w_buf/2):
-                sell_reason = f"🔴 60일 추세 이탈 ({ret*100:+.1f}%)"
-            elif strat == "Satellite" and c_p < ma20 * (1 - w_buf/2):
-                sell_reason = f"🔴 20일 추세 이탈 ({ret*100:+.1f}%)"
-                
-            if sell_reason:
-                proc = pos['qty'] * c_p
+            # 장중 저가 손절 검사
+            sl_target = pos['buy_price'] * (1 + sl) 
+            if low_p <= sl_target:
+                sell_price = min(open_p, sl_target)
+                sell_reason = f"🔴 장중 손절컷"
+            else:
+                # 장중 트레일링 익절 검사
+                ts_trigger = pos['buy_price'] * (1 + ts_tgt)
+                if pos['highest_price'] >= ts_trigger:
+                    ts_target = pos['highest_price'] * (1 + ts_drp)
+                    if low_p <= ts_target:
+                        sell_price = min(open_p, ts_target)
+                        sell_reason = f"🔵 장중 트레일링 익절"
+                        
+            # 종가 추세이탈 검사
+            if sell_price == 0.0:
+                ma20 = df.loc[current_date, 'MA20']
+                ma60 = df.loc[current_date, 'MA60']
+                if strat == "Core" and close_p < ma60 * (1 - w_buf/2):
+                    sell_price = close_p
+                    sell_reason = f"🔴 종가 추세이탈"
+                elif strat == "Satellite" and close_p < ma20 * (1 - w_buf/2):
+                    sell_price = close_p
+                    sell_reason = f"🔴 종가 추세이탈"
+                    
+            if sell_price > 0:
+                proc = pos['qty'] * sell_price
                 fee = proc * 0.0025
-                net_proc = proc - fee
-                cash += net_proc
-                pnl = net_proc - (pos['qty'] * pos['buy_price'] * 1.0025)
+                cash += (proc - fee)
+                pnl = (proc - fee) - (pos['qty'] * pos['buy_price'] * 1.0025)
+                ret_pct = pnl / (pos['qty'] * pos['buy_price']) * 100
                 
                 trade_logs.append({
                     '종목명': pos['name'], '티커': tc,
                     '매수일': pos['buy_date'].strftime('%Y-%m-%d'), '매도일': current_date.strftime('%Y-%m-%d'),
-                    '매수가': f"{pos['buy_price']:,.0f} 원", '매도가': f"{c_p:,.0f} 원",
+                    '매수가': f"{pos['buy_price']:,.0f} 원", '매도가': f"{sell_price:,.0f} 원",
                     '수량': f"{pos['qty']:,} 주", '손익금': f"{pnl:+,.0f} 원",
-                    '수익률': f"{ret*100:+.2f}%", '청산 사유': sell_reason
+                    '수익률': f"{ret_pct:+.2f}%", '청산 사유': sell_reason
                 })
                 del positions[tc]
-                
-        # [B단계] 실전 봇과 동일한 총자산 비중(max_alloc_pct) 할당 매수
-        stock_eval_sum = sum(pos['qty'] * (data_dict[tc]['df'].loc[current_date, 'Close'] if current_date in data_dict[tc]['df'].index else pos['buy_price']) for tc, pos in positions.items())
-        total_equity = cash + stock_eval_sum
-        target_per_stock = total_equity * (max_alloc_pct / 100.0)
         
-        if cash > 100000:
-            for tc, val in data_dict.items():
+        # [D단계] 주간 관심종목 내 신규 진입 시그널 포착 (종가 기준) -> 내일 아침 시가에 매수 대기
+        if len(positions) < max_slots:
+            for w in weekly_watchlist:
+                tc = w['tk']
                 if tc in positions: continue
-                df = val['df']
+                if any(q['tk'] == tc for q in buy_queue): continue
+                
+                df = data_dict[tc]['df']
                 if current_date not in df.index: continue
                 
                 c_p = df.loc[current_date, 'Close']
@@ -485,25 +566,19 @@ def run_scanner_pipeline_backtest(strat, init_cash, start_date, end_date, use_ma
                 m60_up = df.loc[current_date, 'M60_Up']
                 
                 pass_ma200 = (c_p >= ma200) if use_ma200 else True
-                scanned_signal = False
+                buy_signal = False
                 
                 if strat == "Core":
-                    if pass_ma200 and (ma20 >= ma60 * (1 + w_buf)) and m60_up: scanned_signal = True
+                    if pass_ma200 and (ma20 >= ma60 * (1 + w_buf)) and m60_up: buy_signal = True
                 else:
                     dist_ma20 = (c_p / ma20) - 1
-                    if pass_ma200 and (-0.05 <= dist_ma20 <= 0.03): scanned_signal = True
+                    if pass_ma200 and (-0.05 <= dist_ma20 <= 0.03): buy_signal = True
                         
-                if scanned_signal:
-                    avail_fund = min(cash, target_per_stock)
-                    q = int(avail_fund // (c_p * 1.0025))
-                    if q > 0:
-                        cost = q * c_p; fee = cost * 0.0025
-                        cash -= (cost + fee)
-                        positions[tc] = {
-                            'qty': q, 'buy_price': c_p, 'highest_price': c_p,
-                            'buy_date': current_date, 'name': val['name']
-                        }
-                        
+                if buy_signal:
+                    buy_queue.append({'tk': tc, 'name': w['name']})
+                    if len(positions) + len(buy_queue) >= max_slots: break
+                    
+    # 최종 결산
     final_stock_eval = sum(pos['qty'] * data_dict[tc]['df']['Close'].iloc[-1] for tc, pos in positions.items())
     final_total_asset = cash + final_stock_eval
     final_ret_pct = ((final_total_asset / init_cash) - 1) * 100
@@ -513,6 +588,18 @@ def run_scanner_pipeline_backtest(strat, init_cash, start_date, end_date, use_ma
         'trade_logs': trade_logs, 'active_positions': len(positions),
         'remaining_cash': cash
     }
+
+def color_profit_loss(val):
+    val_str = str(val)
+    if val_str.startswith('+'): return 'color: #FF5050; font-weight: bold;'
+    elif val_str.startswith('-') and len(val_str) > 1 and val_str != '-': return 'color: #3b82f6; font-weight: bold;'
+    return ''
+
+def apply_mts_style(df, subset_cols):
+    valid_cols = [c for c in subset_cols if c in df.columns]
+    if not valid_cols: return df
+    if hasattr(df.style, 'map'): return df.style.map(color_profit_loss, subset=valid_cols)
+    else: return df.style.applymap(color_profit_loss, subset=valid_cols)
 
 def mts_metric_html(label, value, delta=None):
     val_color, val_str = "white", str(value)
@@ -640,7 +727,6 @@ real_base_date_str = p_data.get('created_at', '2024-01-01') if p_data else '2024
 try: real_base_date = pd.to_datetime(real_base_date_str).date()
 except: real_base_date = datetime.datetime.now(KST).date()
 
-# 🛑 [핵심 선언] 실계좌 투자 원금 및 전역 변수 완벽 정의
 real_invested_principal = real_total_eval - real_eval_pnl if real_total_eval > 0 else 0.0
 total_invested_principal = real_invested_principal
 
@@ -877,7 +963,6 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
-# 🛑 [완성된 Tab 4] Test 1, 2, 3 정렬 및 NameError 방지 패치
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -933,21 +1018,23 @@ with tab4:
                         st.dataframe(pd.DataFrame(bt_result['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        st.subheader("💡 Test 3. AI 스캐너 발굴 ➡️ 관심종목 편입 ➡️ 실전 자율매매 백테스트")
-        st.info("💡 **어떤 테스트인가요?** 과거 시작일부터 매일매일 시장을 감시하여 **1) AI 스캐너가 실시간 발굴 ➡️ 2) 관심종목 자동 편입 ➡️ 3) 총자산 비중(`max_alloc_pct`) 분할 매수 ➡️ 4) 트레일링 익절/손절 청산 및 예수금 회수 후 재투자**하는 실전 자동매매 봇과 100% 동일한 구조의 자율 순환 백테스트입니다.")
+        st.subheader("💡 Test 3. 과거 시점 동적 포착 AI 자율매매 백테스트")
+        st.info("💡 **어떤 테스트인가요?** 1년 동안 매주 월요일마다 AI 스캐너가 실시간 발굴하여 관심종목에 자동 편입하고, 타점 충족 시 **익일 시가(Open)로 매수**하며, 장중 **저가(Low)를 기준으로 칼손절 및 트레일링 익절을 수행**하는 100% 실전 동일 방식의 시뮬레이터입니다.")
         
-        col_t3_1, col_t3_2, col_t3_3 = st.columns([3, 3, 4])
-        with col_t3_1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
-        with col_t3_2: dyn_end_date = st.date_input("종료일", today_date, key="t3_e")
-        with col_t3_3:
+        col_t3_1, col_t3_2 = st.columns([3, 7])
+        with col_t3_1: 
+            # 🛑 1년 단위 연도 선택 콤보박스 (서버 과부하 차단)
+            available_years = list(range(today_date.year, 2021, -1))
+            selected_year = st.selectbox("📅 시뮬레이션 연도", available_years)
+        with col_t3_2:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            run_test3 = st.button("🚀 AI 자율매매 파이프라인 백테스트 실행", type="primary", use_container_width=True)
+            run_test3 = st.button(f"🚀 {selected_year}년도 실전 자율매매 백테스트 실행", type="primary", use_container_width=True)
 
         if run_test3:
-            with st.spinner("AI 스캐너 발굴 및 자동매매 파이프라인 시뮬레이션 구동 중 (약 15초 소요)..."):
-                pipeline_res = run_scanner_pipeline_backtest(active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer/100.0, sat_stop_loss/100.0, max_alloc_pct, ts_target_pct/100.0, ts_drop_pct/100.0)
+            with st.spinner(f"주간 스캔 및 {selected_year}년도 자율매매 시뮬레이션 구동 중 (약 15초 소요)..."):
+                pipeline_res = run_yearly_realistic_backtest(active_strat, total_cash, selected_year, use_ma200_filter, whipsaw_buffer/100.0, sat_stop_loss/100.0, max_alloc_pct, ts_target_pct/100.0, ts_drop_pct/100.0)
                 if pipeline_res:
-                    st.success("✅ 실전 동일 조건 자율매매 백테스트 완료!")
+                    st.success(f"✅ {selected_year}년도 실전 동일 조건 자율매매 백테스트 완료!")
                     logs = pipeline_res['trade_logs']
                     win_count = len([l for l in logs if float(l['수익률'].replace('%','').replace('+','')) > 0])
                     win_rate = (win_count / len(logs)) * 100 if logs else 0.0
@@ -961,7 +1048,7 @@ with tab4:
                     if logs:
                         st.dataframe(pd.DataFrame(logs), use_container_width=True, hide_index=True)
                     else:
-                        st.info("해당 기간 동안 AI 스캐너 조건에 포착되어 청산까지 완료된 거래가 없습니다.")
+                        st.info("해당 연도 동안 AI 스캐너 조건에 포착되어 청산까지 완료된 거래가 없습니다.")
 
 with tab5:
     st.markdown("""
