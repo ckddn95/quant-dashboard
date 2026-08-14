@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -15,6 +14,10 @@ import hashlib
 import concurrent.futures
 from google.oauth2.service_account import Credentials
 import warnings
+
+# [Step 1에서 만든 공통 두뇌 파일을 불러옵니다!]
+import quant_engine as qe 
+
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -23,7 +26,6 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
-
 SPREADSHEET_ID = "1hFPs2y8UipaWHfM_VVgAqsq566HnHQLBONSwBX28TQ0"
 
 @st.cache_resource
@@ -107,7 +109,7 @@ st.title("Core-Satellite Independent Asset Allocation Quant System")
 st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **오토파일럿 무인 감시**, **실계좌 자동매매**, **시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
-# 1. 헬퍼 함수 모음 (통신, DB, 스캐너)
+# 1. 헬퍼 함수 모음 (통신, DB)
 # ==========================================
 def send_telegram_message(message):
     try:
@@ -248,127 +250,36 @@ def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0, statu
     })
     return p_data
 
-@st.cache_data(ttl=86400)
+# ==========================================
+# 2. 공통 두뇌(quant_engine) 연결 브릿지
+# UI에서 호출 시 느려지지 않도록 캐싱(Cache)을 입혀서 넘겨줍니다.
+# ==========================================
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_krx_universe():
-    try: return fdr.StockListing('KRX').dropna(subset=['Code', 'Name'])
-    except: return pd.DataFrame()
+    return qe.load_krx_universe()
 
 @st.cache_data(ttl=1800)
 def fetch_market_data():
-    try:
-        k_close = fdr.DataReader('KS11')['Close'].tail(61)
-        kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100 if len(k_close) >= 60 else 0.0
-        kq_close = fdr.DataReader('KQ11')['Close'].tail(61)
-        kosdaq_ret_60 = ((float(kq_close.iloc[-1]) / float(kq_close.iloc[-60])) - 1) * 100 if len(kq_close) >= 60 else 0.0
-    except:
-        kospi_ret_60, kosdaq_ret_60 = 0.0, 0.0
-        
-    try:
-        vix_df = yf.download("^VIX", period="3mo", progress=False)
-        if vix_df.empty: raise ValueError("VIX Data Empty")
-        vix_close = vix_df['Close'].dropna()
-        vix_val, vix_ma3 = float(vix_close.iloc[-1]), float(vix_close.rolling(3).mean().iloc[-1])
-        return vix_val, (vix_val >= 25.0) and (vix_val < vix_ma3), (vix_val < 30.0), kospi_ret_60, kosdaq_ret_60
-    except:
-        try:
-            k_20 = fdr.DataReader('KS11')['Close'].tail(20)
-            k_dd = (k_20.iloc[-1] / k_20.max()) - 1
-            v_safe = True if k_dd > -0.10 else False 
-            v_con = True if k_dd <= -0.15 else False 
-            return 20.0, v_con, v_safe, kospi_ret_60, kosdaq_ret_60
-        except: return 20.0, False, True, kospi_ret_60, kosdaq_ret_60
+    return qe.fetch_market_data()
 
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
-    try:
-        tc = str(ticker_code).strip().zfill(6)
-        start_dt = (datetime.datetime.now(KST).date() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
-        
-        df = fdr.DataReader(tc, start=start_dt)
-        if not df.empty and len(df) > 0:
-            close_p, vol = df['Close'].dropna(), df['Volume'].dropna()
-            low_p = df['Low'].dropna() if 'Low' in df.columns else close_p
-            if len(close_p) == 0: return None
-            
-            y_p, y_l = float(close_p.iloc[-1]), float(low_p.iloc[-1])
-            ma200 = float(close_p.rolling(200).mean().iloc[-1]) if len(close_p) >= 200 else y_p
-            ma60 = float(close_p.rolling(60).mean().iloc[-1]) if len(close_p) >= 60 else y_p
-            ma60_10 = float(close_p.rolling(60).mean().iloc[-11]) if len(close_p) >= 70 else ma60
-            ma20 = float(close_p.rolling(20).mean().iloc[-1]) if len(close_p) >= 20 else y_p
-            
-            tail_120 = close_p.tail(120)
-            rh = float(tail_120.max())
-            dd = ((y_p / rh) - 1) * 100 if rh > 0 else 0.0
-            
-            days_since_peak = len(tail_120) - 1 - int(np.argmax(tail_120.values))
-            
-            vol_5ma = float(vol.tail(6).iloc[:-1].mean()) if len(vol) >= 6 else float(vol.iloc[-1])
-            avg_trade_val = vol_5ma * y_p 
-            
-            peak_vol_20 = float(vol.tail(20).max())
-            vol_contraction = float(vol_5ma / peak_vol_20) if peak_vol_20 > 0 else 1.0
-            
-            vr = (float(vol.iloc[-1]) / vol_5ma * 100) if vol_5ma > 0 else 100.0
-            r60 = ((y_p / float(close_p.iloc[-60])) - 1) * 100 if len(close_p) >= 60 else 0.0
-            r20 = ((y_p / float(close_p.iloc[-20])) - 1) * 100 if len(close_p) >= 20 else 0.0
-            vr_s = pd.Series(np.where(vol.rolling(5).mean().shift(1) > 0, vol / vol.rolling(5).mean().shift(1) * 100, 100.0), index=vol.index)
-            rvm = float(vr_s.tail(20).max())
-            
-            return (y_p, ma200, ma60, ma20, dd, vr, r60, r20, (ma60 > ma60_10), (y_p >= ma200), rvm >= 200.0, y_l, rvm, avg_trade_val, days_since_peak, vol_contraction)
-    except: pass
-    return None
+    return qe.fetch_stock_status(ticker_code)
 
-def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, buf_pct, ts_target_pct, ts_drop_pct, sat_stop_loss_pct, days_since_peak, vol_contraction):
-    buf = buf_pct / 100.0 if buf_pct else 0.0
-    sat_stop_loss = sat_stop_loss_pct / 100.0 if sat_stop_loss_pct else -0.15
-    ts_target = ts_target_pct / 100.0 if ts_target_pct else 0.30
-    ts_drop = ts_drop_pct / 100.0 if ts_drop_pct else -0.05
-    
-    user_ret = ((c_price / buy_price) - 1) if buy_price > 0 else 0.0
-    diff_ma = ((ma20 / ma60) - 1) if ma60 > 0 else 0.0
-    dist_ma20 = ((c_price / ma20) - 1) if ma20 > 0 else 0.0
-    
-    is_above_ma200 = (c_price >= ma200)
-    ma200_cond = is_above_ma200 if use_ma200_filter else True
-    current_low = min(yf_low, c_price)
-    
-    is_ts_active = (user_ret >= ts_target)
-    drawdown_from_high = ((c_price / highest_price) - 1) if highest_price > 0 else 0.0
-    trailing_stop_triggered = is_ts_active and (drawdown_from_high <= ts_drop)
-    
-    res = {
-        'ai_score': 0.0, 'entry_cond': False, 'exit_cond_trend': False,
-        'stop_loss_cond': False, 'trailing_stop_cond': trailing_stop_triggered,
-        'diff_ma_pct': diff_ma * 100, 'dist_ma20_pct': dist_ma20 * 100,
-        'user_ret_pct': user_ret * 100, 'is_above_ma200': is_above_ma200,
-        'vol_surged': vol_surged, 'drawdown': drawdown,
-        'days_since_peak': days_since_peak, 'vol_contraction': vol_contraction
-    }
-    
-    if strat_name == '대형주 (Core)':
-        res['ai_score'] = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 100 * 0.2), 2)
-        # [V6.11 정책2 적용] VIX 역발상에도 MA200 방어조건(is_above_ma200) 강제 적용
-        res['entry_cond'] = is_above_ma200 and ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0 and vix_safe) or vix_contrarian)
-        res['exit_cond_trend'] = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian 
-        # [V6.11 정책1 적용] Core 전략 -15% 하드 손절 적용
-        res['stop_loss_cond'] = (user_ret <= -0.15) 
-    else: 
-        res['ai_score'] = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
-        is_dip = (-0.05 <= dist_ma20 <= 0.03) or (current_low <= ma20 * 1.01)
-        sat_normal_buy = is_dip and vol_surged and (days_since_peak <= 45) and (vol_contraction <= 0.50)
-        # [V6.11 정책2 적용] 위성 전략도 MA200 방어는 절대 양보 불가
-        res['entry_cond'] = is_above_ma200 and (sat_normal_buy or vix_contrarian) and drawdown >= -0.30 and ma60_slope_positive and ret_20 > -0.03
-        res['exit_cond_trend'] = (c_price < ma20 * (1 - buf/2)) and not vix_contrarian 
-        res['stop_loss_cond'] = (user_ret <= sat_stop_loss)
-        
-    return res
+def analyze_quant_strategy(*args, **kwargs):
+    return qe.analyze_quant_strategy(*args, **kwargs)
 
 @st.cache_data(ttl=3600)
 def run_core_scanner(use_ma200, buf_pct):
     krx = load_krx_universe()
     buf = buf_pct / 100.0
     if krx.empty: return pd.DataFrame()
-    cands = krx[krx['Market'] == 'KOSPI'].sort_values('Marcap', ascending=False).head(100) if 'Marcap' in krx.columns else krx[krx['Market'] == 'KOSPI'].head(100)
+    
+    if 'Marcap' in krx.columns and 'Market' in krx.columns:
+        cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(100)
+    elif 'Market' in krx.columns:
+        cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].head(100)
+    else: cands = krx.head(100)
     
     def process_stock(row):
         tc = str(row['Code']).strip().zfill(6)
@@ -383,17 +294,19 @@ def run_core_scanner(use_ma200, buf_pct):
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         results = executor.map(process_stock, cands.to_dict('records'))
         for r in results:
-            if r is not None:
-                res.append(r)
-                
+            if r is not None: res.append(r)
     return pd.DataFrame(res)
 
 @st.cache_data(ttl=3600)
 def run_satellite_scanner(use_ma200, top_n=5):
     krx = load_krx_universe()
     if krx.empty: return pd.DataFrame()
-    kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
-    cands = kosdaq[kosdaq['Marcap'] >= 100000000000].sort_values('Marcap', ascending=False).head(100) if 'Marcap' in krx.columns else kosdaq.head(100)
+    
+    if 'Market' in krx.columns: kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
+    else: kosdaq = krx
+        
+    if 'Marcap' in kosdaq.columns: cands = kosdaq[kosdaq['Marcap'] >= 100000000000].sort_values('Marcap', ascending=False).head(100)
+    else: cands = kosdaq.head(100)
     
     def process_stock(row):
         tc = str(row['Code']).strip().zfill(6)
@@ -413,9 +326,7 @@ def run_satellite_scanner(use_ma200, top_n=5):
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         results = executor.map(process_stock, cands.to_dict('records'))
         for r in results:
-            if r is not None:
-                res.append(r)
-                
+            if r is not None: res.append(r)
     if not res: return pd.DataFrame()
     return pd.DataFrame(res).sort_values('_sc', ascending=False).head(top_n).drop(columns=['_sc'])
 
@@ -525,7 +436,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     cash = float(init_cash)
     b_ar, t_tgt, t_drp = max_alloc_pct/100.0, ts_target_pct/100.0, ts_drop_pct/100.0
     
-    # [V6.11 정책 1 적용] 백테스트 시뮬레이션 루프 내 Core 하드손절 반영
     active_sl = -0.15 if strat == '대형주 (Core)' else (sl/100.0)
     
     for i, d in enumerate(c_idx):
@@ -548,7 +458,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             if sh[n] > 0 and ab_p[n] > 0:
                 pk_p[n] = max(pk_p[n], c_p)
                 if (c_p/ab_p[n]-1) >= t_tgt and (c_p/pk_p[n]-1) <= t_drp: tse = True
-                if (c_p/ab_p[n]-1) <= active_sl: fe = True # 하드손절 발동 체크
+                if (c_p/ab_p[n]-1) <= active_sl: fe = True
             if tse or fe: sig = 0.0
             elif sh[n] > 0 and hd[n] < min_h: sig = 1.0
             
@@ -685,7 +595,7 @@ def mts_metric_html(label, value, delta=None):
     """
 
 # ==========================================
-# 2. 전역 변수 및 데이터 파싱
+# 3. 사이드바 UI 렌더링
 # ==========================================
 if 'search_q' not in st.session_state: st.session_state.search_q = None
 if 'search_sec' not in st.session_state: st.session_state.search_sec = None
@@ -777,9 +687,6 @@ if kis_data:
     total_invested_principal = real_total_eval - real_eval_pnl - cumulative_realized_pnl - manual_offset
     if total_invested_principal <= 0: total_invested_principal = total_cash
 
-# ------------------------------------------
-# 3. 사이드바 UI 렌더링
-# ------------------------------------------
 if p_data:
     st.sidebar.markdown("---")
     st.sidebar.subheader("💰 Virtual Capital & Settings")
@@ -864,6 +771,7 @@ if tg_token and tg_chat_id:
         auto_trade_enabled = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at, key=at_key)
         auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기", value=init_ap, key=ap_key)
         
+        # [Step 2] UI 다이어트: 자바스크립트 강제 새로고침 코드 제거됨
         needs_settings_save = False
         if kill_switch != init_ks:
             p_data['kill_switch'] = kill_switch
@@ -885,15 +793,8 @@ if tg_token and tg_chat_id:
             
         check_min = init_ap_min
         if auto_pilot:
-            check_min = st.sidebar.number_input("감시 주기 (분)", min_value=1, max_value=60, value=init_ap_min)
-            if check_min != init_ap_min:
-                p_data['ap_min'] = check_min
-                save_portfolio_to_sheets(selected_port, p_data)
-                try: st.query_params["auth"] = daily_token
-                except: st.experimental_set_query_params(auth=daily_token)
-                st.rerun()
-            st.sidebar.info(f"🔄 {check_min}분 주기로 무인 감시 중...")
-            components.html(f"<script>setTimeout(function(){{window.parent.location.reload();}}, {check_min * 60000});</script>", height=0)
+            check_min = st.sidebar.number_input("백그라운드 스케줄러 기준 주기 (분)", min_value=1, value=init_ap_min, disabled=True)
+            st.sidebar.success(f"✅ 오토파일럿 스위치 ON. (서버 백그라운드 봇 연동 중. 창을 닫아도 무관합니다.)")
     else:
         kill_switch, auto_trade_enabled, auto_pilot, check_min = False, False, False, 10
 else: 
@@ -1253,14 +1154,12 @@ with tab2:
                     total_buy_sum = 0.0
                     live_results = []
                     
-                    # [V6.11 정책 4 적용] 논리적 격리: 수동 보유 주식은 봇이 매도 관제하지 않음
                     bot_managed_tickers = [str(s.get('티커')).strip().zfill(6) for s in p_data.get('stocks', [])] if p_data else []
                     manual_holdings = []
                     
                     for idx, row in real_stocks_df.iterrows():
                         ticker_str = str(row['티커']).strip().zfill(6)
                         
-                        # [논리적 격리 확인] 봇의 DB에 없는 주식이면 관제 패스
                         if ticker_str not in bot_managed_tickers:
                             manual_holdings.append(row.get('종목명', ticker_str))
                             continue
@@ -1319,7 +1218,7 @@ with tab2:
                         action, reason = "-", "-"
                         
                         if res_q['stop_loss_cond']: 
-                            action, reason = "🔴 긴급 손절 매도", f"손절 기준선({sat_stop_loss}%) 도달"
+                            action, reason = "🔴 긴급 손절 매도", f"손절 기준선 도달"
                         elif res_q['trailing_stop_cond']: 
                             action, reason = "🔵 트레일링 익절", f"최고가({highest_price:,.0f}원) 대비 목표하락폭 이탈"
                         elif res_q['exit_cond_trend']: 
@@ -1374,7 +1273,6 @@ with tab2:
                             live_df = pd.concat([live_df, summary_row], ignore_index=True)
                             st.dataframe(apply_mts_style(live_df, ['평가손익', '수익률']), use_container_width=True, hide_index=True)
                             
-                    # [V6.11 정책 4 적용] 수동 보유 종목 안내 UI
                     if manual_holdings:
                         st.info(f"🛡️ **[논리적 격리 작동 중]** 수동으로 매수하여 보유 중인 종목({len(manual_holdings)}개: {', '.join(manual_holdings)})은 AI 관제 대상에서 안전하게 제외되어 강제 매도되지 않습니다.")
             else:
@@ -1393,7 +1291,6 @@ with tab3:
     temp_queue = []
     eligible_stocks = {}
     
-    # [V6.11 정책 4 적용] 대기열에도 봇 관리 종목(p_data['stocks'])만 추가하여 격리
     if p_data and 'stocks' in p_data:
         for s in p_data['stocks']: 
             eligible_stocks[str(s['티커']).strip().zfill(6)] = s.get('종목명', '')
@@ -1560,7 +1457,7 @@ with tab3:
             manual_btn = st.button(btn_label, type=btn_type, use_container_width=True)
                 
             if trigger_auto or manual_btn:
-                if kill_switch: st.error("🚨 킬 스위치가 활성화되어 있어 주문을 전송할 수 없습니다.")
+                if kill_switch: st.error("🚨 킬 스위치가 활성화되어 있어 주문 전송할 수 없습니다.")
                 elif not auto_trade_enabled and not trigger_auto: st.warning("🚀 사이드바에서 '실전 자동주문 활성화' 스위치를 켜주세요.")
                 else:
                     with st.spinner("🚀 [오토파일럿] KIS 리얼 서버로 순차 주문 전송 중..."):
@@ -1668,7 +1565,6 @@ with tab4:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         today_date = datetime.datetime.now(KST).date()
         
-        # 통합 유니버스 병합
         raw_port_stocks = p_data.get('stocks', [])
         raw_real_stocks = kis_data.get('stocks', []) if kis_data else []
         merged_stocks = []
@@ -1779,7 +1675,6 @@ with tab4:
         # ----------------------------------------
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
         
-        # [V6.11 정책 3 적용] 생존자 편향 명시적 경고 추가
         st.warning("※ 주의: 본 테스트는 '현재 시점에 상장 유지 중인' KOSPI/KOSDAQ 상위 종목만을 대상으로 과거를 회귀하여 시뮬레이션합니다. 상장폐지된 종목이 누락되어 수익률이 실제 과거 성과보다 과대 계상될 수 있는 '생존자 편향(Survivorship Bias)'이 포함되어 있으므로, 매매 로직의 하락장 방어력을 검증하는 용도로만 활용하세요.")
         
         if active_strat == '대형주 (Core)':
@@ -1797,12 +1692,19 @@ with tab4:
         
         if st.button("🚀 AI 자율 매매 블라인드 테스트 실행 (약 10초 소요)", type="primary", use_container_width=True):
             if krx_univ.empty: 
-                st.error("KRX 데이터를 불러오지 못했습니다.")
+                st.error("KRX 데이터를 불러오지 못했습니다. 일시적인 서버 통신 장애일 수 있습니다. 잠시 후 다시 시도해 주세요.")
             else:
+                if 'Market' not in krx_univ.columns: krx_univ['Market'] = 'KOSPI'
+                
                 if active_strat == '대형주 (Core)':
-                    sim_cands = krx_univ[krx_univ['Market'] == 'KOSPI'].sort_values('Marcap', ascending=False).head(50)
+                    sim_cands = krx_univ[krx_univ['Market'].str.contains('KOSPI', case=False, na=False)]
                 else:
-                    sim_cands = krx_univ[krx_univ['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(50)
+                    sim_cands = krx_univ[krx_univ['Market'].str.contains('KOSDAQ', case=False, na=False)]
+                    
+                if 'Marcap' in sim_cands.columns:
+                    sim_cands = sim_cands.sort_values('Marcap', ascending=False).head(50)
+                else:
+                    sim_cands = sim_cands.head(50)
                 
                 sim_df_cands = pd.DataFrame({
                     '종목명': sim_cands['Name'],
@@ -1831,7 +1733,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.11 Final Architecture)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 (v6.13 UI Decoupled)</h1>
     <p style='text-align: center; font-size: 1.1em; color: #4B5563;'>본 보고서는 <strong>Core-Satellite Quant System</strong>에 탑재된 AI 매매 엔진의 전략 기획서 및 핵심 로직 명세서입니다.</p>
     <hr>
     
@@ -1860,7 +1762,7 @@ with tab5:
         5.  **시장 안정:** VIX(공포지수)가 30 미만으로 시장이 패닉 상태가 아닐 것.
     *   **🔴 AI 이탈(매도/퇴출) 조건:**
         1.  **추세 붕괴 (Dead Cross):** 20일 이동평균선이 60일 이동평균선을 하향 이탈하려는 징후 발생 시 전량 기계적 매도 및 관심종목 퇴출. `[MA20 < MA60 * (1 - 0.0075)]`
-        2.  **[V6.11] 강제 손절 컷 (Hard Stop-Loss):** 평단가 대비 수익률이 **`-15%`** 도달 시, 60일선 추세가 살아있더라도 계좌의 치명적 손상을 막기 위해 즉각적인 기계적 손절을 집행합니다.
+        2.  **강제 손절 컷 (Hard Stop-Loss):** 평단가 대비 수익률이 **`-15%`** 도달 시, 60일선 추세가 살아있더라도 계좌의 치명적 손상을 막기 위해 즉각적인 기계적 손절을 집행합니다.
     
     ### 🚀 [전략 B] 중소형주 (Satellite) - 스마트 수급 눌림목
     시장에 강력한 테마가 형성되어 돈이 몰린 주도주를 필터링하고, 해당 종목이 단기 조정을 받을 때(눌림목) 진입하여 기술적 반등을 노립니다.
@@ -1885,7 +1787,7 @@ with tab5:
     *   **🚨 VIX 공포지수 브레이크 (VIX Safe):**
         *   미국 S&P 500 VIX 지수가 **`30`**을 초과하는 시스템 리스크 구간에서는 모든 신규 매수를 전면 동결합니다.
     *   **🔥 극한의 역발상 매수 (VIX Contrarian):**
-        *   VIX 지수가 **`25 이상`**으로 치솟아 투매가 발생했으나, 단기 이동평균선(3일선)을 깨고 내려오는 **'공포 극점 확인 후 회복 초기'** 단계에서는, 시장의 낙폭 과대 반등을 노려 즉시 공격적 매수를 집행합니다. **[V6.11] 단, 종목 자체의 장기 추세인 MA200(200일선 방어) 조건은 어떠한 경우에도 무시하지 않도록 엄격히 통제합니다.**
+        *   VIX 지수가 **`25 이상`**으로 치솟아 투매가 발생했으나, 단기 이동평균선(3일선)을 깨고 내려오는 **'공포 극점 확인 후 회복 초기'** 단계에서는, 시장의 낙폭 과대 반등을 노려 즉시 공격적 매수를 집행합니다. 단, 종목 자체의 장기 추세인 MA200(200일선 방어) 조건은 어떠한 경우에도 무시하지 않도록 엄격히 통제합니다.
     *   **🐃 강세장 자금 풀 부스터 (Bull Market Boost):**
         *   KOSPI/KOSDAQ 지수가 60일 이동평균선 위에 있는 완연한 강세장(Bull Market)으로 판별될 경우, 엔진이 자동으로 리스크를 낮게 평가하여 종목당 투입 자금 한도를 **기본값의 1.5배**로 확장합니다. (예: 대형주 35% -> 52.5% 상향)
 
@@ -1915,11 +1817,11 @@ with tab5:
 
     ## 6. 🚨 통합 페일세이프 관제 및 논리적 망분리
     시스템의 100% 무인 운용과 사용자의 주도권을 동시에 보장하는 최첨단 보안 및 관제 기능이 결합되어 있습니다.
-    *   **[V6.11] 수동 보유 종목의 논리적 격리(Logical Isolation):** 사용자가 직접 증권사 앱을 통해 매수하여 계좌에 보유하고 있는 장기 가치 투자 종목 등은 시스템 DB(`p_data['stocks']`)와 교차 검증하여, 봇이 매수한 종목이 아닐 경우 봇의 매도 관제 대상에서 철저하게 분리 및 보호합니다. 
-    *   **시뮬레이션 통합 유니버스 (Merged Universe Testing):** UI 편의를 위해 매수 완료된 종목을 관심종목 탭에서 숨기더라도, AI 시뮬레이터는 **관심종목과 실전 보유 종목을 완벽히 하나로 통합(Merge)하여 백테스트를 수행**합니다. 이로써 논리적 누락 없는 100% 무결한 성과 검증이 가능합니다.
-    *   **동적 유니버스 블라인드 백테스트 (Dynamic Universe Blind Test):** 사용자가 선택해 둔 '현재 생존 종목'이 아니라, **과거 특정 시점의 KOSPI/KOSDAQ 시가총액 상위 50종목 전체를 대상으로 AI가 스스로 종목을 찾고 샀다 팔았다를 반복하는 실전과 가장 유사한 시뮬레이션 기능**이 탭 4에 탑재되었습니다.
-    *   **초고속 멀티스레딩 스캐너 (Parallel Engine):** 파이썬의 `concurrent.futures`를 활용한 멀티스레딩 병렬 처리 아키텍처를 스캐너 및 백테스트 전반에 도입하여, 100개의 종목을 하나씩 스캔하던 기존 방식의 병목을 해결하고 **검색 속도를 기존 대비 10배 이상 극적으로 단축**시켰습니다.
-    *   **하이브리드 종목 큐레이션 (Hybrid Curation):** AI 스캐너에만 의존하지 않고, 사용자가 직접 검색창에 '종목명' 또는 '종목코드'를 입력하여 수동으로 발굴한 종목을 관심종목 유니버스에 편입시킬 수 있습니다.
+    *   **[V6.13] 무인 매매 엔진 망분리 (Execution Decoupling):** 불안정한 브라우저 세션에 의존하던 기존의 가짜 오토파일럿(Javascript Reload)을 완벽히 폐기하고, UI(조회/설정)와 백그라운드 봇(주문 집행)을 물리적/논리적으로 분리하는 아키텍처로 개편했습니다. 브라우저를 닫아도 백그라운드 엔진이 24시간 안전하게 계좌를 감시합니다.
+    *   **공통 두뇌 사용 (Single Source of Truth):** `quant_engine.py`라는 단일 파이썬 파일에 매매 로직을 격리하여, UI와 백그라운드 봇이 100% 똑같은 판정 기준을 갖도록 동기화했습니다.
+    *   **수동 보유 종목의 논리적 격리(Logical Isolation):** 사용자가 직접 증권사 앱을 통해 매수하여 계좌에 보유하고 있는 장기 가치 투자 종목 등은 시스템 DB(`p_data['stocks']`)와 교차 검증하여, 봇이 매수한 종목이 아닐 경우 봇의 매도 관제 대상에서 철저하게 분리 및 보호합니다. 
+    *   **시뮬레이션 통합 유니버스 (Merged Universe Testing):** AI 시뮬레이터는 관심종목과 실전 보유 종목을 완벽히 하나로 통합(Merge)하여 백테스트를 수행합니다. 이로써 논리적 누락 없는 100% 무결한 성과 검증이 가능합니다.
+    *   **초고속 멀티스레딩 스캐너 (Parallel Engine):** 파이썬의 `concurrent.futures`를 활용한 멀티스레딩 병렬 처리 아키텍처를 스캐너 및 백테스트 전반에 도입하여 검색 속도를 기존 대비 10배 이상 극적으로 단축시켰습니다.
     *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다.
     *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
     """, unsafe_allow_html=True)
