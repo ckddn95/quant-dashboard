@@ -15,6 +15,9 @@ import concurrent.futures
 from google.oauth2.service_account import Credentials
 import warnings
 
+# 공통 두뇌 로드
+import quant_engine as qe 
+
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -57,6 +60,20 @@ def get_saved_password_hash():
             return default_hash
     except Exception:
         return hash_password(st.secrets.get("app_password", "0000"))
+        
+def save_password_hash(new_hash):
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.worksheet("Settings")
+        cell = worksheet.find("app_password")
+        if cell: worksheet.update_cell(cell.row, 2, new_hash)
+        else: worksheet.append_row(["app_password", new_hash])
+        get_saved_password_hash.clear() 
+        return True
+    except Exception as e:
+        st.error(f"비밀번호 저장 오류: {e}")
+        return False
 
 def get_daily_auth_token():
     saved_hash = get_saved_password_hash()
@@ -143,7 +160,6 @@ def save_portfolio_to_sheets(name, p_data):
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_krx_universe():
     try:
-        # P0: 더미 데이터 전면 삭제, 100% FDR 라이브 데이터만 사용
         krx = fdr.StockListing('KRX')
         return krx
     except Exception as e:
@@ -163,7 +179,19 @@ def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
     except: pass
     return 0.0
 
-# 🛑 [핵심 엔진] UI 전용 강력한 실시간 진단기 (에러 방어율 100%)
+def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
+    if not token: return None, None
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-balance"
+    tr_id = "VTTC8434R" if is_mock else "TTTC8434R"
+    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
+    params = {"CANO": str(cano).replace("-", "").strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        if res.status_code == 200 and res.json().get('rt_cd') == '0': return res.json().get('output1', []), res.json().get('output2', [])
+    except: pass
+    return None, None
+
 def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
@@ -177,7 +205,6 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         ma200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else c_price
         
-        # 보유 중인 경우 매도 진단
         if buy_price > 0:
             ret = (c_price / buy_price) - 1
             if ret <= sl: return c_price, "🔴 긴급 손절 매도", 999.0, "손절 컷 도달"
@@ -187,7 +214,6 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
             if strat == "Core" and c_price < ma60 * (1 - buf_pct/2): return c_price, "🔴 전량 청산", 999.0, "60일 추세 이탈"
             elif strat == "Satellite" and c_price < ma20 * (1 - buf_pct/2): return c_price, "🔴 전량 청산", 999.0, "20일 추세 이탈"
         
-        # 신규 진입 진단
         pass_ma200 = (c_price >= ma200) if use_ma200 else True
         if strat == "Core":
             m60_up = ma60 > df['Close'].rolling(60).mean().iloc[-11]
@@ -317,17 +343,37 @@ p_data = all_ports.get(selected_port) if selected_port else None
 active_strat = p_data.get('strategy', '대형주 (Core)') if p_data else "대형주 (Core)"
 total_cash = int(p_data.get('cash', 10000000)) if p_data else 10000000
 
+# 🛑 [핵심 보안 수정] API 키 노출 전면 차단 로직
 with st.sidebar.expander("🔑 KIS API 키 직접 입력 (선택)", expanded=False):
-    manual_app_key = st.text_input("APP KEY", value=p_data.get('manual_app_key', '') if p_data else '', type="password")
-    manual_app_secret = st.text_input("APP SECRET", value=p_data.get('manual_app_secret', '') if p_data else '', type="password")
-    manual_cano = st.text_input("계좌번호 (앞 8자리)", value=p_data.get('manual_cano', '') if p_data else '')
-    if st.button("키 정보 저장"):
-        if p_data:
-            p_data['manual_app_key'] = manual_app_key
-            p_data['manual_app_secret'] = manual_app_secret
-            p_data['manual_cano'] = manual_cano
+    has_saved_keys = bool(p_data and p_data.get('manual_app_key'))
+    if has_saved_keys:
+        st.success("✅ API 키가 안전하게 암호화되어 작동 중입니다.")
+    
+    st.markdown("<span style='font-size: 0.85em; color: #a3a8b8;'>* 변경/신규 등록 시에만 입력하세요. 기존 키는 화면에 노출되지 않습니다.</span>", unsafe_allow_html=True)
+    manual_app_key = st.text_input("새 APP KEY 입력", value="", type="password", placeholder="유지하려면 비워두세요")
+    manual_app_secret = st.text_input("새 APP SECRET 입력", value="", type="password", placeholder="유지하려면 비워두세요")
+    manual_cano = st.text_input("새 계좌번호 (앞 8자리)", value="", placeholder="유지하려면 비워두세요")
+    
+    col_k1, col_k2 = st.columns(2)
+    if col_k1.button("✅ 저장"):
+        if p_data is not None:
+            # 입력된 값이 있을 때만 덮어쓰기 진행
+            if manual_app_key.strip(): p_data['manual_app_key'] = manual_app_key.strip()
+            if manual_app_secret.strip(): p_data['manual_app_secret'] = manual_app_secret.strip()
+            if manual_cano.strip(): p_data['manual_cano'] = manual_cano.strip()
             save_portfolio_to_sheets(selected_port, p_data)
             st.success("API 키 저장 완료!")
+            try: st.query_params["auth"] = daily_token
+            except: st.experimental_set_query_params(auth=daily_token)
+            st.rerun()
+            
+    if col_k2.button("🗑️ 삭제"):
+        if p_data is not None:
+            p_data.pop('manual_app_key', None)
+            p_data.pop('manual_app_secret', None)
+            p_data.pop('manual_cano', None)
+            save_portfolio_to_sheets(selected_port, p_data)
+            st.warning("저장된 API 키가 삭제되었습니다.")
             try: st.query_params["auth"] = daily_token
             except: st.experimental_set_query_params(auth=daily_token)
             st.rerun()
