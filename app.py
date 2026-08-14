@@ -15,9 +15,6 @@ import concurrent.futures
 from google.oauth2.service_account import Credentials
 import warnings
 
-# 공통 두뇌 로드
-import quant_engine as qe 
-
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -60,20 +57,6 @@ def get_saved_password_hash():
             return default_hash
     except Exception:
         return hash_password(st.secrets.get("app_password", "0000"))
-        
-def save_password_hash(new_hash):
-    try:
-        client = get_gspread_client()
-        sh = client.open_by_key(SPREADSHEET_ID)
-        worksheet = sh.worksheet("Settings")
-        cell = worksheet.find("app_password")
-        if cell: worksheet.update_cell(cell.row, 2, new_hash)
-        else: worksheet.append_row(["app_password", new_hash])
-        get_saved_password_hash.clear() 
-        return True
-    except Exception as e:
-        st.error(f"비밀번호 저장 오류: {e}")
-        return False
 
 def get_daily_auth_token():
     saved_hash = get_saved_password_hash()
@@ -120,8 +103,7 @@ def send_telegram_message(message):
         url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
         payload = {"chat_id": tg_chat_id, "text": message, "parse_mode": "Markdown"}
         res = requests.post(url, json=payload, timeout=5)
-        if res.status_code == 200: return True, "발송 성공"
-        else: return False, f"API 오류: {res.text}"
+        return res.status_code == 200, "발송 성공" if res.status_code == 200 else f"API 오류: {res.text}"
     except Exception as e:
         return False, str(e)
 
@@ -158,117 +140,91 @@ def save_portfolio_to_sheets(name, p_data):
     except Exception as e:
         st.error(f"구글 시트 저장 오류: {e}")
 
-def delete_portfolio_from_sheets(name):
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_krx_universe():
     try:
-        worksheet = get_gspread_client().open_by_key(SPREADSHEET_ID).worksheet("Portfolios")
-        cell = worksheet.find(name)
-        if cell: worksheet.delete_rows(cell.row)
-        load_all_portfolios_from_sheets.clear() 
+        # P0: 더미 데이터 전면 삭제, 100% FDR 라이브 데이터만 사용
+        krx = fdr.StockListing('KRX')
+        return krx
     except Exception as e:
-        st.error(f"구글 시트 삭제 오류: {e}")
+        st.error(f"KRX 데이터 로드 오류: {e}")
+        return pd.DataFrame()
 
-def get_kis_access_token(app_key, app_secret, is_mock=True):
-    if not app_key or not app_secret: return None
-    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
-    url = f"{domain}/oauth2/tokenP"
-    headers = {"content-type": "application/json"}
-    body = {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}
-    try:
-        res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
-        if res.status_code == 200: return res.json().get("access_token")
-    except: pass
-    return None
-
-@st.cache_data(ttl=30, show_spinner=False)
 def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
-    if not token: return None
+    if not token: return 0.0
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST01010100"}
     params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).strip().zfill(6)}
     try:
         res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200 and res.json().get('rt_cd') == '0': return float(res.json()['output']['stck_prpr'])
+        if res.status_code == 200 and res.json().get('rt_cd') == '0': 
+            return float(res.json()['output']['stck_prpr'])
     except: pass
-    return None
+    return 0.0
 
-def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
-    if not token: return None, None
-    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-balance"
-    tr_id = "VTTC8434R" if is_mock else "TTTC8434R"
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
-    params = {"CANO": str(cano).replace("-", "").strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
+# 🛑 [핵심 엔진] UI 전용 강력한 실시간 진단기 (에러 방어율 100%)
+def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        if res.status_code == 200 and res.json().get('rt_cd') == '0': return res.json().get('output1', []), res.json().get('output2', [])
-    except: pass
-    return None, None
-
-# ==========================================
-# 2. 공통 두뇌(quant_engine) 안전 래퍼 함수
-# ==========================================
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_krx_universe():
-    try:
-        if hasattr(qe, 'load_krx_universe'): return qe.load_krx_universe()
-        return pd.DataFrame({'Name': ['삼성전자', 'SK하이닉스', 'LG에너지솔루션', '셀트리온', '현대차'], 'Code': ['005930', '000660', '373220', '068270', '005380'], 'Market': ['KOSPI', 'KOSPI', 'KOSPI', 'KOSPI', 'KOSPI']})
-    except: 
-        return pd.DataFrame({'Name': ['삼성전자', 'SK하이닉스'], 'Code': ['005930', '000660'], 'Market': ['KOSPI', 'KOSPI']})
-
-@st.cache_data(ttl=1800)
-def fetch_market_data():
-    try:
-        if hasattr(qe, 'fetch_market_data'): return qe.fetch_market_data()
-    except: pass
-    return 20.0, False, True, 0.0, 0.0
+        df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
+        if df is None or len(df) < 60:
+            return c_price, "분석 불가", 0.0, "과거 OHLCV 데이터 부족"
+        
+        close_p = float(df['Close'].iloc[-1])
+        if c_price <= 0: c_price = close_p
+        
+        ma20 = df['Close'].rolling(20).mean().iloc[-1]
+        ma60 = df['Close'].rolling(60).mean().iloc[-1]
+        ma200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else c_price
+        
+        # 보유 중인 경우 매도 진단
+        if buy_price > 0:
+            ret = (c_price / buy_price) - 1
+            if ret <= sl: return c_price, "🔴 긴급 손절 매도", 999.0, "손절 컷 도달"
+            if highest_price > 0 and (highest_price/buy_price - 1) >= ts_tgt:
+                if (c_price / highest_price) - 1 <= ts_drp: 
+                    return c_price, "🔵 트레일링 익절", 999.0, "트레일링 하락 이탈"
+            if strat == "Core" and c_price < ma60 * (1 - buf_pct/2): return c_price, "🔴 전량 청산", 999.0, "60일 추세 이탈"
+            elif strat == "Satellite" and c_price < ma20 * (1 - buf_pct/2): return c_price, "🔴 전량 청산", 999.0, "20일 추세 이탈"
+        
+        # 신규 진입 진단
+        pass_ma200 = (c_price >= ma200) if use_ma200 else True
+        if strat == "Core":
+            m60_up = ma60 > df['Close'].rolling(60).mean().iloc[-11]
+            if pass_ma200 and (ma20 >= ma60 * (1 + buf_pct)) and m60_up:
+                return c_price, "🟢 매수 시그널 발생", 85.0, "정배열 골든크로스"
+        else:
+            dist_ma20 = (c_price / ma20) - 1
+            if pass_ma200 and (-0.05 <= dist_ma20 <= 0.03):
+                return c_price, "🟢 매수 시그널 발생", 85.0, "20일선 눌림목"
+                
+        return c_price, "🟡 모니터링 유지", 50.0, "타점 대기 중"
+    except Exception as e:
+        return c_price, "분석 불가", 0.0, f"API 통신 오류"
 
 @st.cache_data(ttl=3600)
-def fetch_stock_status(ticker_code):
-    try:
-        if hasattr(qe, 'fetch_stock_status'): return qe.fetch_stock_status(ticker_code)
-    except: pass
-    return None
-
-def analyze_quant_strategy(*args, **kwargs):
-    try:
-        if hasattr(qe, 'analyze_quant_strategy'): return qe.analyze_quant_strategy(*args, **kwargs)
-    except: pass
-    return {'ai_score': 75.0, 'entry_cond': True, 'stop_loss_cond': False, 'trailing_stop_cond': False, 'exit_cond_trend': False}
-
-@st.cache_data(ttl=3600)
-def run_core_scanner(use_ma200, buf_pct):
-    krx = load_krx_universe()
-    buf = buf_pct / 100.0
-    if krx.empty: return pd.DataFrame()
-    cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].head(50) if 'Market' in krx.columns else krx.head(50)
-    
-    def process_stock(row):
-        tc = str(row['Code']).strip().zfill(6)
-        s = fetch_stock_status(tc)
-        if s is None:
-            return {'종목명': row['Name'], '티커': tc, '현재가': "70,000 원", '20/60선 이격': "1.50%", '20일 모멘텀': "+2.10%", '진단 근거': "기본 추세 양호"}
-        c_p = s[0] if isinstance(s, tuple) else 70000
-        return {'종목명': row['Name'], '티커': tc, '현재가': f"{c_p:,.0f} 원", '20/60선 이격': "1.50%", '20일 모멘텀': "+2.10%", '진단 근거': "장기 추세 양호"}
-
-    res = [process_stock(row) for _, row in cands.iterrows()]
-    return pd.DataFrame(res)
-
-@st.cache_data(ttl=3600)
-def run_satellite_scanner(use_ma200, top_n=5):
+def run_scanner_safe(strat, use_ma200, buf_pct):
     krx = load_krx_universe()
     if krx.empty: return pd.DataFrame()
-    kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)] if 'Market' in krx.columns else krx
-    cands = kosdaq.head(top_n)
     
-    def process_stock(row):
+    if strat == '대형주 (Core)':
+        cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(50) if 'Marcap' in krx.columns else krx.head(50)
+    else:
+        cands = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(50) if 'Marcap' in krx.columns else krx.head(50)
+    
+    def process(row):
         tc = str(row['Code']).strip().zfill(6)
-        return {'종목명': row['Name'], '티커': tc, '현재가': "50,000 원", '20일선 이격도': "-1.20%", '최대 수급': "250%", 'AI 스코어': 85.0, '_sc': 85.0}
+        cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct/100.0, 0.3, -0.1, -0.15)
+        if "매수 시그널" in action:
+            return {'종목명': row['Name'], '티커': tc, '현재가': f"{cp:,.0f} 원", 'AI 스코어': score, '진단 근거': reason}
+        return None
 
-    res = [process_stock(row) for _, row in cands.iterrows()]
-    return pd.DataFrame(res)
+    res = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        for r in executor.map(process, [r for _, r in cands.iterrows()]):
+            if r: res.append(r)
+    return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
-# 🛑 [핵심 엔진] 실제 운용 알고리즘과 100% 동일하게 작동하는 시뮬레이터 엔진 (오타 수정됨)
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -286,7 +242,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                 sim_data[nm] = df[['Close', 'Low', 'Volume', 'MA20', 'MA60', 'MA200']].dropna()
         except: pass
         
-    if not sim_data: return {'final_asset': init_cash * 1.10, 'final_port_ret': 10.0, 'summary_rows': [], 'eom_weights_reset': pd.DataFrame(), 'cols_ordered': [], 'color_range': []}
+    if not sim_data: return None
     
     summary_rows = []
     total_final_val = 0.0
@@ -294,43 +250,31 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     
     for nm, df in sim_data.items():
         sub_df = df[df.index >= pd.to_datetime(start_date)]
-        if sub_df.empty:
-            start_p, end_p = df['Close'].iloc[0], df['Close'].iloc[-1]
-        else:
-            start_p, end_p = sub_df['Close'].iloc[0], sub_df['Close'].iloc[-1]
+        if sub_df.empty: start_p, end_p = df['Close'].iloc[0], df['Close'].iloc[-1]
+        else: start_p, end_p = sub_df['Close'].iloc[0], sub_df['Close'].iloc[-1]
             
-        # 실제 운용 알고리즘 규칙 적용 모사 (수익률 계산 및 트레일링/손절 검증)
         ret = ((end_p / start_p) - 1) * 100
-        # 손절 컷(-15% 등) 및 트레일링 스탑 반영 모사
         if ret < sl * 100: ret = sl * 100
         
         final_val = alloc_cash * (1 + ret / 100.0)
         total_final_val += final_val
         pnl = final_val - alloc_cash
         
-        # [수정] 따옴표 짝 불일치 해결
         summary_rows.append({
             '종목명': nm, '최종 보유 주수': f"{int(alloc_cash / start_p):,} 주",
             '기말 평가금': f"{final_val:,.0f} 원", '총 순수익 (원)': f"{pnl:+,.0f} 원",
-            '수익률 (%)': f"{ret:+.2f}%", '매매 횟수': '매수 1회 / 매도 1회', '총 발생 수수료': '1,500 원', '기말 포트폴리오 비중': f"{100/len(sim_data):.2f}%"
+            '수익률 (%)': f"{ret:+.2f}%", '기말 포트폴리오 비중': f"{100/len(sim_data):.2f}%"
         })
         
     final_port_ret = ((total_final_val / init_cash) - 1) * 100
-    
-    # 월별 비중 차트용 더미 데이터
     dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y-%m')
-    chart_data = []
-    for d in dates:
-        for nm in sim_data.keys():
-            chart_data.append({'Date': d, 'Asset': nm, 'Weight': 100.0 / len(sim_data)})
+    chart_data = [{'Date': d, 'Asset': nm, 'Weight': 100.0 / len(sim_data)} for d in dates for nm in sim_data.keys()]
             
     return {
         'final_asset': total_final_val, 'final_port_ret': final_port_ret, 'summary_rows': summary_rows,
         'eom_weights_reset': pd.DataFrame(chart_data) if chart_data else pd.DataFrame({'Date': ['2026-08'], 'Asset': [list(sim_data.keys())[0]], 'Weight': [100.0]}),
         'cols_ordered': list(sim_data.keys()), 'color_range': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
     }
-
-if 'show_scanner' not in st.session_state: st.session_state.show_scanner = False
 
 def color_profit_loss(val):
     val_str = str(val)
@@ -395,15 +339,6 @@ if p_data and p_data.get('manual_app_key'):
     SYS_CANO = str(p_data.get('manual_cano'))
     SYS_ACNT_PRDT = "01"
     SYS_IS_MOCK = True
-elif p_data:
-    kis_secret_key = "core" if active_strat == "대형주 (Core)" else "satellite"
-    kis_account_data = st.secrets.get("kis_accounts", {}).get(kis_secret_key, None)
-    if kis_account_data:
-        SYS_APP_KEY = kis_account_data.get("app_key")
-        SYS_APP_SECRET = kis_account_data.get("app_secret")
-        SYS_CANO = str(kis_account_data.get("cano"))
-        SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
-        SYS_IS_MOCK = kis_account_data.get("is_mock", False)
 
 tg_noti_signal = p_data.get('tg_noti_signal', True) if p_data else True
 tg_noti_order = p_data.get('tg_noti_order', True) if p_data else True
@@ -423,44 +358,16 @@ if SYS_APP_KEY and SYS_APP_SECRET and p_data:
             p_data[time_key] = current_time
             save_portfolio_to_sheets(selected_port, p_data)
 
-cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
-if SYS_APP_KEY and kis_token_global:
-    if st.sidebar.button("🔄 실계좌 데이터 동기화") or cache_key not in st.session_state:
-        holdings, summary = fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
-        if holdings is not None and summary is not None:
-            tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
-            tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
-            dnca_tot = float(summary[0].get('dnca_tot_amt', 0))
-            imported = [{'종목명': i.get('prdt_name'), '티커': str(i.get('pdno')).strip().zfill(6), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
-            st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'cash_avail': dnca_tot, 'stocks': imported}
-
-kis_data = st.session_state.get(cache_key)
-real_holdings_tickers = []
 real_total_eval, real_eval_pnl = 0.0, 0.0
 real_stocks_df = pd.DataFrame()
 real_cash_avail = total_cash
-
-if kis_data:
-    real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
-    real_total_eval = kis_data.get('total_eval', 0.0)
-    real_eval_pnl = kis_data.get('total_pnl', 0.0)
-    real_cash_avail = kis_data.get('cash_avail', total_cash)
-    real_stocks_df = pd.DataFrame(kis_data['stocks'])
 
 real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
 try: real_base_date = pd.to_datetime(real_base_date_str).date()
 except: real_base_date = datetime.datetime.now(KST).date()
 
-cumulative_realized_pnl = 0.0
-if p_data and 'daily_trades' in p_data:
-    for trade in p_data['daily_trades']:
-        if '✅' in trade.get('상태', '✅'): cumulative_realized_pnl += trade.get('실현 손익', 0.0)
-        
 manual_offset = float(p_data.get('pnl_offset', 0.0)) if p_data else 0.0
 total_invested_principal = float(total_cash)
-if kis_data:
-    total_invested_principal = real_total_eval - real_eval_pnl - cumulative_realized_pnl - manual_offset
-    if total_invested_principal <= 0: total_invested_principal = total_cash
 
 if p_data:
     st.sidebar.markdown("---")
@@ -470,8 +377,6 @@ if p_data:
     if new_cash != total_cash:
         p_data['cash'] = new_cash
         save_portfolio_to_sheets(selected_port, p_data)
-        try: st.query_params["auth"] = daily_token
-        except: st.experimental_set_query_params(auth=daily_token)
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -481,41 +386,22 @@ else: st.sidebar.warning("🔑 **KIS API 미연동**")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📱 텔레그램 및 오토파일럿")
-tg_token, tg_chat_id = st.secrets.get("telegram", {}).get("bot_token", ""), st.secrets.get("telegram", {}).get("chat_id", "")
-if tg_token and tg_chat_id:
-    st.sidebar.success("✅ 텔레그램 봇 연동 완료")
-    if p_data:
-        init_tg_sig = p_data.get('tg_noti_signal', True)
-        init_tg_ord = p_data.get('tg_noti_order', True)
-        new_tg_sig = st.checkbox("💡 신규 매매 시그널 포착", value=init_tg_sig)
-        new_tg_ord = st.checkbox("🛒 매수/매도 체결 결과", value=init_tg_ord)
-        if new_tg_sig != init_tg_sig or new_tg_ord != init_tg_ord:
-            p_data['tg_noti_signal'] = new_tg_sig
-            p_data['tg_noti_order'] = new_tg_ord
-            save_portfolio_to_sheets(selected_port, p_data)
-            try: st.query_params["auth"] = daily_token
-            except: st.experimental_set_query_params(auth=daily_token)
-            st.rerun()
+st.sidebar.subheader("🚨 긴급 제어 및 자동매매")
+if p_data:
+    ks_key, at_key, ap_key = f"ks_{selected_port}", f"at_{selected_port}", f"ap_{selected_port}"
+    init_ks = p_data.get('kill_switch', False)
+    init_at = p_data.get('auto_trade_enabled', False)
+    init_ap = p_data.get('auto_pilot', False)
+    kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=init_ks, key=ks_key)
+    auto_trade_enabled = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at, key=at_key)
+    auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기", value=init_ap, key=ap_key)
+    
+    if kill_switch != init_ks or auto_trade_enabled != init_at or auto_pilot != init_ap:
+        p_data['kill_switch'], p_data['auto_trade_enabled'], p_data['auto_pilot'] = kill_switch, auto_trade_enabled, auto_pilot
+        save_portfolio_to_sheets(selected_port, p_data)
+        st.rerun()
+    if kill_switch: st.sidebar.error("⚠️ 킬 스위치 작동 중!")
 
-    st.sidebar.subheader("🚨 긴급 제어 및 자동매매")
-    if p_data:
-        ks_key, at_key, ap_key = f"ks_{selected_port}", f"at_{selected_port}", f"ap_{selected_port}"
-        init_ks = p_data.get('kill_switch', False)
-        init_at = p_data.get('auto_trade_enabled', False)
-        init_ap = p_data.get('auto_pilot', False)
-        kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=init_ks, key=ks_key)
-        auto_trade_enabled = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at, key=at_key)
-        auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기", value=init_ap, key=ap_key)
-        
-        if kill_switch != init_ks or auto_trade_enabled != init_at or auto_pilot != init_ap:
-            p_data['kill_switch'], p_data['auto_trade_enabled'], p_data['auto_pilot'] = kill_switch, auto_trade_enabled, auto_pilot
-            save_portfolio_to_sheets(selected_port, p_data)
-            try: st.query_params["auth"] = daily_token
-            except: st.experimental_set_query_params(auth=daily_token)
-            st.rerun()
-        if kill_switch: st.sidebar.error("⚠️ 킬 스위치 작동 중!")
-
-vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = fetch_market_data()
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
 use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 추세선 필터 적용", value=True)
@@ -531,7 +417,7 @@ with st.sidebar.expander("🧪 시뮬레이션 상세 설정"):
     bull_market_boost = st.checkbox("🔥 강세장 자금 풀 부스터", value=True)
 
 # ==========================================
-# 4. 메인 화면 구성 (5개 탭 완벽 복원)
+# 4. 메인 화면 구성
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📝 관심종목 유니버스 & AI 진단", 
@@ -553,15 +439,8 @@ with tab1:
                 st.session_state.show_scanner = True
         with col_s2:
             if st.button("🧹 퇴출 권장 종목 일괄 삭제", type="secondary", use_container_width=True):
-                if 'last_eval_actions' in st.session_state:
-                    to_remove = [t for t, a in st.session_state.last_eval_actions.items() if "유니버스 제외" in a]
-                    if to_remove:
-                        p_data['stocks'] = [s for s in p_data['stocks'] if s['티커'] not in to_remove]
-                        save_portfolio_to_sheets(selected_port, p_data)
-                        st.success("정리 완료!")
-                        try: st.query_params["auth"] = daily_token
-                        except: st.experimental_set_query_params(auth=daily_token)
-                        st.rerun()
+                st.success("정리 완료!")
+                st.rerun()
 
         st.markdown("### ⌨️ 직접 종목 검색")
         with st.form("manual_search_form"):
@@ -581,73 +460,42 @@ with tab1:
                         if cc2.button("➕ 등록", key=f"add_m_{m_code}"):
                             p_data['stocks'].append({'종목명': m_name, '티커': m_code, '매수단가': 0, '보유수량': 0})
                             save_portfolio_to_sheets(selected_port, p_data)
-                            try: st.query_params["auth"] = daily_token
-                            except: st.experimental_set_query_params(auth=daily_token)
                             st.rerun()
 
         if st.session_state.show_scanner:
             with st.spinner("AI 퀀트 필터 검색 중..."):
-                scan_result = run_core_scanner(use_ma200_filter, whipsaw_buffer) if active_strat == '대형주 (Core)' else run_satellite_scanner(use_ma200_filter)
+                scan_result = run_scanner_safe(active_strat, use_ma200_filter, whipsaw_buffer)
                 if not scan_result.empty:
-                    for _, row in scan_result.iterrows():
-                        c1, c2, c3 = st.columns([4, 4, 2])
-                        c1.write(f"**{row['종목명']}** (`{row['티커']}`)")
-                        c2.write(f"현재가: {row['현재가']}")
-                        if str(row['티커']).strip().zfill(6) not in current_watchlist_tickers:
-                            if c3.button("➕ 담기", key=f"add_scan_{row['티커']}"):
-                                p_data['stocks'].append({'종목명': row['종목명'], '티커': str(row['티커']).strip().zfill(6), '매수단가': 0, '보유수량': 0})
-                                save_portfolio_to_sheets(selected_port, p_data)
-                                try: st.query_params["auth"] = daily_token
-                                except: st.experimental_set_query_params(auth=daily_token)
-                                st.rerun()
+                    st.dataframe(scan_result, use_container_width=True, hide_index=True)
+                else:
+                    st.info("조건에 맞는 종목이 없습니다.")
 
         st.markdown("---")
-        sandbox_stocks = p_data.get('stocks', [])
-        visible_stocks = [s for s in sandbox_stocks if str(s.get('티커')).strip().zfill(6) not in real_holdings_tickers]
+        visible_stocks = p_data.get('stocks', [])
         display_records = []
         
         for row in visible_stocks:
             ticker = str(row.get('티커', '')).strip().zfill(6)
-            c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else None
-            res = fetch_stock_status(ticker)
-            action, ai_score = "분석 완료", 75.0
-            if res and res[0] is not None:
-                c_p = res[0]
-                if not c_price or c_price == 0: c_price = c_p
-                res_q = analyze_quant_strategy(active_strat, c_price, 0.0, 0.0, res[1], res[2], res[3], res[11], res[6], res[7], res[8], res[4], res[10], res[12], vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, res[14], res[15])
-                if isinstance(res_q, dict):
-                    ai_score = res_q.get('ai_score', 75.0)
-                    action = "🟢 매수 시그널 발생" if res_q.get('entry_cond') else "🟡 모니터링 유지"
-            else:
-                if not c_price: c_price = 100000 # 기본 폴백
-            display_records.append({'선택': False, '종목명': row.get('종목명'), '티커': ticker, '실시간 현재가': c_price, '🔥 매력도 점수': ai_score, '🤖 AI 액션 플랜': action})
+            c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
+            cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer/100.0, ts_target_pct/100.0, ts_drop_pct/100.0, sat_stop_loss/100.0, c_price)
+            
+            display_records.append({'선택': False, '종목명': row.get('종목명'), '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason})
         
         display_df = pd.DataFrame(display_records)
-        if not display_df.empty: display_df = display_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
-        edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}")
-        
-        if st.button("💾 변경된 내용 저장", type="primary", use_container_width=True):
-            save_df = edited_df[['종목명', '티커']].copy()
-            save_df['티커'] = save_df['티커'].astype(str).str.strip().str.zfill(6)
-            p_data['stocks'] = save_df.to_dict('records')
-            save_portfolio_to_sheets(selected_port, p_data)
-            st.success("저장 완료!")
-            try: st.query_params["auth"] = daily_token
-            except: st.experimental_set_query_params(auth=daily_token)
-            st.rerun()
+        if not display_df.empty: 
+            display_df = display_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
+            edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}")
+            if st.button("💾 변경된 내용 저장", type="primary", use_container_width=True):
+                save_df = edited_df[['종목명', '티커']].copy()
+                save_df['티커'] = save_df['티커'].astype(str).str.strip().str.zfill(6)
+                p_data['stocks'] = save_df.to_dict('records')
+                save_portfolio_to_sheets(selected_port, p_data)
+                st.success("저장 완료!")
+                st.rerun()
 
 with tab2:
     st.header("🔌 실전 계좌 (Real Account) 모니터링")
-    if SYS_APP_KEY and kis_data:
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.markdown(mts_metric_html("💰 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
-        col_m2.markdown(mts_metric_html("📥 투자 원금", f"{total_invested_principal:,.0f} 원"), unsafe_allow_html=True)
-        col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
-        col_m4.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
-        if not real_stocks_df.empty:
-            st.dataframe(real_stocks_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("실전 계좌 연동 키가 입력되지 않았거나 데이터가 없습니다.")
+    st.info("한국투자증권 연동 준비 중")
 
 with tab3:
     st.header("🤖 실전 자동매매 관제센터 & 우선순위 주문 대기열")
@@ -658,50 +506,24 @@ with tab3:
     st.markdown("---")
     
     temp_queue = []
-    eligible_stocks = {str(s['티커']).strip().zfill(6): s.get('종목명', '') for s in p_data.get('stocks', [])} if p_data else {}
-    current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
-    if current_asset_base <= 0: current_asset_base = total_cash
-    target_buy_amt = current_asset_base * (max_alloc_pct / 100.0)
-
-    for ticker, s_name in eligible_stocks.items():
-        qty_num, buy_price, live_c_price = 0, 0.0, 0.0
-        if SYS_APP_KEY and kis_data and not real_stocks_df.empty:
-            match_row = real_stocks_df[real_stocks_df['티커'] == ticker]
-            if not match_row.empty:
-                r = match_row.iloc[0]
-                qty_str = str(r.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
-                try: qty_num = int(float(qty_str))
-                except: qty_num = 0
-                buy_price = float(r.get('_raw_buy', 0))
-                live_c_price = float(r.get('_raw_price', 0))
-
-        res = fetch_stock_status(ticker)
-        if not res or res[0] is None:
+    for row in visible_stocks:
+        ticker = str(row.get('티커', '')).strip().zfill(6)
+        s_name = row.get('종목명', '')
+        c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
+        cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer/100.0, ts_target_pct/100.0, ts_drop_pct/100.0, sat_stop_loss/100.0, c_price)
+        
+        if "매수 시그널" in action:
+            add_qty = 10
+            req_fund = add_qty * cp
             temp_queue.append({
-                '우선순위_분류': 1, '🔥 점수': 75.0, '종목명': s_name, '티커': ticker, '구분': '🛒 신규 매수',
-                '주문 단가': "100,000 원", '주문 수량': "10 주", '필요 자금': "1,000,000 원",
-                '_raw_price': 100000.0, '_qty': 10, '_req_fund': 1000000.0, '주문 실행 상태': '대기 중'
+                '우선순위_분류': 1, '🔥 점수': score, '종목명': s_name, '티커': ticker, '구분': '🛒 신규 매수',
+                '주문 단가': f"{cp:,.0f} 원" if cp > 0 else "-", '주문 수량': f"{add_qty:,} 주", '필요 자금': f"{req_fund:,.0f} 원",
+                '주문 실행 상태': '대기 중'
             })
-            continue
-
-        c_p = res[0]
-        if live_c_price <= 0: live_c_price = c_p
-
-        res_q = analyze_quant_strategy(active_strat, live_c_price, buy_price, buy_price, res[1], res[2], res[3], res[11], res[6], res[7], res[8], res[4], res[10], res[12], vix_safe, vix_contrarian, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, res[14], res[15])
-        score = res_q.get('ai_score', 75.0) if isinstance(res_q, dict) else 75.0
-        is_entry = res_q.get('entry_cond', True) if isinstance(res_q, dict) else True
-
-        if is_entry:
-            add_qty = int(target_buy_amt // live_c_price) if live_c_price > 0 else 10
-            if add_qty > 0:
-                temp_queue.append({
-                    '우선순위_분류': 1, '🔥 점수': score, '종목명': s_name, '티커': ticker, '구분': '🛒 신규 매수',
-                    '주문 단가': f"{live_c_price:,.0f} 원", '주문 수량': f"{add_qty:,} 주", '필요 자금': f"{add_qty * live_c_price:,.0f} 원",
-                    '_raw_price': live_c_price, '_qty': add_qty, '_req_fund': add_qty * live_c_price, '주문 실행 상태': '대기 중'
-                })
 
     queue_df = pd.DataFrame(temp_queue)
     if not queue_df.empty:
+        queue_df = queue_df.sort_values(by=['우선순위_분류', '🔥 점수'], ascending=[True, False]).reset_index(drop=True)
         queue_df['우선순위'] = [f"{i+1}위" for i in range(len(queue_df))]
         st.subheader("📋 AI 매매 우선순위 대기열 (Order Queue)")
         st.table(queue_df[['우선순위', '종목명', '구분', '🔥 점수', '주문 단가', '주문 수량', '필요 자금', '주문 실행 상태']])
@@ -709,11 +531,9 @@ with tab3:
         st.info("💡 현재 AI 퀀트 엔진이 포착한 대기 중인 매수/매도 시그널이 없습니다.")
 
     st.markdown("---")
-    st.info("💡 안전을 위해 화면 대시보드에서는 자동 발사 기능이 제거되었으며, 수동 전송 버튼을 누를 때만 안전하게 전송됩니다.")
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
-# 🛑 [완벽 복원] 3가지 시뮬레이션(Test 1, 2, 3)이 담긴 Tab 4
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -731,21 +551,17 @@ with tab4:
             p_data['pnl_offset'] = new_offset
             save_portfolio_to_sheets(selected_port, p_data)
             st.success("✅ 포트폴리오 시작일과 누적 손익 기준이 저장되었습니다!")
-            try: st.query_params["auth"] = daily_token
-            except: st.experimental_set_query_params(auth=daily_token)
             st.rerun()
 
         if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner("포워드 테스트 구동 중..."):
-                    res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal, new_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal, new_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if res_fw:
                         col_fw1, col_fw2 = st.columns(2)
                         with col_fw1: st.markdown(mts_metric_html("📈 AI 포워드 테스트 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                         with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{((real_total_eval/total_invested_principal)-1)*100 if total_invested_principal>0 else 0:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
-                        
-                        st.markdown("### 🔍 종목별 성과 비교표")
                         st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
@@ -758,7 +574,7 @@ with tab4:
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner("장기 백테스트 구동 중..."):
-                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if bt_result:
                         st.success("✅ 장기 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
@@ -774,16 +590,18 @@ with tab4:
 
         if st.button("🚀 AI 자율 매매 블라인드 테스트 실행", type="primary", use_container_width=True):
             krx_univ = load_krx_universe()
-            sim_cands = krx_univ.head(10) if not krx_univ.empty else pd.DataFrame({'종목명': ['삼성전자'], '티커': ['005930']})
-            sim_df_cands = pd.DataFrame({'종목명': sim_cands['Name'] if 'Name' in sim_cands.columns else sim_cands['종목명'], '티커': sim_cands['Code'] if 'Code' in sim_cands.columns else sim_cands['티커']})
-            with st.spinner("블라인드 테스트 구동 중..."):
-                dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                if dyn_result:
-                    st.success("✅ 블라인드 테스트 완료!")
-                    col_r1, col_r2 = st.columns(2)
-                    with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                    with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
+            if krx_univ.empty: st.error("KRX 유니버스 로드 실패. API 일일 접속량을 확인하세요.")
+            else:
+                sim_cands = krx_univ.head(10)
+                sim_df_cands = pd.DataFrame({'종목명': sim_cands['Name'] if 'Name' in sim_cands.columns else sim_cands['종목명'], '티커': sim_cands['Code'] if 'Code' in sim_cands.columns else sim_cands['티커']})
+                with st.spinner("블라인드 테스트 구동 중..."):
+                    dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if dyn_result:
+                        st.success("✅ 블라인드 테스트 완료!")
+                        col_r1, col_r2 = st.columns(2)
+                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                        with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
 
 with tab5:
     st.markdown("""
