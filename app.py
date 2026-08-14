@@ -191,7 +191,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e:
         return None, None, f"서버 통신 에러: {str(e)}"
 
-# 🛑 [핵심 패치 1] 진단 근거를 아주 구체적인 데이터(수치)로 업그레이드
 def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
@@ -205,7 +204,6 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         ma200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else c_price
         
-        # 수치화를 위한 이격도 계산
         dist_20_60 = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0.0
         dist_c_20 = ((c_price / ma20) - 1) * 100 if ma20 > 0 else 0.0
         
@@ -555,6 +553,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📄 알고리즘 백서"
 ])
 
+# 🛑 [핵심 패치 1] Tab 1 병렬 처리 적용 (화면 어두워짐 해결) 및 '삭제' 명칭 명확화
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
     st.markdown("관심 종목을 추가하면 AI가 실시간으로 타점을 진단합니다.")
@@ -566,9 +565,9 @@ with tab1:
             if st.button("🚀 실시간 AI 타점 스캐너 가동 (신규 발굴)", type="primary", use_container_width=True): 
                 st.session_state.show_scanner = True
         with col_s2:
-            if st.button("🧹 퇴출 권장 종목 일괄 삭제", type="secondary", use_container_width=True):
-                st.success("정리 완료!")
-                st.rerun()
+            if st.button("🧹 일괄 퇴출 (체크된 종목)", type="secondary", use_container_width=True):
+                # 일괄 삭제 버튼 역할 명확화 (기능은 아래 저장버튼에 통합)
+                st.info("표 안의 '🗑️ 삭제' 열을 체크하고 아래 [저장] 버튼을 누르면 삭제됩니다.")
 
         st.markdown("### ⌨️ 직접 종목 검색")
         with st.form("manual_search_form"):
@@ -590,7 +589,6 @@ with tab1:
                             save_portfolio_to_sheets(selected_port, p_data)
                             st.rerun()
 
-        # 🛑 [핵심 패치 2] 스캐너 UI를 '표(Table)'에서 직관적이고 클릭 가능한 '목록(List)'으로 복원
         if st.session_state.show_scanner:
             with st.spinner("AI 퀀트 필터 검색 중..."):
                 scan_result = run_scanner_safe(active_strat, use_ma200_filter, whipsaw_buffer)
@@ -599,7 +597,7 @@ with tab1:
                     for _, row in scan_result.iterrows():
                         c1, c2, c3, c4 = st.columns([2, 2, 4, 2])
                         c1.markdown(f"**{row['종목명']}** (`{row['티커']}`)")
-                        c2.markdown(f"**{row['현재가']:,.0f} 원**")
+                        c2.markdown(f"**{row['현재가']:,.0f} 원**" if isinstance(row['현재가'], float) else f"**{row['현재가']}**")
                         c3.markdown(f"🔥 `{row['AI 스코어']}점` | {row['진단 근거']}")
                         
                         if str(row['티커']).strip().zfill(6) not in current_watchlist_tickers:
@@ -614,26 +612,37 @@ with tab1:
                     st.info("조건에 맞는 종목이 없습니다.")
 
         st.markdown("---")
+        st.markdown("### 📋 현재 등록된 감시 리스트 (Watchlist)")
+        st.info("💡 **종목을 삭제하려면?** 표 가장 왼쪽의 **[ 🗑️ 삭제 ]** 열에 체크한 뒤, 표 아래의 **[ 💾 변경된 내용 반영 ]** 버튼을 누르세요.")
+        
         visible_stocks = p_data.get('stocks', [])
         display_records = []
         
-        for row in visible_stocks:
+        # 병렬 처리 도입 (화면 지연/어두워짐 현상 완벽 제거)
+        def process_watchlist_row(row):
             ticker = str(row.get('티커', '')).strip().zfill(6)
             c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
             cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer/100.0, ts_target_pct/100.0, ts_drop_pct/100.0, sat_stop_loss/100.0, c_price)
-            
-            display_records.append({'선택': False, '종목명': row.get('종목명'), '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason})
+            return {'🗑️ 삭제': False, '종목명': row.get('종목명'), '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            results = executor.map(process_watchlist_row, visible_stocks)
+            for res in results:
+                if res: display_records.append(res)
         
         display_df = pd.DataFrame(display_records)
         if not display_df.empty: 
             display_df = display_df.sort_values(by="🔥 매력도 점수", ascending=False).reset_index(drop=True)
             edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_port}")
-            if st.button("💾 변경된 내용 저장", type="primary", use_container_width=True):
-                save_df = edited_df[['종목명', '티커']].copy()
+            if st.button("💾 변경된 내용 반영", type="primary", use_container_width=True):
+                # '🗑️ 삭제' 열에 체크 안 된(False) 종목만 살려서 저장
+                keep_df = edited_df[edited_df['🗑️ 삭제'] == False]
+                save_df = keep_df[['종목명', '티커']].copy()
                 save_df['티커'] = save_df['티커'].astype(str).str.strip().str.zfill(6)
                 p_data['stocks'] = save_df.to_dict('records')
                 save_portfolio_to_sheets(selected_port, p_data)
-                st.success("저장 완료!")
+                st.success("관심종목 리스트가 성공적으로 업데이트(삭제/저장) 되었습니다!")
+                time.sleep(0.5)
                 st.rerun()
 
 with tab2:
@@ -649,6 +658,7 @@ with tab2:
     else:
         st.info("💡 실전 계좌 연동 키가 입력되지 않았거나 잔고 데이터를 불러오지 못했습니다. 왼쪽 사이드바에서 계좌를 연동해주세요.")
 
+# 🛑 [핵심 패치 2] Tab 3 병렬 처리 적용 및 로직 복원
 with tab3:
     st.header("🤖 실전 자동매매 관제센터 & 우선순위 주문 대기열")
     col_c1, col_c2, col_c3 = st.columns(3)
@@ -657,21 +667,58 @@ with tab3:
     col_c3.metric("💵 가용 예수금", f"{real_cash_avail:,.0f} 원")
     st.markdown("---")
     
+    current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
+    if current_asset_base <= 0: current_asset_base = total_cash
+    target_buy_amt = current_asset_base * (max_alloc_pct / 100.0)
+
     temp_queue = []
-    for row in visible_stocks:
+    
+    # 병렬 처리 도입 (화면 지연/어두워짐 현상 완벽 제거)
+    def process_queue_row(row):
         ticker = str(row.get('티커', '')).strip().zfill(6)
         s_name = row.get('종목명', '')
-        c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
-        cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer/100.0, ts_target_pct/100.0, ts_drop_pct/100.0, sat_stop_loss/100.0, c_price)
         
-        if "매수 시그널" in action:
-            add_qty = 10
-            req_fund = add_qty * cp
-            temp_queue.append({
-                '우선순위_분류': 1, '🔥 점수': score, '종목명': s_name, '티커': ticker, '구분': '🛒 신규 매수',
-                '주문 단가': f"{cp:,.0f} 원" if cp > 0 else "-", '주문 수량': f"{add_qty:,} 주", '필요 자금': f"{req_fund:,.0f} 원",
-                '주문 실행 상태': '대기 중'
-            })
+        qty_num, buy_price, live_c_price = 0, 0.0, 0.0
+        if SYS_APP_KEY and kis_data and not real_stocks_df.empty:
+            match_row = real_stocks_df[real_stocks_df['티커'] == ticker]
+            if not match_row.empty:
+                r = match_row.iloc[0]
+                qty_str = str(r.get('보유수량', '0 주')).replace(' 주', '').replace(',', '').strip()
+                try: qty_num = int(float(qty_str))
+                except: qty_num = 0
+                buy_price = float(r.get('_raw_buy', 0))
+                live_c_price = float(r.get('_raw_price', 0))
+
+        c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
+        if live_c_price <= 0: live_c_price = c_price
+
+        cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, buy_price, buy_price, use_ma200_filter, whipsaw_buffer/100.0, ts_target_pct/100.0, ts_drop_pct/100.0, sat_stop_loss/100.0, live_c_price)
+        
+        if "매도" in action or "청산" in action or "익절" in action:
+            if qty_num > 0:
+                return {
+                    '우선순위_분류': 0, '🔥 점수': 999.0, '종목명': s_name, '티커': ticker, '구분': action,
+                    '주문 단가': f"{cp:,.0f} 원", '주문 수량': f"{qty_num:,} 주", '필요 자금': f"-{cp * qty_num:,.0f} 원 (회수)",
+                    '주문 실행 상태': '대기 중'
+                }
+        elif "매수 시그널" in action:
+            current_holding_amt = qty_num * cp
+            additional_amt = max(0, target_buy_amt - current_holding_amt)
+            add_qty = int(additional_amt // cp) if cp > 0 else 0
+            if add_qty > 0:
+                req_fund = add_qty * cp
+                buy_type = "🛒 신규 매수" if qty_num == 0 else "🟢 비중 확대"
+                return {
+                    '우선순위_분류': 1, '🔥 점수': score, '종목명': s_name, '티커': ticker, '구분': buy_type,
+                    '주문 단가': f"{cp:,.0f} 원", '주문 수량': f"{add_qty:,} 주", '필요 자금': f"{req_fund:,.0f} 원",
+                    '주문 실행 상태': '대기 중'
+                }
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        results = executor.map(process_queue_row, visible_stocks)
+        for res in results:
+            if res: temp_queue.append(res)
 
     queue_df = pd.DataFrame(temp_queue)
     if not queue_df.empty:
