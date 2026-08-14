@@ -15,7 +15,7 @@ import concurrent.futures
 from google.oauth2.service_account import Credentials
 import warnings
 
-# [Step 1에서 만든 공통 두뇌 파일을 불러옵니다!]
+# 공통 두뇌 로드
 import quant_engine as qe 
 
 warnings.filterwarnings('ignore')
@@ -241,18 +241,22 @@ def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0, statu
         '체결 시간': now_str, 
         '종목명': s_name, 
         '주문 구분': '매도(청산)' if order_type == "SELL" else '매수(진입)',
-        '상태': status,
+        '상태': status, 
         '체결 단가': price, 
         '체결 수량': qty, 
         '체결 금액': price * qty, 
         '실현 손익': pnl,
         '비고 (API 메시지)': msg
     })
+    
+    # [핵심] 구글 시트 5만자 에러 방지: 최근 30개만 보관
+    if len(p_data['daily_trades']) > 30:
+        p_data['daily_trades'] = p_data['daily_trades'][-30:]
+        
     return p_data
 
 # ==========================================
 # 2. 공통 두뇌(quant_engine) 연결 브릿지
-# UI에서 호출 시 느려지지 않도록 캐싱(Cache)을 입혀서 넘겨줍니다.
 # ==========================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_krx_universe():
@@ -646,7 +650,7 @@ if SYS_APP_KEY and kis_token_global:
         if holdings is not None and summary is not None:
             tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
             tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
-            dnca_tot = float(summary[0].get('dnca_tot_amt', 0))  # [핵심] KIS API 공식 예수금 항목 가져오기
+            dnca_tot = float(summary[0].get('dnca_tot_amt', 0)) # KIS 공식 예수금
             imported = [{'종목명': i.get('prdt_name'), '티커': str(i.get('pdno')).strip().zfill(6), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
             st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'cash_avail': dnca_tot, 'stocks': imported}
 
@@ -661,7 +665,7 @@ if kis_data:
     real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
     real_total_eval = kis_data.get('total_eval', 0.0)
     real_eval_pnl = kis_data.get('total_pnl', 0.0)
-    real_cash_avail = kis_data.get('cash_avail', total_cash) # 단순 뺄셈 제거, KIS 정확한 예수금(D+2) 연동
+    real_cash_avail = kis_data.get('cash_avail', total_cash)
     real_stocks_df = pd.DataFrame(kis_data['stocks'])
 
 real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
@@ -788,7 +792,7 @@ if tg_token and tg_chat_id:
         check_min = init_ap_min
         if auto_pilot:
             check_min = st.sidebar.number_input("백그라운드 스케줄러 기준 주기 (분)", min_value=1, value=init_ap_min, disabled=True)
-            st.sidebar.success(f"✅ 오토파일럿 스위치 ON. (서버 백그라운드 봇 연동 중. 창을 닫아도 무관합니다.)")
+            st.sidebar.success(f"✅ 오토파일럿 스위치 ON. (창을 닫아도 안전하게 감시됩니다.)")
     else:
         kill_switch, auto_trade_enabled, auto_pilot, check_min = False, False, False, 10
 else: 
@@ -863,8 +867,6 @@ with tab1:
                     else: st.info("현재 퇴출 대상 종목이 없습니다.")
 
         st.markdown("### 🔎 직접 종목 추가 및 섹터별 대장주 검색")
-        st.markdown("AI 스캐너 외에도 원하시는 종목이나 섹터 대장주를 직접 검색하여 관심종목에 등록할 수 있습니다.")
-        
         c_search, c_theme = st.columns([1, 1])
         
         with c_search:
@@ -1568,9 +1570,6 @@ with tab4:
             merged_stocks.append({'종목명': s.get('종목명'), '티커': str(s.get('티커')).strip().zfill(6)})
         stocks_df = pd.DataFrame(merged_stocks).drop_duplicates(subset=['티커']) if merged_stocks else pd.DataFrame()
         
-        # ----------------------------------------
-        # Test 1: 포워드 테스트
-        # ----------------------------------------
         st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
         with st.expander("⚙️ 실전 계좌 누적 수익률 보정 및 기준일 설정", expanded=False):
             st.markdown("포트폴리오 시작일(포워드 테스트 기준일)과 자동매매 봇 가동 전에 발생한 과거 실현 손익 보정값을 입력하세요.")
@@ -1634,9 +1633,6 @@ with tab4:
 
         st.markdown("---")
         
-        # ----------------------------------------
-        # Test 2: 장기 초과수익 검증 (관심종목 대상)
-        # ----------------------------------------
         st.subheader("📊 Test 2. 장기 초과수익 검증 (관심종목 대상)")
         col_sim1, col_sim2 = st.columns(2)
         with col_sim1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t2_s")
@@ -1664,19 +1660,15 @@ with tab4:
 
         st.markdown("---")
         
-        # ----------------------------------------
-        # Test 3: 동적 유니버스 블라인드 백테스트
-        # ----------------------------------------
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
-        
-        st.warning("※ 주의: 본 테스트는 '현재 시점에 상장 유지 중인' KOSPI/KOSDAQ 상위 종목만을 대상으로 과거를 회귀하여 시뮬레이션합니다. 상장폐지된 종목이 누락되어 수익률이 실제 과거 성과보다 과대 계상될 수 있는 '생존자 편향(Survivorship Bias)'이 포함되어 있으므로, 매매 로직의 하락장 방어력을 검증하는 용도로만 활용하세요.")
+        st.warning("※ 주의: 상장폐지된 종목이 누락되어 성과가 과대 계상될 수 있는 '생존자 편향'이 포함되어 있으므로, 하락장 방어력 검증용으로만 참고하세요.")
         
         if active_strat == '대형주 (Core)':
             univ_text = "**KOSPI 시가총액 상위 50개 대형주**"
         else:
             univ_text = "**KOSDAQ 시가총액 상위 50개 중소형주**"
             
-        st.markdown(f"현재 내 관심종목이 아닌, 과거 특정 시점의 {univ_text}를 대상으로 AI가 100% 자율적으로 종목을 발굴하고 매매했을 때의 실전 운용 성과를 검증합니다.")
+        st.markdown(f"과거 특정 시점의 {univ_text}를 대상으로 AI가 100% 자율 매매했을 때의 실전 운용 성과를 검증합니다.")
         
         col_d1, col_d2 = st.columns(2)
         with col_d1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
@@ -1686,7 +1678,7 @@ with tab4:
         
         if st.button("🚀 AI 자율 매매 블라인드 테스트 실행 (약 10초 소요)", type="primary", use_container_width=True):
             if krx_univ.empty: 
-                st.error("KRX 데이터를 불러오지 못했습니다. 일시적인 서버 통신 장애일 수 있습니다. 잠시 후 다시 시도해 주세요.")
+                st.error("KRX 데이터를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
             else:
                 if 'Market' not in krx_univ.columns: krx_univ['Market'] = 'KOSPI'
                 
@@ -1705,7 +1697,7 @@ with tab4:
                     '티커': sim_cands['Code']
                 })
                 
-                with st.spinner(f"시가총액 상위 50개 종목 과거 데이터 수집 및 15-Core 병렬 시뮬레이션 진행 중..."):
+                with st.spinner(f"시가총액 상위 50개 종목 수집 및 병렬 시뮬레이션 진행 중..."):
                     dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     
                     if dyn_result:
@@ -1745,77 +1737,36 @@ with tab5:
     ## 2. 🧠 엔진별 매수/매도 알고리즘 상세 명세
     
     ### 🏛️ [전략 A] 대형주 (Core) - 중장기 추세 추종
-    시가총액 상위 대형주를 대상으로, 기관과 외국인의 거대한 수급 추세가 형성되는 초입(Golden Cross)을 포착하여 안정적으로 수익을 누적합니다.
-    
     *   **📌 타겟 유니버스:** KOSPI 시가총액 상위 100종목
     *   **🟢 AI 진입 조건 (모두 만족 시):**
-        1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치 (안전구간 확인).
-        2.  **중기 추세 상승:** 60일 이동평균선(MA60)의 기울기가 양수 (현재 MA60 > 10일 전 MA60).
-        3.  **단기 모멘텀:** 20일 전 주가 대비 현재 주가가 상승 (단기 수익률 > 0%).
-        4.  **골든크로스 안착:** 20일 이동평균선이 60일선을 상향 돌파하고, 휩소 방지 버퍼(기본 `1.5%`) 이상 격차를 벌린 확실한 추세 형성 구간. `[MA20 >= MA60 * (1 + 0.015)]`
-        5.  **시장 안정:** VIX(공포지수)가 30 미만으로 시장이 패닉 상태가 아닐 것.
-    *   **🔴 AI 이탈(매도/퇴출) 조건:**
-        1.  **추세 붕괴 (Dead Cross):** 20일 이동평균선이 60일 이동평균선을 하향 이탈하려는 징후 발생 시 전량 기계적 매도 및 관심종목 퇴출. `[MA20 < MA60 * (1 - 0.0075)]`
-        2.  **강제 손절 컷 (Hard Stop-Loss):** 평단가 대비 수익률이 **`-15%`** 도달 시, 60일선 추세가 살아있더라도 계좌의 치명적 손상을 막기 위해 즉각적인 기계적 손절을 집행합니다.
+        1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치.
+        2.  **중기 추세 상승:** 60일 이동평균선(MA60)의 기울기가 양수.
+        3.  **단기 모멘텀:** 20일 전 주가 대비 현재 주가가 상승.
+        4.  **골든크로스 안착:** 20일선이 60일선을 상향 돌파하고 버퍼(1.5%) 이상 확장.
+        5.  **시장 안정:** VIX(공포지수)가 30 미만.
+    *   **🔴 AI 이탈 조건:**
+        1.  **추세 붕괴:** 20일선이 60일선을 하향 이탈 시 전량 매도.
+        2.  **강제 손절 컷:** 평단가 대비 수익률 **`-15%`** 도달 시 즉각 손절.
     
     ### 🚀 [전략 B] 중소형주 (Satellite) - 스마트 수급 눌림목
-    시장에 강력한 테마가 형성되어 돈이 몰린 주도주를 필터링하고, 해당 종목이 단기 조정을 받을 때(눌림목) 진입하여 기술적 반등을 노립니다.
-    
     *   **📌 타겟 유니버스:** KOSDAQ 시가총액 1,000억 원 이상 상위 종목
     *   **🟢 AI 진입 조건 (모두 만족 시):**
         1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치.
-        2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
-        3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
-        4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 매 (심각한 악재로 인한 폭락 방지).
-        5.  **고점 형성 경과일수 필터 (Peak Recency):** 최고가가 형성된 시점이 최근 45일 이내여야 함 (장기 역배열 설거지 파동 배제).
-        6.  **거래량 감쇄 검증 (Volume Contraction):** 조정 구간의 5일 평균 거래량이 고점 당일 폭발했던 거래량의 50% 이하로 감소해야 함 (매도세 소진 확인).
-    *   **🔴 AI 이탈(매도/손절/퇴출) 조건:**
-        1.  **추세 붕괴 (Support Break):** 주가가 20일 이동평균선을 하향 이탈하면 상승 동력이 꺾인 것으로 간주하여 전량 매도 및 관심종목 퇴출.
-        2.  **강제 손절 컷 (Stop Loss):** 매수 단가 대비 수익률이 **`-12%`** (사용자 설정 가능) 도달 시, 지표와 무관하게 즉각적인 기계적 손절 집행.
+        2.  **수급 폭발:** 최근 20일 내 거래량이 5일 평균 거래량 대비 **200% 이상 급증**.
+        3.  **스마트 눌림목:** 현재 주가가 20일선 부근(`-5% ~ +3%`)으로 조정 또는 당일 저가가 20일선 터치 후 지지.
+        4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내.
+        5.  **고점 형성 경과일수:** 최고가 시점이 최근 45일 이내.
+        6.  **거래량 감쇄:** 조정 구간의 거래량이 고점 거래량의 50% 이하로 축소.
+    *   **🔴 AI 이탈 조건:**
+        1.  **추세 붕괴:** 주가가 20일 이동평균선을 하향 이탈 시 전량 매도.
+        2.  **강제 손절 컷:** 매수 단가 대비 수익률 **`-12%`** 도달 시 즉각 손절.
     
     ---
     
-    ## 3. 🌍 거시경제 및 마켓 타이밍 엔진 (Macro Regime)
-    개별 종목의 타점이 완벽하더라도 시장 전체가 무너지면 승률이 급감합니다. 이를 방어하기 위한 3중 거시 필터가 작동합니다.
-    
-    *   **🚨 VIX 공포지수 브레이크 (VIX Safe):**
-        *   미국 S&P 500 VIX 지수가 **`30`**을 초과하는 시스템 리스크 구간에서는 모든 신규 매수를 전면 동결합니다.
-    *   **🔥 극한의 역발상 매수 (VIX Contrarian):**
-        *   VIX 지수가 **`25 이상`**으로 치솟아 투매가 발생했으나, 단기 이동평균선(3일선)을 깨고 내려오는 **'공포 극점 확인 후 회복 초기'** 단계에서는, 시장의 낙폭 과대 반등을 노려 즉시 공격적 매수를 집행합니다. 단, 종목 자체의 장기 추세인 MA200(200일선 방어) 조건은 어떠한 경우에도 무시하지 않도록 엄격히 통제합니다.
-    *   **🐃 강세장 자금 풀 부스터 (Bull Market Boost):**
-        *   KOSPI/KOSDAQ 지수가 60일 이동평균선 위에 있는 완연한 강세장(Bull Market)으로 판별될 경우, 엔진이 자동으로 리스크를 낮게 평가하여 종목당 투입 자금 한도를 **기본값의 1.5배**로 확장합니다. (예: 대형주 35% -> 52.5% 상향)
-
-    ---
-    
-    ## 4. 🛡️ AI 리스크 매니지먼트 (Risk Control)
-    수익을 내는 것만큼 중요한 것은 번 돈을 지키고 뇌동매매를 방지하는 것입니다.
-    
-    *   **🎣 라이브 트레일링 스탑 (Live Trailing Stop):**
-        *   수익률이 목표치(대형주 `30%`, 중소형주 `15%`)를 돌파하면 시스템은 즉각 익절 대기 모드로 전환됩니다.
-        *   이후 DB에 실시간으로 **'매수 이후 최고 도달가(Highest Price)'를 추적 및 기록**하며, 이 고점 대비 특정 비율(`-10%` 또는 `-5%` 수준)만큼 꺾이는 순간 기계적인 시장가 익절 매도를 집행하여 최대 수익을 보존합니다.
-    *   **🥶 실전 쿨다운 시스템 (Live Cooldown):**
-        *   특정 종목에서 연속으로 2회 이상 손실(매도/손절)이 발생하면, 해당 종목은 구글 DB(블랙리스트)에 등재되어 설정된 기간(기본 `60일`) 동안 어떠한 매수 시그널이 떠도 진입을 강제 거부당합니다. (휩소 구간에서 계좌가 녹는 현상 원천 차단)
-    *   **💧 유동성 필터 (Liquidity Filter):**
-        *   중소형주의 호가 공백으로 인한 막대한 슬리피지(Slippage)를 피하기 위해, 최근 5일 평균 거래대금이 **50억 원 미만**인 종목은 시그널이 발생해도 매수를 보류(관망)합니다.
-    
-    ---
-    
-    ## 5. ⚙️ 자동매매 우선순위 & 다이내믹 자금 배분 로직
-    동시에 여러 종목의 매수 시그널이 발생할 경우, 한정된 예수금 내에서 효율적으로 자본을 배분하기 위해 **AI 매력도 스코어링**을 산출하여 매수 우선순위를 정합니다.
-    *   **1순위 매도 (Emergency Exit & Override):** 손절 및 추세 이탈 종목을 최우선 청산하여 현금을 확보합니다. 매수보다 무조건 선행하도록 내부 시스템 점수 **`🚨 최우선 (매도)`**를 강제 할당합니다.
-    *   **2순위 매수 (Score-based Allocation):** AI 매력도 점수가 높은 종목 순서대로 한정된 가용 예수금을 순차적 배분합니다.
-    *   **다이내믹 자금 배분 (Dynamic Position Sizing & Skip):** 매수 큐 진행 중 예수금이 부족해지면 무조건 매수를 포기하지 않습니다. 가용 현금 내에서 살 수 있는 만큼 수량을 깎아서 **부분 매수(Partial Fill)**를 진행하며, 1주도 살 수 없는 경우 즉시 **스킵(Skip)**하고 다음 차순위 유망 종목의 매수를 시도하는 지능형 자금 융통 알고리즘이 적용되어 있습니다.
-    *   **매수/매도 지정 로직:** 시장가 주문 시 증권사에서 요구하는 과도한 상한가 증거금 차단 현상을 우려해, 모든 신규 매수는 타겟팅된 가격의 **지정가(Limit Order)**로 쏘아 예수금 누수를 방어하며, 손절/익절 등 청산 주문은 1초라도 빨리 탈출하기 위해 **시장가(Market Order)**로 강제 집행됩니다.
-
-    ---
-
-    ## 6. 🚨 통합 페일세이프 관제 및 논리적 망분리
-    시스템의 100% 무인 운용과 사용자의 주도권을 동시에 보장하는 최첨단 보안 및 관제 기능이 결합되어 있습니다.
-    *   **[V6.13] 무인 매매 엔진 망분리 (Execution Decoupling):** 불안정한 브라우저 세션에 의존하던 기존의 가짜 오토파일럿(Javascript Reload)을 완벽히 폐기하고, UI(조회/설정)와 백그라운드 봇(주문 집행)을 물리적/논리적으로 분리하는 아키텍처로 개편했습니다. 브라우저를 닫아도 백그라운드 엔진이 24시간 안전하게 계좌를 감시합니다.
-    *   **공통 두뇌 사용 (Single Source of Truth):** `quant_engine.py`라는 단일 파이썬 파일에 매매 로직을 격리하여, UI와 백그라운드 봇이 100% 똑같은 판정 기준을 갖도록 동기화했습니다.
-    *   **수동 보유 종목의 논리적 격리(Logical Isolation):** 사용자가 직접 증권사 앱을 통해 매수하여 계좌에 보유하고 있는 장기 가치 투자 종목 등은 시스템 DB(`p_data['stocks']`)와 교차 검증하여, 봇이 매수한 종목이 아닐 경우 봇의 매도 관제 대상에서 철저하게 분리 및 보호합니다. 
-    *   **시뮬레이션 통합 유니버스 (Merged Universe Testing):** AI 시뮬레이터는 관심종목과 실전 보유 종목을 완벽히 하나로 통합(Merge)하여 백테스트를 수행합니다. 이로써 논리적 누락 없는 100% 무결한 성과 검증이 가능합니다.
-    *   **초고속 멀티스레딩 스캐너 (Parallel Engine):** 파이썬의 `concurrent.futures`를 활용한 멀티스레딩 병렬 처리 아키텍처를 스캐너 및 백테스트 전반에 도입하여 검색 속도를 기존 대비 10배 이상 극적으로 단축시켰습니다.
-    *   **전략 중앙 통제 라우터 (Strategy Isolation):** 대형주(Core)와 중소형주(Satellite)의 매매 조건이 앱 내부에서 교차 오염되는 것을 원천 차단하기 위해, 하나의 중앙 통제 함수에서 전략을 완벽히 격리하여 판정합니다.
-    *   **AI 무결성 관제견 (Anomaly Supervisor):** 단가가 `0`원이거나, 산출된 매수 금액이 전체 계좌 자산의 100%를 초과하는 등(팻 핑거)의 논리적 오류가 감지되면 즉각적으로 대기열 파기, 자동주문 정지, 킬 스위치 가동 및 텔레그램 SOS를 발송하여 내 계좌를 안전하게 수호합니다.
+    ## 3. 🌍 거시경제 및 리스크 관리
+    *   **🚨 VIX 공포지수 브레이크:** VIX 지수 30 초과 시 신규 매수 전면 동결.
+    *   **🔥 VIX Contrarian:** VIX 25 이상 급등 후 단기 꺾임 시 낙폭과대 역발상 매수 허용.
+    *   **🎣 라이브 트레일링 스탑:** 목표 수익(대형주 30%, 중소형주 15%) 달성 후 고점 대비 일정 비율 하락 시 시장가 익절.
+    *   **🥶 실전 쿨다운 시스템:** 연속 2회 손실 발생 시 해당 종목 60일간 진입 차단.
+    *   **💧 유동성 필터:** 5일 평균 거래대금 50억 원 미만 종목 매수 보류.
     """, unsafe_allow_html=True)
