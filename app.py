@@ -134,7 +134,6 @@ def save_portfolio_to_sheets(name, p_data):
         worksheet = client.open_by_key(SPREADSHEET_ID).worksheet("Portfolios")
         cell = worksheet.find(name)
         
-        # 포트폴리오 최초 저장 시 개설일(created_at) 주입
         if 'created_at' not in p_data:
             p_data['created_at'] = datetime.datetime.now(KST).strftime('%Y-%m-%d')
             
@@ -503,14 +502,17 @@ if kis_data:
     real_cash_avail = kis_data.get('cash_avail', total_cash)
     real_stocks_df = pd.DataFrame(kis_data['stocks'])
 
-# 🛑 [핵심 패치 1] 실계좌 정확한 원금 역산 (가상 투자 원금 설정과 완벽 분리)
-real_invested_principal = real_total_eval - real_eval_pnl if real_total_eval > 0 else 0.0
+real_base_date_str = p_data.get('created_at', '2024-01-01') if p_data else '2024-01-01'
+try: real_base_date = pd.to_datetime(real_base_date_str).date()
+except: real_base_date = datetime.datetime.now(KST).date()
+
+total_invested_principal = real_total_eval - real_eval_pnl if real_total_eval > 0 else 0.0
 
 if p_data:
     st.sidebar.markdown("---")
     st.sidebar.subheader("💰 Virtual Capital & Settings")
     st.sidebar.markdown(f"**현재 설정 전략:** `{active_strat}`")
-    new_cash = st.sidebar.number_input(f"총 투자 운용 자산 (AI 가상 원금)", value=int(total_cash), step=1_000_000, format="%d")
+    new_cash = st.sidebar.number_input(f"총 투자 운용 자산", value=int(total_cash), step=1_000_000, format="%d")
     if new_cash != total_cash:
         p_data['cash'] = new_cash
         save_portfolio_to_sheets(selected_port, p_data)
@@ -657,8 +659,7 @@ with tab2:
     if SYS_APP_KEY and kis_data:
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.markdown(mts_metric_html("💰 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
-        # 🛑 진짜 실계좌 원금 표시
-        col_m2.markdown(mts_metric_html("📥 투자 원금", f"{real_invested_principal:,.0f} 원"), unsafe_allow_html=True)
+        col_m2.markdown(mts_metric_html("📥 투자 원금", f"{total_invested_principal:,.0f} 원"), unsafe_allow_html=True)
         col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
         col_m4.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
         if not real_stocks_df.empty:
@@ -740,6 +741,7 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
+# 🛑 [핵심 패치] 레이아웃 정렬(줄 맞춤) 및 출력 위치 강제 분리
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -748,75 +750,80 @@ with tab4:
         stocks_df = pd.DataFrame(p_data.get('stocks', []))
         today_date = datetime.datetime.now(KST).date()
         
-        # 🛑 [핵심 패치 2] 시작일 자동 파싱 (개설일 기준)
-        real_base_date_str = p_data.get('created_at', '2024-01-01')
-        try: real_base_date = pd.to_datetime(real_base_date_str).date()
-        except: real_base_date = datetime.datetime.now(KST).date()
-        
         st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
         st.info("💡 **어떻게 비교하나요?** 포트폴리오 개설일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다.")
         
+        # 버튼 수평선 맞춤 패치 적용
         col_fw_date, col_fw_btn = st.columns([3, 7])
         with col_fw_date:
             test1_start_date = st.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
-        
         with col_fw_btn:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
-                if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
-                else:
-                    with st.spinner("포워드 테스트 구동 중..."):
-                        # AI의 이론 운용 자금은 사용자가 설정한 가상 원금(total_cash)을 기준으로 함
-                        res_fw = run_quant_simulation(stocks_df, active_strat, total_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                        if res_fw:
-                            # 🛑 진짜 실계좌 수익률 계산
-                            real_ret_pct = (real_eval_pnl / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
-                            
-                            col_fw1, col_fw2 = st.columns(2)
-                            with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
-                            with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
-                            st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
+            run_test1 = st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True)
+            
+        # 결과 화면은 Column에 갇히지 않도록 바깥으로 빼내어 넓게 출력
+        if run_test1:
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner("포워드 테스트 구동 중..."):
+                    res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal if total_invested_principal > 0 else total_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if res_fw:
+                        real_ret_pct = (real_eval_pnl / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
+                        col_fw1, col_fw2 = st.columns(2)
+                        with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                        with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.subheader("📊 Test 2. 장기 초과수익 검증 (관심종목 대상)")
+        
+        # 버튼 수평선 맞춤 패치 적용
         col_t2_1, col_t2_2, col_t2_3 = st.columns([3, 3, 4])
         with col_t2_1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t2_s")
         with col_t2_2: end_date = st.date_input("종료일", today_date, key="t2_e")
         with col_t2_3:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if st.button("🚀 관심종목 대상 장기 Backtest 실행", type="primary", use_container_width=True):
-                if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
-                else:
-                    with st.spinner("장기 백테스트 구동 중..."):
-                        bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                        if bt_result:
-                            st.success("✅ 장기 백테스트 완료!")
-                            col_r1, col_r2 = st.columns(2)
-                            with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                            with col_r2: st.markdown(mts_metric_html("AI 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                            st.dataframe(pd.DataFrame(bt_result['summary_rows']), use_container_width=True, hide_index=True)
+            run_test2 = st.button("🚀 관심종목 대상 장기 Backtest 실행", type="primary", use_container_width=True)
+
+        # 결과 화면 넓게 출력
+        if run_test2:
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner("장기 백테스트 구동 중..."):
+                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if bt_result:
+                        st.success("✅ 장기 백테스트 완료!")
+                        col_r1, col_r2 = st.columns(2)
+                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                        with col_r2: st.markdown(mts_metric_html("AI 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(bt_result['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
+        
+        # 버튼 수평선 맞춤 패치 적용
         col_t3_1, col_t3_2, col_t3_3 = st.columns([3, 3, 4])
         with col_t3_1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
         with col_t3_2: dyn_end_date = st.date_input("종료일", today_date, key="t3_e")
         with col_t3_3:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if st.button("🚀 AI 자율 매매 블라인드 테스트 실행", type="primary", use_container_width=True):
-                krx_univ = load_krx_universe()
-                if krx_univ.empty: st.error("KRX 유니버스 로드 실패. API 일일 접속량을 확인하세요.")
-                else:
-                    sim_cands = krx_univ.sort_values('Marcap', ascending=False).head(10) if 'Marcap' in krx_univ.columns else krx_univ.head(10)
-                    sim_df_cands = pd.DataFrame({'종목명': sim_cands['Name'] if 'Name' in sim_cands.columns else sim_cands['종목명'], '티커': sim_cands['Code'] if 'Code' in sim_cands.columns else sim_cands['티커']})
-                    with st.spinner("블라인드 테스트 구동 중..."):
-                        dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                        if dyn_result:
-                            st.success("✅ 블라인드 테스트 완료!")
-                            col_r1, col_r2 = st.columns(2)
-                            with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                            with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                            st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
+            run_test3 = st.button("🚀 AI 자율 매매 블라인드 테스트 실행", type="primary", use_container_width=True)
+
+        # 결과 화면 넓게 출력
+        if run_test3:
+            krx_univ = load_krx_universe()
+            if krx_univ.empty: st.error("KRX 유니버스 로드 실패. API 일일 접속량을 확인하세요.")
+            else:
+                sim_cands = krx_univ.sort_values('Marcap', ascending=False).head(10) if 'Marcap' in krx_univ.columns else krx_univ.head(10)
+                sim_df_cands = pd.DataFrame({'종목명': sim_cands['Name'] if 'Name' in sim_cands.columns else sim_cands['종목명'], '티커': sim_cands['Code'] if 'Code' in sim_cands.columns else sim_cands['티커']})
+                with st.spinner("블라인드 테스트 구동 중..."):
+                    dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if dyn_result:
+                        st.success("✅ 블라인드 테스트 완료!")
+                        col_r1, col_r2 = st.columns(2)
+                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                        with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
 
 with tab5:
     st.markdown("""
