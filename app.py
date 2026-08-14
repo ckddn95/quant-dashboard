@@ -20,9 +20,9 @@ if not base_cfg:
     base_cfg = db.get_config("MAIN_PORT")
 
 st.sidebar.header("🔌 한국투자증권 실계좌(MOCK) 연동")
-new_app_key = st.sidebar.text_input("APP KEY", value=base_cfg.get('app_key', ''))
-new_app_secret = st.sidebar.text_input("APP SECRET", value=base_cfg.get('app_secret', ''), type="password")
-new_cano = st.sidebar.text_input("계좌번호 (앞 8자리)", value=base_cfg.get('cano', ''))
+new_app_key = st.sidebar.text_input("PS3XR8uXP9uTwNNnIC3lRRyATidN10Yoa7qC", value=base_cfg.get('app_key', ''))
+new_app_secret = st.sidebar.text_input("K9Fm6veEN7uTLP1GamtD+1AM/jt4oefbsZGWzFi8nLKABUMmKsaTSK3JqZYRLzNpNVTsRiJw/BD22xi/VnJMiZqq+12z8gMYWsPq88DsKnrk21Ojz3uQIP9BsUui9NxDWYwij+zseiBjVd1VPhleQcJ3Hc7EbjwuS3VxEOsNE1VarzmxY3k=", value=base_cfg.get('app_secret', ''), type="password")
+new_cano = st.sidebar.text_input("44907443", value=base_cfg.get('cano', ''))
 if st.sidebar.button("API 설정 저장"):
     base_cfg['app_key'], base_cfg['app_secret'], base_cfg['cano'] = new_app_key, new_app_secret, new_cano
     db.save_config("MAIN_PORT", base_cfg)
