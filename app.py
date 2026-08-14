@@ -201,54 +201,26 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except: pass
     return None, None
 
-def execute_kis_order(app_key, app_secret, token, cano, acnt_prdt_cd, ticker, qty, price, order_type="BUY", is_market=False, is_mock=True):
-    if int(qty) <= 0: return False, "주문 수량 오류"
-    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash"
-    tr_id = ("VTTC0802U" if order_type == "BUY" else "VTTC0801U") if is_mock else ("TTTC0802U" if order_type == "BUY" else "TTTC0801U")
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id}
-    ord_dvsn = "01" if is_market else "00"
-    ord_unpr = "0" if is_market else str(int(price))
-    body = {"CANO": str(cano).replace("-", "").strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "PDNO": str(ticker).strip().zfill(6), "ORD_DVSN": ord_dvsn, "ORD_QTY": str(int(qty)), "ORD_UNPR": ord_unpr}
-    try:
-        res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
-        if res.status_code == 200:
-            rj = res.json()
-            if rj.get('rt_cd') == '0': return True, f"[{'시장가' if is_market else '지정가'}] 주문 완료: {rj.get('msg1')}"
-            else: return False, f"주문 거부: {rj.get('msg1')} ({rj.get('msg_cd')})"
-        else: return False, f"API 통신 오류: {res.text}"
-    except Exception as e:
-        return False, f"API 예외 발생: {str(e)}"
-
-def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0, status="✅ 체결완료", msg=""):
-    today_str = datetime.datetime.now(KST).strftime('%Y-%m-%d')
-    now_str = datetime.datetime.now(KST).strftime('%H:%M:%S')
-    if p_data.get('daily_trades_date') != today_str:
-        p_data['daily_trades'] = []
-        p_data['daily_trades_date'] = today_str
-    pnl = (price - buy_price) * qty if order_type == "SELL" else 0.0
-    p_data.setdefault('daily_trades', []).append({
-        '체결 시간': now_str, '종목명': s_name, '주문 구분': '매도(청산)' if order_type == "SELL" else '매수(진입)',
-        '상태': status, '체결 단가': price, '체결 수량': qty, '체결 금액': price * qty, '실현 손익': pnl, '비고 (API 메시지)': msg
-    })
-    if len(p_data['daily_trades']) > 30:
-        p_data['daily_trades'] = p_data['daily_trades'][-30:]
-    return p_data
-
 # ==========================================
-# 2. 공통 두뇌(quant_engine) 연결 브릿지
+# 2. 공통 두뇌(quant_engine) 연결 브릿지 안전 래퍼
 # ==========================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_krx_universe():
-    return qe.load_krx_universe()
+    try: return qe.load_krx_universe()
+    except: return pd.DataFrame()
 
 @st.cache_data(ttl=1800)
 def fetch_market_data():
-    return qe.fetch_market_data()
+    try:
+        if hasattr(qe, 'fetch_market_data'):
+            return qe.fetch_market_data()
+    except: pass
+    return 20.0, False, True, 0.0, 0.0
 
 @st.cache_data(ttl=3600)
 def fetch_stock_status(ticker_code):
-    return qe.fetch_stock_status(ticker_code)
+    try: return qe.fetch_stock_status(ticker_code)
+    except: return None
 
 def analyze_quant_strategy(*args, **kwargs):
     return qe.analyze_quant_strategy(*args, **kwargs)
@@ -532,9 +504,6 @@ def mts_metric_html(label, value, delta=None):
 # ==========================================
 # 3. 사이드바 UI 렌더링
 # ==========================================
-if 'search_q' not in st.session_state: st.session_state.search_q = None
-if 'search_sec' not in st.session_state: st.session_state.search_sec = None
-
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 all_ports = load_all_portfolios_from_sheets()
 port_names = list(all_ports.keys())
@@ -553,9 +522,6 @@ if p_data:
         SYS_CANO = str(kis_account_data.get("cano"))
         SYS_ACNT_PRDT = str(kis_account_data.get("acnt_prdt", "01"))
         SYS_IS_MOCK = kis_account_data.get("is_mock", False)
-
-tg_noti_signal = p_data.get('tg_noti_signal', True) if p_data else True
-tg_noti_order = p_data.get('tg_noti_order', True) if p_data else True
 
 kis_token_global = None
 if SYS_APP_KEY and SYS_APP_SECRET and p_data:
