@@ -266,6 +266,7 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
+# 🛑 [핵심 패치] 시뮬레이터 수수료 갉아먹기 방지 및 정밀도 상향
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -306,6 +307,8 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         
         for date, row in sub_df.iterrows():
             c_p, ma20, ma60, ma200, m60_up = row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_Up']
+            
+            # 매도 로직
             if qty > 0:
                 ret = (c_p / buy_price) - 1
                 highest_price = max(highest_price, c_p)
@@ -323,6 +326,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     sell_count += 1
                     continue 
             
+            # 매수 로직 (수수료를 뺀 정확한 가용 현금 계산)
             if qty == 0:
                 pass_ma200 = (c_p >= ma200) if use_ma200 else True
                 buy_flag = False
@@ -332,8 +336,9 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     dist_ma20 = (c_p / ma20) - 1
                     if pass_ma200 and (-0.05 <= dist_ma20 <= 0.03): buy_flag = True
                         
-                if buy_flag and cash >= c_p:
-                    q = int(cash // c_p)
+                if buy_flag and cash > 0:
+                    # 구매 가능 수량: 현금 / (현재가 + 0.25%수수료)
+                    q = int(cash // (c_p * 1.0025))
                     if q > 0:
                         cost = q * c_p; fee = cost * 0.0025
                         cash -= (cost + fee); total_fee += fee
@@ -512,7 +517,7 @@ if p_data:
     st.sidebar.markdown("---")
     st.sidebar.subheader("💰 Virtual Capital & Settings")
     st.sidebar.markdown(f"**현재 설정 전략:** `{active_strat}`")
-    new_cash = st.sidebar.number_input(f"총 투자 운용 자산", value=int(total_cash), step=1_000_000, format="%d")
+    new_cash = st.sidebar.number_input(f"총 투자 운용 자산 (AI 가상 원금)", value=int(total_cash), step=1_000_000, format="%d")
     if new_cash != total_cash:
         p_data['cash'] = new_cash
         save_portfolio_to_sheets(selected_port, p_data)
@@ -741,7 +746,6 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
-# 🛑 [핵심 패치] 레이아웃 정렬(줄 맞춤) 및 출력 위치 강제 분리
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -753,7 +757,6 @@ with tab4:
         st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
         st.info("💡 **어떻게 비교하나요?** 포트폴리오 개설일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다.")
         
-        # 버튼 수평선 맞춤 패치 적용
         col_fw_date, col_fw_btn = st.columns([3, 7])
         with col_fw_date:
             test1_start_date = st.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
@@ -761,7 +764,6 @@ with tab4:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             run_test1 = st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True)
             
-        # 결과 화면은 Column에 갇히지 않도록 바깥으로 빼내어 넓게 출력
         if run_test1:
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
@@ -777,7 +779,6 @@ with tab4:
         st.markdown("---")
         st.subheader("📊 Test 2. 장기 초과수익 검증 (관심종목 대상)")
         
-        # 버튼 수평선 맞춤 패치 적용
         col_t2_1, col_t2_2, col_t2_3 = st.columns([3, 3, 4])
         with col_t2_1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t2_s")
         with col_t2_2: end_date = st.date_input("종료일", today_date, key="t2_e")
@@ -785,7 +786,6 @@ with tab4:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             run_test2 = st.button("🚀 관심종목 대상 장기 Backtest 실행", type="primary", use_container_width=True)
 
-        # 결과 화면 넓게 출력
         if run_test2:
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
@@ -800,30 +800,39 @@ with tab4:
 
         st.markdown("---")
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
+        st.info("⚠️ 생존자 편향(Survivorship Bias) 방지를 위해 특정 종목이 아닌 **'대표 섹터/지수 ETF 10종목'**으로 엄격한 블라인드 검증을 진행합니다.")
         
-        # 버튼 수평선 맞춤 패치 적용
         col_t3_1, col_t3_2, col_t3_3 = st.columns([3, 3, 4])
         with col_t3_1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
         with col_t3_2: dyn_end_date = st.date_input("종료일", today_date, key="t3_e")
         with col_t3_3:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            run_test3 = st.button("🚀 AI 자율 매매 블라인드 테스트 실행", type="primary", use_container_width=True)
+            run_test3 = st.button("🚀 대표 ETF 기반 블라인드 테스트 실행", type="primary", use_container_width=True)
 
-        # 결과 화면 넓게 출력
         if run_test3:
-            krx_univ = load_krx_universe()
-            if krx_univ.empty: st.error("KRX 유니버스 로드 실패. API 일일 접속량을 확인하세요.")
-            else:
-                sim_cands = krx_univ.sort_values('Marcap', ascending=False).head(10) if 'Marcap' in krx_univ.columns else krx_univ.head(10)
-                sim_df_cands = pd.DataFrame({'종목명': sim_cands['Name'] if 'Name' in sim_cands.columns else sim_cands['종목명'], '티커': sim_cands['Code'] if 'Code' in sim_cands.columns else sim_cands['티커']})
-                with st.spinner("블라인드 테스트 구동 중..."):
-                    dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                    if dyn_result:
-                        st.success("✅ 블라인드 테스트 완료!")
-                        col_r1, col_r2 = st.columns(2)
-                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                        with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                        st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
+            # 🛑 생존자 편향 제거: 미래 결과를 알 수 없는 고정 ETF 리스트로 정직하게 테스트
+            etf_list = [
+                {'종목명': 'KODEX 200', '티커': '069500'},
+                {'종목명': 'KODEX 코스닥150', '티커': '229200'},
+                {'종목명': 'KODEX 반도체', '티커': '091160'},
+                {'종목명': 'KODEX 자동차', '티커': '091180'},
+                {'종목명': 'KODEX 은행', '티커': '091220'},
+                {'종목명': 'KODEX 배당성장', '티커': '213610'},
+                {'종목명': 'KODEX 2차전지산업', '티커': '305720'},
+                {'종목명': 'KODEX 바이오', '티커': '244580'},
+                {'종목명': 'KODEX 미디어&엔터테인먼트', '티커': '226980'},
+                {'종목명': 'KODEX IT', '티커': '261220'}
+            ]
+            sim_df_cands = pd.DataFrame(etf_list)
+            
+            with st.spinner("블라인드 테스트 구동 중..."):
+                dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                if dyn_result:
+                    st.success("✅ 대표 섹터 ETF 블라인드 테스트 완료!")
+                    col_r1, col_r2 = st.columns(2)
+                    with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                    with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
 
 with tab5:
     st.markdown("""
