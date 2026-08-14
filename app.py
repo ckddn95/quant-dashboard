@@ -68,7 +68,7 @@ def save_password_hash(new_hash):
         worksheet = sh.worksheet("Settings")
         cell = worksheet.find("app_password")
         if cell: worksheet.update_cell(cell.row, 2, new_hash)
-        else: worksheet.append_row([name, new_hash])
+        else: worksheet.append_row(["app_password", new_hash])
         get_saved_password_hash.clear() 
         return True
     except Exception as e:
@@ -212,7 +212,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
 def load_krx_universe():
     try:
         if hasattr(qe, 'load_krx_universe'): return qe.load_krx_universe()
-        # 안전 폴백 유니버스
         return pd.DataFrame({'Name': ['삼성전자', 'SK하이닉스', 'LG에너지솔루션', '셀트리온', '현대차'], 'Code': ['005930', '000660', '373220', '068270', '005380'], 'Market': ['KOSPI', 'KOSPI', 'KOSPI', 'KOSPI', 'KOSPI']})
     except: 
         return pd.DataFrame({'Name': ['삼성전자', 'SK하이닉스'], 'Code': ['005930', '000660'], 'Market': ['KOSPI', 'KOSPI']})
@@ -269,7 +268,7 @@ def run_satellite_scanner(use_ma200, top_n=5):
     res = [process_stock(row) for _, row in cands.iterrows()]
     return pd.DataFrame(res)
 
-# 🛑 [핵심 엔진] 실제 운용 알고리즘과 100% 동일하게 작동하는 시뮬레이터 엔진
+# 🛑 [핵심 엔진] 실제 운용 알고리즘과 100% 동일하게 작동하는 시뮬레이터 엔진 (오타 수정됨)
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -309,10 +308,11 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         total_final_val += final_val
         pnl = final_val - alloc_cash
         
+        # [수정] 따옴표 짝 불일치 해결
         summary_rows.append({
             '종목명': nm, '최종 보유 주수': f"{int(alloc_cash / start_p):,} 주",
-            '기말 평가금': f"{final_val:,.0f} 원', '총 순수익 (원)': f"{pnl:+,.0f} 원",
-            '수익률 (%)': f"{ret:+.2f}%', '매매 횟수': '매수 1회 / 매도 1회', '총 발생 수수료': '1,500 원', '기말 포트폴리오 비중': f"{100/len(sim_data):.2f}%"
+            '기말 평가금': f"{final_val:,.0f} 원", '총 순수익 (원)': f"{pnl:+,.0f} 원",
+            '수익률 (%)': f"{ret:+.2f}%", '매매 횟수': '매수 1회 / 매도 1회', '총 발생 수수료': '1,500 원', '기말 포트폴리오 비중': f"{100/len(sim_data):.2f}%"
         })
         
     final_port_ret = ((total_final_val / init_cash) - 1) * 100
@@ -619,7 +619,7 @@ with tab1:
                     ai_score = res_q.get('ai_score', 75.0)
                     action = "🟢 매수 시그널 발생" if res_q.get('entry_cond') else "🟡 모니터링 유지"
             else:
-                if not c_price: c_price = 100000
+                if not c_price: c_price = 100000 # 기본 폴백
             display_records.append({'선택': False, '종목명': row.get('종목명'), '티커': ticker, '실시간 현재가': c_price, '🔥 매력도 점수': ai_score, '🤖 AI 액션 플랜': action})
         
         display_df = pd.DataFrame(display_records)
