@@ -191,11 +191,12 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e:
         return None, None, f"서버 통신 에러: {str(e)}"
 
+# 🛑 [핵심 패치 1] 진단 근거를 아주 구체적인 데이터(수치)로 업그레이드
 def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
         if df is None or len(df) < 60:
-            return c_price, "분석 불가", 0.0, "과거 데이터 부족"
+            return c_price, "분석 불가", 0.0, "과거 60일 이상 거래 데이터 부족"
         
         close_p = float(df['Close'].iloc[-1])
         if c_price <= 0: c_price = close_p
@@ -204,47 +205,63 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         ma200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else c_price
         
+        # 수치화를 위한 이격도 계산
+        dist_20_60 = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0.0
+        dist_c_20 = ((c_price / ma20) - 1) * 100 if ma20 > 0 else 0.0
+        
         if buy_price > 0:
             ret = (c_price / buy_price) - 1
-            if ret <= sl: return c_price, "🔴 긴급 손절 매도", 999.0, "손절 컷 도달"
+            if ret <= sl: return c_price, "🔴 긴급 손절 매도", 10.0, f"수익률 {ret*100:+.1f}% (손절컷 도달)"
             if highest_price > 0 and (highest_price/buy_price - 1) >= ts_tgt:
-                if (c_price / highest_price) - 1 <= ts_drp: 
-                    return c_price, "🔵 트레일링 익절", 999.0, "트레일링 하락 이탈"
-            if strat == "Core" and c_price < ma60 * (1 - buf_pct/2): return c_price, "🔴 전량 청산", 999.0, "60일 추세 이탈"
-            elif strat == "Satellite" and c_price < ma20 * (1 - buf_pct/2): return c_price, "🔴 전량 청산", 999.0, "20일 추세 이탈"
+                drop_from_peak = (c_price / highest_price) - 1
+                if drop_from_peak <= ts_drp: 
+                    return c_price, "🔵 트레일링 익절", 20.0, f"고점대비 {drop_from_peak*100:+.1f}% (익절 조건 충족)"
+            if strat == "Core" and c_price < ma60 * (1 - buf_pct/2): 
+                return c_price, "🔴 전량 청산", 30.0, f"현재가 < 60일선({ma60:,.0f}원) 하향이탈"
+            elif strat == "Satellite" and c_price < ma20 * (1 - buf_pct/2): 
+                return c_price, "🔴 전량 청산", 30.0, f"현재가 < 20일선({ma20:,.0f}원) 하향이탈"
         
         pass_ma200 = (c_price >= ma200) if use_ma200 else True
+        ma200_str = " (200일선 지지)" if pass_ma200 and use_ma200 else ""
+        
         if strat == "Core":
             m60_up = ma60 > df['Close'].rolling(60).mean().iloc[-11]
             if pass_ma200 and (ma20 >= ma60 * (1 + buf_pct)) and m60_up:
-                return c_price, "🟢 매수 시그널 발생", 85.0, "정배열 골든크로스"
+                score = min(85.0 + max(0, dist_20_60), 99.0)
+                return c_price, "🟢 매수 시그널 발생", round(score, 1), f"20/60일선 이격도 {dist_20_60:+.1f}% 골든크로스{ma200_str}"
         else:
-            dist_ma20 = (c_price / ma20) - 1
-            if pass_ma200 and (-0.05 <= dist_ma20 <= 0.03):
-                return c_price, "🟢 매수 시그널 발생", 85.0, "20일선 눌림목"
+            if pass_ma200 and (-5.0 <= dist_c_20 <= 3.0):
+                score = min(85.0 + max(0, (3.0 - dist_c_20)), 99.0)
+                return c_price, "🟢 매수 시그널 발생", round(score, 1), f"20일선 이격도 {dist_c_20:+.1f}% 눌림목 진입{ma200_str}"
                 
-        return c_price, "🟡 모니터링 유지", 50.0, "타점 대기 중"
+        return c_price, "🟡 모니터링 유지", 50.0, f"현재 20일선 이격도 {dist_c_20:+.1f}% (타점 대기 중)"
     except Exception as e:
-        return c_price, "분석 불가", 0.0, f"API 통신 오류"
+        return c_price, "분석 불가", 0.0, f"데이터 분석 에러"
 
 @st.cache_data(ttl=3600)
 def run_scanner_safe(strat, use_ma200, buf_pct):
     krx = load_krx_universe()
     if krx.empty: return pd.DataFrame()
     
-    if strat == '대형주 (Core)': cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(50) if 'Marcap' in krx.columns else krx.head(50)
-    else: cands = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(50) if 'Marcap' in krx.columns else krx.head(50)
+    if strat == '대형주 (Core)':
+        cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)]
+        cands = cands.sort_values('Marcap', ascending=False).head(50) if 'Marcap' in cands.columns else cands.head(50)
+    else:
+        cands = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
+        cands = cands.sort_values('Marcap', ascending=False).head(50) if 'Marcap' in cands.columns else cands.head(50)
     
+    res = []
     def process(row):
         tc = str(row['Code']).strip().zfill(6)
         cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct/100.0, 0.3, -0.1, -0.15)
-        if "매수 시그널" in action: return {'종목명': row['Name'], '티커': tc, '현재가': f"{cp:,.0f} 원", 'AI 스코어': score, '진단 근거': reason}
+        if "매수 시그널" in action: 
+            return {'종목명': row['Name'], '티커': tc, '현재가': cp, 'AI 스코어': score, '진단 근거': reason}
         return None
 
-    res = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         for r in executor.map(process, [r for _, r in cands.iterrows()]):
             if r: res.append(r)
+            
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
 @st.cache_data(ttl=1800)
@@ -380,7 +397,6 @@ p_data = all_ports.get(selected_port) if selected_port else None
 active_strat = p_data.get('strategy', '대형주 (Core)') if p_data else "대형주 (Core)"
 total_cash = int(p_data.get('cash', 10000000)) if p_data else 10000000
 
-# 🛑 [완벽 보안 패치] 저장 후 입력 칸 완전 숨김 처리
 has_saved_keys = bool(p_data and p_data.get('manual_app_key'))
 with st.sidebar.expander("🔑 KIS API 설정", expanded=not has_saved_keys):
     if has_saved_keys:
@@ -388,7 +404,6 @@ with st.sidebar.expander("🔑 KIS API 설정", expanded=not has_saved_keys):
         st.success(f"✅ 현재 **{'모의투자' if curr_is_mock else '실계좌'}** API 키가 안전하게 작동 중입니다.")
         st.info("💡 보안을 위해 키 입력창이 완벽하게 숨김 처리되었습니다.")
         
-        # 키를 바꾸고 싶을 때만 이 버튼을 눌러서 초기화 후 다시 칸을 띄움
         if st.button("🗑️ 저장된 키 삭제 및 재설정"):
             if p_data is not None:
                 p_data.pop('manual_app_key', None)
@@ -513,7 +528,7 @@ if p_data:
         p_data['kill_switch'], p_data['auto_trade_enabled'], p_data['auto_pilot'] = kill_switch, auto_trade_enabled, auto_pilot
         save_portfolio_to_sheets(selected_port, p_data)
         st.rerun()
-    if kill_switch: st.sidebar.error("⚠️ 킬 스위 작동 중!")
+    if kill_switch: st.sidebar.error("⚠️ 킬 스위치 작동 중!")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
@@ -575,11 +590,26 @@ with tab1:
                             save_portfolio_to_sheets(selected_port, p_data)
                             st.rerun()
 
+        # 🛑 [핵심 패치 2] 스캐너 UI를 '표(Table)'에서 직관적이고 클릭 가능한 '목록(List)'으로 복원
         if st.session_state.show_scanner:
             with st.spinner("AI 퀀트 필터 검색 중..."):
                 scan_result = run_scanner_safe(active_strat, use_ma200_filter, whipsaw_buffer)
                 if not scan_result.empty:
-                    st.dataframe(scan_result, use_container_width=True, hide_index=True)
+                    st.markdown("### 💡 AI 스캐너 포착 종목")
+                    for _, row in scan_result.iterrows():
+                        c1, c2, c3, c4 = st.columns([2, 2, 4, 2])
+                        c1.markdown(f"**{row['종목명']}** (`{row['티커']}`)")
+                        c2.markdown(f"**{row['현재가']:,.0f} 원**")
+                        c3.markdown(f"🔥 `{row['AI 스코어']}점` | {row['진단 근거']}")
+                        
+                        if str(row['티커']).strip().zfill(6) not in current_watchlist_tickers:
+                            if c4.button("➕ 담기", key=f"add_scan_{row['티커']}"):
+                                p_data['stocks'].append({'종목명': row['종목명'], '티커': str(row['티커']).strip().zfill(6), '매수단가': 0, '보유수량': 0})
+                                save_portfolio_to_sheets(selected_port, p_data)
+                                st.rerun()
+                        else:
+                            c4.button("✅ 담김", disabled=True, key=f"added_scan_{row['티커']}")
+                    st.markdown("---")
                 else:
                     st.info("조건에 맞는 종목이 없습니다.")
 
