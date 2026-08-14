@@ -262,6 +262,7 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
+# 🛑 [핵심 패치] 시뮬레이터 Pandas 'ME' 적용 및 실전 모사 정밀화
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -345,7 +346,12 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         v = float(r['기말 평가금'].replace(',','').replace(' 원',''))
         r['기말 포트폴리오 비중'] = f"{(v / total_final_val) * 100 if total_final_val > 0 else 0:.2f}%"
     
-    dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y-%m')
+    # pandas 2.2.0 이상 호환성 수정: 'M' -> 'ME'
+    try:
+        dates = pd.date_range(start=start_date, end=end_date, freq='ME').strftime('%Y-%m')
+    except:
+        dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y-%m')
+        
     chart_data = [{'Date': d, 'Asset': nm, 'Weight': 100.0 / len(sim_data)} for d in dates for nm in sim_data.keys()]
             
     return {
@@ -492,7 +498,6 @@ real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024
 try: real_base_date = pd.to_datetime(real_base_date_str).date()
 except: real_base_date = datetime.datetime.now(KST).date()
 
-manual_offset = float(p_data.get('pnl_offset', 0.0)) if p_data else 0.0
 total_invested_principal = float(total_cash)
 
 if p_data:
@@ -650,7 +655,6 @@ with tab2:
         col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
         col_m4.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
         if not real_stocks_df.empty:
-            # 🛑 [수정 완료] 내부 계산용 _raw_ 데이터 열 화면에서 숨김 처리
             display_real_df = real_stocks_df.drop(columns=['_raw_price', '_raw_buy'], errors='ignore')
             st.dataframe(display_real_df, use_container_width=True, hide_index=True)
     else:
@@ -729,6 +733,7 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
+# 🛑 [핵심 패치] Test 1 UI 전면 개편 (복잡한 저장 로직 삭제 및 직관적 비교)
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -738,24 +743,19 @@ with tab4:
         today_date = datetime.datetime.now(KST).date()
         
         st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
-        c_d1, c_d2, c_d3 = st.columns([3, 4, 3])
-        new_date = c_d1.date_input("📅 포트폴리오 시작일", real_base_date, key="t4_date")
-        new_offset = c_d2.number_input("과거 실현 손익 누적액 (원)", value=int(manual_offset), step=100000, key="t4_offset")
-        if c_d3.button("💾 수익률 기준 저장", use_container_width=True, key="t4_save"):
-            p_data['real_base_date'] = new_date.strftime('%Y-%m-%d')
-            p_data['pnl_offset'] = new_offset
-            save_portfolio_to_sheets(selected_port, p_data)
-            st.success("✅ 포트폴리오 시작일과 누적 손익 기준이 저장되었습니다!")
-            st.rerun()
-
-        if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
+        st.info("💡 **어떻게 비교하나요?** 내가 지정한 시작일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다. (번거로운 수동 기준 저장 기능을 없애고 직관적으로 자동 계산하도록 개선했습니다.)")
+        
+        col_fw_date, col_fw_btn = st.columns([3, 7])
+        test1_start_date = col_fw_date.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
+        
+        if col_fw_btn.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner("포워드 테스트 구동 중..."):
-                    res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal, new_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if res_fw:
                         col_fw1, col_fw2 = st.columns(2)
-                        with col_fw1: st.markdown(mts_metric_html("📈 AI 포워드 테스트 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                        with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                         with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{((real_total_eval/total_invested_principal)-1)*100 if total_invested_principal>0 else 0:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
                         st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
 
