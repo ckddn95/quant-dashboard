@@ -1,4 +1,4 @@
-import streamlit as st  # 비밀키(secrets)를 쉽게 불러오기 위해 사용
+import streamlit as st
 import pandas as pd
 import json
 import datetime
@@ -6,7 +6,7 @@ import time
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
-import quant_engine as qe  # [핵심!] 우리가 만든 공통 두뇌를 임포트
+import quant_engine as qe
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -25,11 +25,17 @@ def send_telegram_message(message):
     try:
         tg_token = st.secrets.get("telegram", {}).get("bot_token")
         tg_chat_id = st.secrets.get("telegram", {}).get("chat_id")
-        if not tg_token or not tg_chat_id: return False
+        if not tg_token or not tg_chat_id: 
+            print("❌ [오류] secrets.toml 파일에서 텔레그램 정보를 찾지 못했습니다!")
+            return False
         url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
-        res = requests.post(url, json={"chat_id": tg_chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5)
+        res = requests.post(url, json={"chat_id": tg_chat_id, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        if res.status_code != 200:
+            print(f"❌ [오류] 텔레그램 서버 거절: {res.text}")
         return res.status_code == 200
-    except: return False
+    except Exception as e: 
+        print(f"❌ [오류] 텔레그램 통신 실패: {e}")
+        return False
 
 def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
@@ -70,25 +76,38 @@ def log_daily_trade(p_data, s_name, order_type, price, qty, buy_price=0.0, statu
         '체결 시간': now_str, '종목명': s_name, '주문 구분': '매도(청산)' if order_type == "SELL" else '매수(진입)',
         '상태': status, '체결 단가': price, '체결 수량': qty, '체결 금액': price * qty, '실현 손익': pnl, '비고 (API 메시지)': msg
     })
+    
+    # [핵심] 구글 시트 용량 초과 방지: 최근 30개만 보관
+    if len(p_data['daily_trades']) > 30:
+        p_data['daily_trades'] = p_data['daily_trades'][-30:]
+        
     return p_data
 
 # ==========================================
-# 2. 메인 루프 (무한 반복하며 1분마다 감시)
+# 2. 메인 관제 루프
 # ==========================================
 def run_bot():
     print(f"🤖 Core-Satellite 무인 매매 봇 가동 시작: {datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
     send_telegram_message("🤖 *[시스템 알림]* 백그라운드 매매 엔진이 정상적으로 가동되었습니다.")
     
-    last_run_time = {} # 포트폴리오별 마지막 실행 시간 기록
+    last_run_time = {}
 
     while True:
         try:
             now = datetime.datetime.now(KST)
+            
+            # [핵심] 평일 09:00 ~ 15:30 정규장 시간 외 통신 차단
+            is_weekend = now.weekday() >= 5
+            is_market_hours = datetime.time(9, 0) <= now.time() <= datetime.time(15, 30)
+            
+            if is_weekend or not is_market_hours:
+                time.sleep(60)
+                continue
+                
             client = get_gspread_client()
             worksheet = client.open_by_key(SPREADSHEET_ID).worksheet("Portfolios")
             records = worksheet.get_all_records()
             
-            # 시장 공통 지표 1회 로드 (VIX, 시장 방향성)
             vix_val, vix_contrarian, vix_safe, kospi_ret_60, kosdaq_ret_60 = qe.fetch_market_data()
             
             for r in records:
@@ -96,21 +115,18 @@ def run_bot():
                 try: p_data = json.loads(r.get("JSON_Data"))
                 except: continue
                 
-                # 1. 제어 스위치 검증
+                # 제어 스위치 검증
                 if p_data.get('kill_switch', False) or not p_data.get('auto_pilot', False) or not p_data.get('auto_trade_enabled', False):
-                    continue # 멈춰있으면 패스
+                    continue
                     
                 ap_min = p_data.get('ap_min', 10)
-                
-                # 2. 감시 주기가 도래했는지 확인
                 last_time = last_run_time.get(port_name)
                 if last_time and (now - last_time).total_seconds() < (ap_min * 60):
-                    continue # 아직 주기가 안 됨
+                    continue
                     
                 print(f"[{now.strftime('%H:%M:%S')}] '{port_name}' 포트폴리오 스캔 시작...")
-                last_run_time[port_name] = now # 실행 시간 갱신
+                last_run_time[port_name] = now
                 
-                # 3. KIS 계좌 정보 연동
                 active_strat = p_data.get('strategy', '대형주 (Core)')
                 kis_key = "core" if active_strat == "대형주 (Core)" else "satellite"
                 k_data = st.secrets.get("kis_accounts", {}).get(kis_key, None)
@@ -125,13 +141,9 @@ def run_bot():
                 if not summary: continue
                     
                 real_total_eval = float(summary[0].get('tot_evlu_amt', 0))
+                real_cash_avail = float(summary[0].get('dnca_tot_amt', 0)) # KIS 공식 예수금
                 real_stocks = {str(i.get('pdno')).strip().zfill(6): i for i in holdings if int(i.get('hldg_qty', 0)) > 0}
-                
-                # 가용 현금 계산 (총평가금 - 주식평가금액)
-                stocks_eval_sum = sum(float(v.get('prpr', 0)) * int(v.get('hldg_qty', 0)) for v in real_stocks.values())
-                real_cash_avail = real_total_eval - stocks_eval_sum
 
-                # 전략 파라미터 (고정값 또는 시트에서 로드)
                 max_alloc_pct = 35 if active_strat == '대형주 (Core)' else 20
                 is_bull = (active_strat == '대형주 (Core)' and kospi_ret_60 > 0) or (active_strat != '대형주 (Core)' and kosdaq_ret_60 > 0)
                 if is_bull: max_alloc_pct = min(max_alloc_pct * 1.5, 100.0)
@@ -140,15 +152,11 @@ def run_bot():
                 
                 exec_msgs = []
                 needs_save = False
-                
-                # [정책 4] 수동 보유 종목 보호를 위한 봇 관리 리스트
                 bot_managed = [str(s.get('티커')).strip().zfill(6) for s in p_data.get('stocks', [])]
 
-                # ------------------------------------
-                # [A] 매도 스캔 (보유 종목 검사)
-                # ------------------------------------
+                # [A] 매도 감시
                 for ticker, r_data in list(real_stocks.items()):
-                    if ticker not in bot_managed: continue # 봇 관리 종목이 아니면 무시 (수동 종목 보호)
+                    if ticker not in bot_managed: continue
                         
                     qty = int(r_data.get('hldg_qty', 0))
                     buy_price = float(r_data.get('pchs_avg_pric', 0))
@@ -167,7 +175,6 @@ def run_bot():
                     if not res: continue
                     yf_price, ma200, ma60, ma20, drawdown, vr, r60, r20, m60_up, is_a200, vs, yf_low, rvm, atv, dsp, vc = res
                     
-                    # 공통 두뇌 로직 판독
                     res_q = qe.analyze_quant_strategy(
                         active_strat, c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, 
                         r60, r20, m60_up, drawdown, vs, rvm, vix_safe, vix_contrarian, 
@@ -197,9 +204,7 @@ def run_bot():
                             if ticker in p_data.get('ts_tracker', {}): del p_data['ts_tracker'][ticker]
                             needs_save = True
 
-                # ------------------------------------
-                # [B] 매수 스캔 (관심 종목 검사)
-                # ------------------------------------
+                # [B] 매수 감시
                 queue = []
                 for s in p_data.get('stocks', []):
                     ticker = str(s['티커']).strip().zfill(6)
@@ -210,10 +215,10 @@ def run_bot():
                     if not res or not c_price or c_price == 0: continue
                     yf_price, ma200, ma60, ma20, dd, vr, r60, r20, m60_up, is_a200, vs, yf_low, rvm, atv, dsp, vc = res
                     
-                    if atv < 5000000000: continue # 거래대금 미달 패스
+                    if atv < 5000000000: continue
                     
                     cd_info = p_data.get('cd_tracker', {}).get(ticker, {'until': '2000-01-01'})
-                    if now.date() < datetime.datetime.strptime(cd_info['until'], '%Y-%m-%d').date(): continue # 쿨다운 패스
+                    if now.date() < datetime.datetime.strptime(cd_info['until'], '%Y-%m-%d').date(): continue
                         
                     res_q = qe.analyze_quant_strategy(
                         active_strat, c_price, 0.0, 0.0, ma200, ma60, ma20, yf_low, 
@@ -230,7 +235,6 @@ def run_bot():
                         if add_qty > 0 and (add_qty * c_price) <= real_total_eval:
                             queue.append({'score': res_q['ai_score'], 'ticker': ticker, 'name': s_name, 'qty': add_qty, 'price': c_price})
                             
-                # 매수 큐 점수순 정렬 후 자금 분배
                 queue = sorted(queue, key=lambda x: x['score'], reverse=True)
                 for q in queue:
                     aff_qty = int(real_cash_avail // q['price'])
@@ -243,7 +247,6 @@ def run_bot():
                             real_cash_avail -= (final_qty * q['price'])
                             needs_save = True
                             
-                # 시트 업데이트 및 텔레그램 발송
                 if needs_save:
                     data_str = json.dumps(p_data, ensure_ascii=False)
                     cell = worksheet.find(port_name)
@@ -253,9 +256,8 @@ def run_bot():
                     send_telegram_message("🤖 *[백그라운드 봇 매매 실행]*\n" + "\n".join(exec_msgs))
 
         except Exception as e:
-            print(f"[{datetime.datetime.now(KST)}] 스캔 중 오류 발생: {e}")
+            print(f"[{datetime.datetime.now(KST)}] 스캔 오류 발생: {e}")
             
-        # 1분(60초)간 휴식 후 무한 루프
         time.sleep(60)
 
 if __name__ == "__main__":
