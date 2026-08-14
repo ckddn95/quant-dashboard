@@ -646,8 +646,9 @@ if SYS_APP_KEY and kis_token_global:
         if holdings is not None and summary is not None:
             tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
             tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
+            dnca_tot = float(summary[0].get('dnca_tot_amt', 0))  # [핵심] KIS API 공식 예수금 항목 가져오기
             imported = [{'종목명': i.get('prdt_name'), '티커': str(i.get('pdno')).strip().zfill(6), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
-            st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'stocks': imported}
+            st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'cash_avail': dnca_tot, 'stocks': imported}
 
 kis_data = st.session_state.get(cache_key)
 
@@ -660,14 +661,8 @@ if kis_data:
     real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
     real_total_eval = kis_data.get('total_eval', 0.0)
     real_eval_pnl = kis_data.get('total_pnl', 0.0)
+    real_cash_avail = kis_data.get('cash_avail', total_cash) # 단순 뺄셈 제거, KIS 정확한 예수금(D+2) 연동
     real_stocks_df = pd.DataFrame(kis_data['stocks'])
-    
-    if not real_stocks_df.empty:
-        viz_df = real_stocks_df.copy()
-        viz_df['평가금액'] = viz_df['보유수량'].str.replace(' 주', '').str.replace(',', '').astype(float) * viz_df['_raw_price']
-        real_cash_avail = real_total_eval - viz_df['평가금액'].sum()
-    else:
-        real_cash_avail = real_total_eval
 
 real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
 try: real_base_date = pd.to_datetime(real_base_date_str).date()
@@ -771,7 +766,6 @@ if tg_token and tg_chat_id:
         auto_trade_enabled = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at, key=at_key)
         auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기", value=init_ap, key=ap_key)
         
-        # [Step 2] UI 다이어트: 자바스크립트 강제 새로고침 코드 제거됨
         needs_settings_save = False
         if kill_switch != init_ks:
             p_data['kill_switch'] = kill_switch
@@ -1082,7 +1076,7 @@ with tab1:
                     st.rerun()
                 else: st.warning("⚠️ 삭제할 종목을 체크박스로 선택해주세요.")
 
-        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램으로 전송", key="send_tg_virtual"):
+        if auto_pilot or st.button("📲 현재 AI 진단 결과를 텔레그램 전송", key="send_tg_virtual"):
             changed_msgs, needs_save = [], False
             for idx, r_dict in enumerate(p_data['stocks']):
                 s_name = r_dict['종목명']
@@ -1772,7 +1766,7 @@ with tab5:
         1.  **장기 추세 방어:** 현재 주가가 200일 이동평균선(MA200) 이상에 위치.
         2.  **수급(거래량) 폭발 🚀:** 최근 20일 이내에, 거래량이 5일 평균 거래량 대비 **200% 이상 급증**한 이력이 존재하는 명백한 주도주.
         3.  **스마트 눌림목 포착:** 단기 급등 후 조정을 받아 현재 주가가 20일선 부근(`-5% ~ +3%`)으로 조정을 받았거나, 당일 저가가 20일선을 터치(`1.01배 이내`)하고 지지를 받으며 꼬리를 만듦.
-        4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 것 (심각한 악재로 인한 폭락 방지).
+        4.  **하방 리스크 제한:** 최근 120일 최고가 대비 하락폭(MDD)이 `-30%` 이내일 매 (심각한 악재로 인한 폭락 방지).
         5.  **고점 형성 경과일수 필터 (Peak Recency):** 최고가가 형성된 시점이 최근 45일 이내여야 함 (장기 역배열 설거지 파동 배제).
         6.  **거래량 감쇄 검증 (Volume Contraction):** 조정 구간의 5일 평균 거래량이 고점 당일 폭발했던 거래량의 50% 이하로 감소해야 함 (매도세 소진 확인).
     *   **🔴 AI 이탈(매도/손절/퇴출) 조건:**
