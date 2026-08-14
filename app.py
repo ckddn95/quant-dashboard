@@ -266,8 +266,7 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
-# 🛑 [완벽 동기화 엔진 1] 관심종목 유니버스 포트폴리오 백테스트 (Test 1, Test 2)
-# 총자산 기반 max_alloc_pct 비중 관리 완벽 적용
+# 🛑 [시뮬레이터 1] 관심종목 유니버스 포트폴리오 백테스트 (Test 1, Test 2)
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -291,19 +290,11 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     if not all_trade_dates: return None
     
     cash = float(init_cash)
-    positions = {} # {tk: {'qty': int, 'buy_price': float, 'highest_price': float}}
+    positions = {}
     trade_stats = {tk: {'buy_cnt': 0, 'sell_cnt': 0, 'total_fee': 0.0, 'realized_pnl': 0.0, 'name': v['name']} for tk, v in sim_data.items()}
     
     for curr_date in all_trade_dates:
-        # 1. 일일 총자산 계산
-        stock_eval_sum = 0.0
-        for tk, pos in positions.items():
-            df = sim_data[tk]['df']
-            cp = df.loc[curr_date, 'Close'] if curr_date in df.index else pos['buy_price']
-            stock_eval_sum += pos['qty'] * cp
-        total_equity = cash + stock_eval_sum
-        
-        # 2. 매도 조건 검사 (손절, 트레일링, 추세이탈)
+        # 1. 매도 조건 검사
         for tk in list(positions.keys()):
             pos = positions[tk]
             df = sim_data[tk]['df']
@@ -332,12 +323,8 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                 trade_stats[tk]['realized_pnl'] += net_proc - (pos['qty'] * pos['buy_price'] * 1.0025)
                 del positions[tk]
                 
-        # 3. 매수 조건 검사 (실전과 동일한 총자산 비중 할당)
-        stock_eval_sum = 0.0
-        for tk, pos in positions.items():
-            df = sim_data[tk]['df']
-            cp = df.loc[curr_date, 'Close'] if curr_date in df.index else pos['buy_price']
-            stock_eval_sum += pos['qty'] * cp
+        # 2. 매수 조건 검사 (총자산 비중 할당)
+        stock_eval_sum = sum(pos['qty'] * (sim_data[tk]['df'].loc[curr_date, 'Close'] if curr_date in sim_data[tk]['df'].index else pos['buy_price']) for tk, pos in positions.items())
         total_equity = cash + stock_eval_sum
         target_per_stock = total_equity * (max_alloc_pct / 100.0)
         
@@ -380,7 +367,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     else:
                         positions[tk] = {'qty': q, 'buy_price': cp, 'highest_price': cp}
                         
-    # 4. 최종 결과 집계
+    # 3. 최종 결과 집계
     summary_rows = []
     total_final_val = cash
     
@@ -408,7 +395,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             
     return {'final_asset': total_final_val, 'final_port_ret': final_port_ret, 'summary_rows': summary_rows}
 
-# 🛑 [완벽 동기화 엔진 2] Test 3: AI 스캐너 발굴 ➡️ 관심종목 등록 ➡️ 동일 비중 매매 파이프라인
+# 🛑 [시뮬레이터 2] Test 3: AI 스캐너 발굴 ➡️ 관심종목 등록 ➡️ 동일 비중 매매 파이프라인
 @st.cache_data(ttl=1800)
 def run_scanner_pipeline_backtest(strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp):
     krx = load_krx_universe()
@@ -481,11 +468,7 @@ def run_scanner_pipeline_backtest(strat, init_cash, start_date, end_date, use_ma
                 del positions[tc]
                 
         # [B단계] 실전 봇과 동일한 총자산 비중(max_alloc_pct) 할당 매수
-        stock_eval_sum = 0.0
-        for tc, pos in positions.items():
-            df = data_dict[tc]['df']
-            cp = df.loc[current_date, 'Close'] if current_date in df.index else pos['buy_price']
-            stock_eval_sum += pos['qty'] * cp
+        stock_eval_sum = sum(pos['qty'] * (data_dict[tc]['df'].loc[current_date, 'Close'] if current_date in data_dict[tc]['df'].index else pos['buy_price']) for tc, pos in positions.items())
         total_equity = cash + stock_eval_sum
         target_per_stock = total_equity * (max_alloc_pct / 100.0)
         
@@ -657,7 +640,9 @@ real_base_date_str = p_data.get('created_at', '2024-01-01') if p_data else '2024
 try: real_base_date = pd.to_datetime(real_base_date_str).date()
 except: real_base_date = datetime.datetime.now(KST).date()
 
-total_invested_principal = real_total_eval - real_eval_pnl if real_total_eval > 0 else 0.0
+# 🛑 [핵심 선언] 실계좌 투자 원금 및 전역 변수 완벽 정의
+real_invested_principal = real_total_eval - real_eval_pnl if real_total_eval > 0 else 0.0
+total_invested_principal = real_invested_principal
 
 if p_data:
     st.sidebar.markdown("---")
@@ -810,7 +795,7 @@ with tab2:
     if SYS_APP_KEY and kis_data:
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.markdown(mts_metric_html("💰 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
-        col_m2.markdown(mts_metric_html("📥 투자 원금", f"{total_invested_principal:,.0f} 원"), unsafe_allow_html=True)
+        col_m2.markdown(mts_metric_html("📥 투자 원금", f"{real_invested_principal:,.0f} 원"), unsafe_allow_html=True)
         col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
         col_m4.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
         if not real_stocks_df.empty:
@@ -892,7 +877,7 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
-# 🛑 [완성된 Tab 4] 총자산 기반 동적 비중 분할 매수가 100% 반영된 시뮬레이션
+# 🛑 [완성된 Tab 4] Test 1, 2, 3 정렬 및 NameError 방지 패치
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -915,7 +900,8 @@ with tab4:
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner("포워드 테스트 구동 중..."):
-                    res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal if total_invested_principal > 0 else total_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    eval_init_cash = real_invested_principal if real_invested_principal > 0 else total_cash
+                    res_fw = run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if res_fw:
                         real_ret_pct = (real_eval_pnl / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
                         col_fw1, col_fw2 = st.columns(2)
