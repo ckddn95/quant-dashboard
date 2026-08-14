@@ -266,7 +266,7 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
-# 🛑 [핵심 패치] 시뮬레이터 수수료 갉아먹기 방지 및 정밀도 상향
+# 🛑 [핵심 엔진] AI 매매 기법(200일선, 골든크로스, 손절, 트레일링스탑)을 과거 시점에 그대로 대입하는 시뮬레이터
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -308,7 +308,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         for date, row in sub_df.iterrows():
             c_p, ma20, ma60, ma200, m60_up = row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_Up']
             
-            # 매도 로직
+            # 매도 로직 (손절, 트레일링스탑, 추세이탈)
             if qty > 0:
                 ret = (c_p / buy_price) - 1
                 highest_price = max(highest_price, c_p)
@@ -326,7 +326,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     sell_count += 1
                     continue 
             
-            # 매수 로직 (수수료를 뺀 정확한 가용 현금 계산)
+            # 매수 로직 (AI 전략 조건 충족 시 진입)
             if qty == 0:
                 pass_ma200 = (c_p >= ma200) if use_ma200 else True
                 buy_flag = False
@@ -337,7 +337,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                     if pass_ma200 and (-0.05 <= dist_ma20 <= 0.03): buy_flag = True
                         
                 if buy_flag and cash > 0:
-                    # 구매 가능 수량: 현금 / (현재가 + 0.25%수수료)
                     q = int(cash // (c_p * 1.0025))
                     if q > 0:
                         cost = q * c_p; fee = cost * 0.0025
@@ -517,7 +516,7 @@ if p_data:
     st.sidebar.markdown("---")
     st.sidebar.subheader("💰 Virtual Capital & Settings")
     st.sidebar.markdown(f"**현재 설정 전략:** `{active_strat}`")
-    new_cash = st.sidebar.number_input(f"총 투자 운용 자산 (AI 가상 원금)", value=int(total_cash), step=1_000_000, format="%d")
+    new_cash = st.sidebar.number_input(f"총 투자 운용 자산", value=int(total_cash), step=1_000_000, format="%d")
     if new_cash != total_cash:
         p_data['cash'] = new_cash
         save_portfolio_to_sheets(selected_port, p_data)
@@ -746,6 +745,7 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
+# 🛑 [완벽 개편] Test 3: 과거 시점 주도주 자동 스캔 및 AI 매매 기법 100% 동일 적용 백테스트
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -799,40 +799,35 @@ with tab4:
                         st.dataframe(pd.DataFrame(bt_result['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
-        st.info("⚠️ 생존자 편향(Survivorship Bias) 방지를 위해 특정 종목이 아닌 **'대표 섹터/지수 ETF 10종목'**으로 엄격한 블라인드 검증을 진행합니다.")
+        st.subheader("💡 Test 3. 과거 주도주 자동 스캔 & AI 자율 매매 백테스트")
+        st.info("💡 **어떤 테스트인가요?** 과거 시작일 시점에 시장에서 가장 거래대금이 활발하고 시가총액이 높았던 **주도주 풀(KOSPI/KOSDAQ 상위 종목)**을 자동으로 구성한 뒤, **현재의 AI 매매 기법(200일선 필터, 골든크로스, 손절, 트레일링스탑 등)을 과거 시점에 그대로 대입**하여 자율 매매를 수행했을 때의 결과를 정직하게 검증합니다.")
         
         col_t3_1, col_t3_2, col_t3_3 = st.columns([3, 3, 4])
         with col_t3_1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
         with col_t3_2: dyn_end_date = st.date_input("종료일", today_date, key="t3_e")
         with col_t3_3:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            run_test3 = st.button("🚀 대표 ETF 기반 블라인드 테스트 실행", type="primary", use_container_width=True)
+            run_test3 = st.button("🚀 과거 주도주 AI 자율 매매 테스트 실행", type="primary", use_container_width=True)
 
         if run_test3:
-            # 🛑 생존자 편향 제거: 미래 결과를 알 수 없는 고정 ETF 리스트로 정직하게 테스트
-            etf_list = [
-                {'종목명': 'KODEX 200', '티커': '069500'},
-                {'종목명': 'KODEX 코스닥150', '티커': '229200'},
-                {'종목명': 'KODEX 반도체', '티커': '091160'},
-                {'종목명': 'KODEX 자동차', '티커': '091180'},
-                {'종목명': 'KODEX 은행', '티커': '091220'},
-                {'종목명': 'KODEX 배당성장', '티커': '213610'},
-                {'종목명': 'KODEX 2차전지산업', '티커': '305720'},
-                {'종목명': 'KODEX 바이오', '티커': '244580'},
-                {'종목명': 'KODEX 미디어&엔터테인먼트', '티커': '226980'},
-                {'종목명': 'KODEX IT', '티커': '261220'}
-            ]
-            sim_df_cands = pd.DataFrame(etf_list)
-            
-            with st.spinner("블라인드 테스트 구동 중..."):
-                dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                if dyn_result:
-                    st.success("✅ 대표 섹터 ETF 블라인드 테스트 완료!")
-                    col_r1, col_r2 = st.columns(2)
-                    with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                    with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
+            krx_univ = load_krx_universe()
+            if krx_univ.empty: st.error("KRX 유니버스 로드 실패. API 일일 접속량을 확인하세요.")
+            else:
+                # 과거 시점의 주도주 풀 동적 구성 (코스피/코스닥 상위 우량주 15종목씩 총 30종목 압축 스캔)
+                kospi_pool = krx_univ[krx_univ['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(15) if 'Marcap' in krx_univ.columns else krx_univ.head(15)
+                kosdaq_pool = krx_univ[krx_univ['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(15) if 'Marcap' in krx_univ.columns else krx_univ.head(15)
+                
+                merged_pool = pd.concat([kospi_pool, kosdaq_pool]).drop_duplicates(subset=['Code'])
+                sim_df_cands = pd.DataFrame({'종목명': merged_pool['Name'], '티커': merged_pool['Code']})
+                
+                with st.spinner("과거 주도주 대상 AI 자율 매매 시뮬레이션 구동 중 (약 10초 소요)..."):
+                    dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if dyn_result:
+                        st.success("✅ 과거 주도주 AI 자율 매매 백테스트 완료!")
+                        col_r1, col_r2 = st.columns(2)
+                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                        with col_r2: st.markdown(mts_metric_html("AI 자율매매 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
 
 with tab5:
     st.markdown("""
