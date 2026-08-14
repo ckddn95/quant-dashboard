@@ -195,6 +195,38 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e:
         return None, None, f"서버 통신 에러: {str(e)}"
 
+# 🛑 [신규 패치] MTS와 100% 동일한 '주문가능 원화' 전용 조회 API
+def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
+    if not token: return 0.0
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
+    tr_id = "VTTC8908R" if is_mock else "TTTC8908R"
+    headers = {
+        "content-type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": tr_id,
+        "custtype": "P"
+    }
+    params = {
+        "CANO": str(cano).replace("-", "").strip()[:8],
+        "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2),
+        "PDNO": "005930",  # API 스펙상 필수이므로 임의의 삼성전자 티커 전송
+        "ORD_UNPR": "0",   # 시장가 조회
+        "ORD_DVSN": "01",  # 시장가
+        "CMA_EVLU_AMT_ICLD_YN": "N",
+        "OVRS_ICLD_YN": "N"
+    }
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            rj = res.json()
+            if rj.get('rt_cd') == '0':
+                return float(rj.get('output', {}).get('ord_psbl_cash', 0))
+    except: pass
+    return 0.0
+
 def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
@@ -266,7 +298,6 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
-# 🛑 [시뮬레이터 1] 관심종목 유니버스 포트폴리오 백테스트 (Test 1, Test 2)
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -294,7 +325,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     trade_stats = {tk: {'buy_cnt': 0, 'sell_cnt': 0, 'total_fee': 0.0, 'realized_pnl': 0.0, 'name': v['name']} for tk, v in sim_data.items()}
     
     for curr_date in all_trade_dates:
-        # 매도 조건 검사
         for tk in list(positions.keys()):
             pos = positions[tk]
             df = sim_data[tk]['df']
@@ -323,7 +353,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                 trade_stats[tk]['realized_pnl'] += net_proc - (pos['qty'] * pos['buy_price'] * 1.0025)
                 del positions[tk]
                 
-        # 매수 조건 검사 (총자산 비중 할당)
         stock_eval_sum = sum(pos['qty'] * (sim_data[tk]['df'].loc[curr_date, 'Close'] if curr_date in sim_data[tk]['df'].index else pos['buy_price']) for tk, pos in positions.items())
         total_equity = cash + stock_eval_sum
         target_per_stock = total_equity * (max_alloc_pct / 100.0)
@@ -394,13 +423,11 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             
     return {'final_asset': total_final_val, 'final_port_ret': final_port_ret, 'summary_rows': summary_rows}
 
-# 🛑 [시뮬레이터 2] Test 3: 완벽한 실전 모사 (주간 스캔 ➡️ 익일 시가 매수 ➡️ 장중 저가 칼손절 로직)
 @st.cache_data(ttl=1800)
 def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp):
     krx = load_krx_universe()
     if krx.empty: return None
     
-    # 1. 시뮬레이션용 넓은 유니버스 풀 구성 (대형 우량주 위주)
     cands_kospi = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(30) if 'Marcap' in krx.columns else krx.head(30)
     cands_kosdaq = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(30) if 'Marcap' in krx.columns else krx.head(30)
     merged_cands = pd.concat([cands_kospi, cands_kosdaq]).drop_duplicates(subset=['Code'])
@@ -410,7 +437,6 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
     if year == datetime.datetime.now(KST).year:
         end_date = datetime.datetime.now(KST).strftime('%Y-%m-%d')
         
-    # 과거 보조지표 계산을 위해 400일 전 데이터부터 호출
     f_start = pd.to_datetime(start_date) - datetime.timedelta(days=400)
     
     data_dict = {}
@@ -441,7 +467,6 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
     max_slots = max(3, int(100 / max_alloc_pct))
     
     for i, current_date in enumerate(all_trade_dates):
-        # [A단계] 익일 시가(Open) 매수 체결 (어제 발생한 시그널)
         for q in buy_queue:
             tc = q['tk']
             if tc in positions: continue
@@ -452,7 +477,6 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
             open_p = df.loc[current_date, 'Open']
             if pd.isna(open_p) or open_p <= 0: continue
             
-            # 동적 비중 계산
             stock_eval_sum = sum(pos['qty'] * data_dict[ptk]['df'].loc[current_date, 'Open'] if current_date in data_dict[ptk]['df'].index else pos['buy_price'] for ptk, pos in positions.items())
             total_equity = cash + stock_eval_sum
             target_fund = total_equity * (max_alloc_pct / 100.0)
@@ -467,9 +491,8 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                     'qty': q_qty, 'buy_price': open_p, 'highest_price': df.loc[current_date, 'High'],
                     'buy_date': current_date, 'name': q['name']
                 }
-        buy_queue = [] # 매수 큐 비우기
+        buy_queue = [] 
         
-        # [B단계] 주간 AI 스캐너 작동 (매주 월요일마다 관심종목 갱신)
         if current_date.weekday() == 0 or i == 0:
             weekly_watchlist = []
             for tc, val in data_dict.items():
@@ -493,7 +516,6 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                         
             weekly_watchlist = sorted(weekly_watchlist, key=lambda x: x['score'], reverse=True)[:15]
 
-        # [C단계] 보유 종목 실시간 청산 검사 (장중 저가 기준 칼손절)
         for tc in list(positions.keys()):
             pos = positions[tc]
             df = data_dict[tc]['df']
@@ -508,13 +530,11 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
             sell_price = 0.0
             sell_reason = ""
             
-            # 장중 저가 손절 검사
             sl_target = pos['buy_price'] * (1 + sl) 
             if low_p <= sl_target:
                 sell_price = min(open_p, sl_target)
                 sell_reason = f"🔴 장중 손절컷"
             else:
-                # 장중 트레일링 익절 검사
                 ts_trigger = pos['buy_price'] * (1 + ts_tgt)
                 if pos['highest_price'] >= ts_trigger:
                     ts_target = pos['highest_price'] * (1 + ts_drp)
@@ -522,7 +542,6 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                         sell_price = min(open_p, ts_target)
                         sell_reason = f"🔵 장중 트레일링 익절"
                         
-            # 종가 추세이탈 검사
             if sell_price == 0.0:
                 ma20 = df.loc[current_date, 'MA20']
                 ma60 = df.loc[current_date, 'MA60']
@@ -549,7 +568,6 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                 })
                 del positions[tc]
         
-        # [D단계] 주간 관심종목 내 신규 진입 시그널 포착 (종가 기준) -> 내일 아침 시가에 매수 대기
         if len(positions) < max_slots:
             for w in weekly_watchlist:
                 tc = w['tk']
@@ -578,7 +596,6 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                     buy_queue.append({'tk': tc, 'name': w['name']})
                     if len(positions) + len(buy_queue) >= max_slots: break
                     
-    # 최종 결산
     final_stock_eval = sum(pos['qty'] * data_dict[tc]['df']['Close'].iloc[-1] for tc, pos in positions.items())
     final_total_asset = cash + final_stock_eval
     final_ret_pct = ((final_total_asset / init_cash) - 1) * 100
@@ -702,10 +719,14 @@ if SYS_APP_KEY and kis_token_global:
         if holdings is not None and summary is not None:
             tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
             tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
-            dnca_tot = float(summary[0].get('dnca_tot_amt', 0))
+            
+            # 🛑 [주문가능 원화 API 호출]
+            ord_psbl_cash = fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
+            dnca_tot = ord_psbl_cash if ord_psbl_cash > 0 else float(summary[0].get('dnca_tot_amt', 0))
+            
             imported = [{'종목명': i.get('prdt_name'), '티커': str(i.get('pdno')).strip().zfill(6), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
             st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'cash_avail': dnca_tot, 'stocks': imported}
-            st.sidebar.success("✅ 최신 잔고 동기화 완료!")
+            st.sidebar.success("✅ 최신 잔고 및 주문가능 금액 동기화 완료!")
         else:
             st.sidebar.error(f"❌ 동기화 실패: {err_msg}")
             st.sidebar.info("API 설정(실계좌/모의)을 다시 확인해 주세요.")
@@ -883,7 +904,8 @@ with tab2:
         col_m1.markdown(mts_metric_html("💰 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
         col_m2.markdown(mts_metric_html("📥 투자 원금", f"{real_invested_principal:,.0f} 원"), unsafe_allow_html=True)
         col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
-        col_m4.markdown(mts_metric_html("💵 가용 현금", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
+        # 🛑 [라벨 변경] 가용 현금 -> 주문가능 원화
+        col_m4.markdown(mts_metric_html("💵 주문가능 원화", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
         if not real_stocks_df.empty:
             display_real_df = real_stocks_df.drop(columns=['_raw_price', '_raw_buy'], errors='ignore')
             st.dataframe(display_real_df, use_container_width=True, hide_index=True)
@@ -895,7 +917,8 @@ with tab3:
     col_c1, col_c2, col_c3 = st.columns(3)
     col_c1.metric("🚨 킬 스위치", "차단됨" if kill_switch else "정상")
     col_c2.metric("🚀 자동주문", "활성화" if auto_trade_enabled else "비활성화")
-    col_c3.metric("💵 가용 예수금", f"{real_cash_avail:,.0f} 원")
+    # 🛑 [라벨 변경] 가용 예수금 -> 주문가능 원화
+    col_c3.metric("💵 주문가능 원화", f"{real_cash_avail:,.0f} 원")
     st.markdown("---")
     
     current_asset_base = real_total_eval if (SYS_APP_KEY and kis_data) else total_cash
@@ -1023,7 +1046,6 @@ with tab4:
         
         col_t3_1, col_t3_2 = st.columns([3, 7])
         with col_t3_1: 
-            # 🛑 1년 단위 연도 선택 콤보박스 (서버 과부하 차단)
             available_years = list(range(today_date.year, 2021, -1))
             selected_year = st.selectbox("📅 시뮬레이션 연도", available_years)
         with col_t3_2:
