@@ -2,142 +2,127 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import FinanceDataReader as fdr
-import datetime
-import warnings
+from dataclasses import dataclass
+from typing import Optional, Tuple
+from datetime import datetime, timedelta
 
-warnings.filterwarnings('ignore')
+@dataclass
+class MarketSnapshot:
+    vix_value: float
+    is_valid: bool
+    reason: str = ""
 
-KST = datetime.timezone(datetime.timedelta(hours=9))
+@dataclass
+class StockSnapshot:
+    ticker: str
+    close: float
+    low: float
+    volume: float
+    ma200: float
+    ma60: float
+    ma20: float
+    ret_60: float
+    ret_20: float
+    drawdown: float
+    avg_trade_val: float
+    days_since_peak: int
+    vol_contraction: float
+    ma60_slope_positive: bool
+    is_above_ma200: bool
+    vol_surged: bool
 
-def load_krx_universe():
-    """KRX 전체 종목을 가져옵니다. 통신 장애 시 3중 우회합니다."""
-    try: 
-        df = fdr.StockListing('KRX')
-        if not df.empty and 'Code' in df.columns and 'Name' in df.columns:
-            return df.dropna(subset=['Code', 'Name'])
-    except: 
-        pass
-        
+@dataclass
+class StrategyConfig:
+    strategy_name: str
+    use_ma200_filter: bool
+    ma_buffer_pct: float
+    stop_loss_pct: float
+    ts_target_pct: float
+    ts_drop_pct: float
+    max_alloc_pct: float
+    min_liquidity: float = 5000000000.0
+
+@dataclass
+class PositionState:
+    ticker: str
+    managed_qty: int
+    avg_fill_price: float
+    highest_price: float
+    trailing_armed: bool
+
+def fetch_market_snapshot() -> MarketSnapshot:
     try:
-        df_kpi = fdr.StockListing('KOSPI')
-        df_kdq = fdr.StockListing('KOSDAQ')
-        
-        if not df_kpi.empty and not df_kdq.empty:
-            if 'Market' not in df_kpi.columns: df_kpi['Market'] = 'KOSPI'
-            if 'Market' not in df_kdq.columns: df_kdq['Market'] = 'KOSDAQ'
-            
-            df = pd.concat([df_kpi, df_kdq], ignore_index=True)
-            if not df.empty and 'Code' in df.columns and 'Name' in df.columns:
-                return df.dropna(subset=['Code', 'Name'])
-    except:
-        pass
-        
-    return pd.DataFrame()
+        # VIX Fail-Closed 정책 적용
+        v_df = yf.download("^VIX", period="5d", progress=False)
+        if v_df.empty: return MarketSnapshot(0.0, False, "DATA_INVALID")
+        if isinstance(v_df.columns, pd.MultiIndex): v_df.columns = v_df.columns.get_level_values(0)
+        vix_val = float(v_df['Close'].iloc[-1])
+        if vix_val >= 30.0: return MarketSnapshot(vix_val, False, "RISK_OFF")
+        return MarketSnapshot(vix_val, True, "NORMAL")
+    except Exception as e:
+        return MarketSnapshot(0.0, False, f"DATA_ERROR: {str(e)}")
 
-def fetch_market_data():
-    """VIX 공포지수 및 코스피/코스닥 모멘텀을 가져옵니다."""
+def fetch_stock_snapshot(ticker: str) -> Optional[StockSnapshot]:
     try:
-        k_close = fdr.DataReader('KS11')['Close'].tail(61)
-        kospi_ret_60 = ((float(k_close.iloc[-1]) / float(k_close.iloc[-60])) - 1) * 100 if len(k_close) >= 60 else 0.0
-        kq_close = fdr.DataReader('KQ11')['Close'].tail(61)
-        kosdaq_ret_60 = ((float(kq_close.iloc[-1]) / float(kq_close.iloc[-60])) - 1) * 100 if len(kq_close) >= 60 else 0.0
-    except:
-        kospi_ret_60, kosdaq_ret_60 = 0.0, 0.0
+        df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'))
+        if len(df) < 200: return None # P0: 데이터 부족 시 거래 금지
         
-    try:
-        vix_df = yf.download("^VIX", period="3mo", progress=False)
-        if vix_df.empty: raise ValueError("VIX Data Empty")
-        vix_close = vix_df['Close'].dropna()
-        vix_val, vix_ma3 = float(vix_close.iloc[-1]), float(vix_close.rolling(3).mean().iloc[-1])
-        return vix_val, (vix_val >= 25.0) and (vix_val < vix_ma3), (vix_val < 30.0), kospi_ret_60, kosdaq_ret_60
-    except:
-        try:
-            k_20 = fdr.DataReader('KS11')['Close'].tail(20)
-            k_dd = (k_20.iloc[-1] / k_20.max()) - 1
-            v_safe = True if k_dd > -0.10 else False 
-            v_con = True if k_dd <= -0.15 else False 
-            return 20.0, v_con, v_safe, kospi_ret_60, kosdaq_ret_60
-        except: return 20.0, False, True, kospi_ret_60, kosdaq_ret_60
+        close, low, vol = float(df['Close'].iloc[-1]), float(df['Low'].iloc[-1]), float(df['Volume'].iloc[-1])
+        ma200, ma60, ma20 = df['Close'].rolling(200).mean().iloc[-1], df['Close'].rolling(60).mean().iloc[-1], df['Close'].rolling(20).mean().iloc[-1]
+        
+        ret_60 = (close / df['Close'].iloc[-61]) - 1 if len(df) >= 61 else 0
+        ret_20 = (close / df['Close'].iloc[-21]) - 1 if len(df) >= 21 else 0
+        ma60_slope_positive = float(ma60) > float(df['Close'].rolling(60).mean().iloc[-11])
+        
+        high_120 = df['Close'].rolling(120).max().iloc[-1]
+        drawdown = (close / high_120) - 1 if high_120 > 0 else 0
+        days_since_peak = int(np.argmax(df['Close'].tail(120).values[::-1]))
+        
+        v5 = df['Volume'].rolling(5).mean().shift(1).iloc[-1]
+        df['VR'] = np.where(df['Volume'].rolling(5).mean().shift(1) > 0, df['Volume'] / df['Volume'].rolling(5).mean().shift(1) * 100, 100)
+        vol_surged = float(df['VR'].rolling(20).max().iloc[-1]) >= 200.0
+        
+        peak_vol_20 = df['Volume'].rolling(20).max().iloc[-1]
+        vol_contraction = (df['Volume'].rolling(5).mean().iloc[-1] / peak_vol_20) if peak_vol_20 > 0 else 1.0
+        atv = float((df['Close'] * df['Volume']).rolling(5).mean().iloc[-1])
+        
+        return StockSnapshot(ticker, close, low, vol, ma200, ma60, ma20, ret_60, ret_20, drawdown, atv, days_since_peak, vol_contraction, ma60_slope_positive, (close >= ma200), vol_surged)
+    except: return None
 
-def fetch_stock_status(ticker_code):
-    """특정 종목의 기술적 지표(이동평균, 거래량 감쇄 등)를 계산합니다."""
-    try:
-        tc = str(ticker_code).strip().zfill(6)
-        start_dt = (datetime.datetime.now(KST).date() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
-        
-        df = fdr.DataReader(tc, start=start_dt)
-        if not df.empty and len(df) > 0:
-            close_p, vol = df['Close'].dropna(), df['Volume'].dropna()
-            low_p = df['Low'].dropna() if 'Low' in df.columns else close_p
-            if len(close_p) == 0: return None
-            
-            y_p, y_l = float(close_p.iloc[-1]), float(low_p.iloc[-1])
-            ma200 = float(close_p.rolling(200).mean().iloc[-1]) if len(close_p) >= 200 else y_p
-            ma60 = float(close_p.rolling(60).mean().iloc[-1]) if len(close_p) >= 60 else y_p
-            ma60_10 = float(close_p.rolling(60).mean().iloc[-11]) if len(close_p) >= 70 else ma60
-            ma20 = float(close_p.rolling(20).mean().iloc[-1]) if len(close_p) >= 20 else y_p
-            
-            tail_120 = close_p.tail(120)
-            rh = float(tail_120.max())
-            dd = ((y_p / rh) - 1) * 100 if rh > 0 else 0.0
-            
-            days_since_peak = len(tail_120) - 1 - int(np.argmax(tail_120.values))
-            
-            vol_5ma = float(vol.tail(6).iloc[:-1].mean()) if len(vol) >= 6 else float(vol.iloc[-1])
-            avg_trade_val = vol_5ma * y_p 
-            
-            peak_vol_20 = float(vol.tail(20).max())
-            vol_contraction = float(vol_5ma / peak_vol_20) if peak_vol_20 > 0 else 1.0
-            
-            vr = (float(vol.iloc[-1]) / vol_5ma * 100) if vol_5ma > 0 else 100.0
-            r60 = ((y_p / float(close_p.iloc[-60])) - 1) * 100 if len(close_p) >= 60 else 0.0
-            r20 = ((y_p / float(close_p.iloc[-20])) - 1) * 100 if len(close_p) >= 20 else 0.0
-            vr_s = pd.Series(np.where(vol.rolling(5).mean().shift(1) > 0, vol / vol.rolling(5).mean().shift(1) * 100, 100.0), index=vol.index)
-            rvm = float(vr_s.tail(20).max())
-            
-            return (y_p, ma200, ma60, ma20, dd, vr, r60, r20, (ma60 > ma60_10), (y_p >= ma200), rvm >= 200.0, y_l, rvm, avg_trade_val, days_since_peak, vol_contraction)
-    except: pass
-    return None
+def generate_signal(snap: StockSnapshot, mkt: MarketSnapshot, cfg: StrategyConfig) -> dict:
+    if not mkt.is_valid: return {"entry": False, "score": 0.0, "reason": mkt.reason}
+    if snap.avg_trade_val < cfg.min_liquidity: return {"entry": False, "score": 0.0, "reason": "LIQUIDITY_LOW"}
 
-def analyze_quant_strategy(strat_name, c_price, buy_price, highest_price, ma200, ma60, ma20, yf_low, ret_60, ret_20, ma60_slope_positive, drawdown, vol_surged, recent_vol_max, vix_safe, vix_contrarian, use_ma200_filter, buf_pct, ts_target_pct, ts_drop_pct, sat_stop_loss_pct, days_since_peak, vol_contraction):
-    """지표를 바탕으로 최종 매수/매도/홀딩 여부와 스코어를 판별합니다."""
-    buf = buf_pct / 100.0 if buf_pct else 0.0
-    sat_stop_loss = sat_stop_loss_pct / 100.0 if sat_stop_loss_pct else -0.15
-    ts_target = ts_target_pct / 100.0 if ts_target_pct else 0.30
-    ts_drop = ts_drop_pct / 100.0 if ts_drop_pct else -0.05
-    
-    user_ret = ((c_price / buy_price) - 1) if buy_price > 0 else 0.0
-    diff_ma = ((ma20 / ma60) - 1) if ma60 > 0 else 0.0
-    dist_ma20 = ((c_price / ma20) - 1) if ma20 > 0 else 0.0
-    
-    is_above_ma200 = (c_price >= ma200)
-    ma200_cond = is_above_ma200 if use_ma200_filter else True
-    current_low = min(yf_low, c_price)
-    
-    is_ts_active = (user_ret >= ts_target)
-    drawdown_from_high = ((c_price / highest_price) - 1) if highest_price > 0 else 0.0
-    trailing_stop_triggered = is_ts_active and (drawdown_from_high <= ts_drop)
-    
-    res = {
-        'ai_score': 0.0, 'entry_cond': False, 'exit_cond_trend': False,
-        'stop_loss_cond': False, 'trailing_stop_cond': trailing_stop_triggered,
-        'diff_ma_pct': diff_ma * 100, 'dist_ma20_pct': dist_ma20 * 100,
-        'user_ret_pct': user_ret * 100, 'is_above_ma200': is_above_ma200,
-        'vol_surged': vol_surged, 'drawdown': drawdown,
-        'days_since_peak': days_since_peak, 'vol_contraction': vol_contraction
-    }
-    
-    if strat_name == '대형주 (Core)':
-        res['ai_score'] = round((ret_20 * 0.5) + (ret_60 * 0.3) + (diff_ma * 100 * 0.2), 2)
-        res['entry_cond'] = is_above_ma200 and ((ma20 >= ma60 * (1 + buf) and ma60_slope_positive and ret_20 > 0 and vix_safe) or vix_contrarian)
-        res['exit_cond_trend'] = (ma20 < ma60 * (1 - buf/2)) and not vix_contrarian 
-        res['stop_loss_cond'] = (user_ret <= -0.15) 
-    else: 
-        res['ai_score'] = round((recent_vol_max / 100.0) * 0.4 + (ret_60 * 0.3) + (ret_20 * 0.3), 2)
-        is_dip = (-0.05 <= dist_ma20 <= 0.03) or (current_low <= ma20 * 1.01)
-        sat_normal_buy = is_dip and vol_surged and (days_since_peak <= 45) and (vol_contraction <= 0.50)
-        res['entry_cond'] = is_above_ma200 and (sat_normal_buy or vix_contrarian) and drawdown >= -0.30 and ma60_slope_positive and ret_20 > -0.03
-        res['exit_cond_trend'] = (c_price < ma20 * (1 - buf/2)) and not vix_contrarian 
-        res['stop_loss_cond'] = (user_ret <= sat_stop_loss)
+    pass_ma200 = snap.is_above_ma200 if cfg.use_ma200_filter else True
+    score = snap.ret_60 * 100 # 단순 스코어링
+
+    if cfg.strategy_name == "Core":
+        cond = (pass_ma200 and (snap.ma20 >= snap.ma60 * (1 + cfg.ma_buffer_pct)) and snap.ma60_slope_positive and (snap.ret_20 > 0))
+        return {"entry": cond, "score": score, "reason": "CORE_COND_MET" if cond else "WAIT"}
         
-    return res
+    elif cfg.strategy_name == "Satellite":
+        dist_ma20 = (snap.close / snap.ma20) - 1
+        low_dist_ma20 = (snap.low / snap.ma20) - 1
+        is_dip = (-0.05 <= dist_ma20 <= 0.03) or (low_dist_ma20 <= 0.01 and dist_ma20 >= -0.05)
+        
+        cond = (pass_ma200 and is_dip and snap.vol_surged and (snap.days_since_peak <= 45) and 
+                (snap.vol_contraction <= 0.50) and (snap.drawdown >= -0.30) and (snap.ret_20 > -0.03))
+        return {"entry": cond, "score": score, "reason": "SAT_COND_MET" if cond else "WAIT"}
+        
+    return {"entry": False, "score": 0.0, "reason": "UNKNOWN_STRATEGY"}
+
+def evaluate_exit(snap: StockSnapshot, pos: PositionState, cfg: StrategyConfig) -> Tuple[bool, str, PositionState]:
+    ret = (snap.close / pos.avg_fill_price) - 1
+    if snap.close > pos.highest_price: pos.highest_price = snap.close
+    if ret >= cfg.ts_target_pct: pos.trailing_armed = True
+        
+    if ret <= cfg.stop_loss_pct: return True, "STOP_LOSS", pos
+        
+    if pos.trailing_armed:
+        drop_from_high = (snap.close / pos.highest_price) - 1
+        if drop_from_high <= cfg.ts_drop_pct: return True, "TRAILING_STOP", pos
+            
+    if cfg.strategy_name == "Core" and snap.ma20 < snap.ma60 * (1 - cfg.ma_buffer_pct / 2): return True, "TREND_EXIT", pos
+    elif cfg.strategy_name == "Satellite" and snap.close < snap.ma20 * (1 - cfg.ma_buffer_pct / 2): return True, "TREND_EXIT", pos
+            
+    return False, "HOLD", pos
