@@ -195,7 +195,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e:
         return None, None, f"서버 통신 에러: {str(e)}"
 
-# 🛑 [신규 패치] MTS와 100% 동일한 '주문가능 원화' 전용 조회 API
 def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     if not token: return 0.0
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
@@ -212,9 +211,9 @@ def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_
     params = {
         "CANO": str(cano).replace("-", "").strip()[:8],
         "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2),
-        "PDNO": "005930",  # API 스펙상 필수이므로 임의의 삼성전자 티커 전송
-        "ORD_UNPR": "0",   # 시장가 조회
-        "ORD_DVSN": "01",  # 시장가
+        "PDNO": "005930",  
+        "ORD_UNPR": "0",   
+        "ORD_DVSN": "01",  
         "CMA_EVLU_AMT_ICLD_YN": "N",
         "OVRS_ICLD_YN": "N"
     }
@@ -720,7 +719,6 @@ if SYS_APP_KEY and kis_token_global:
             tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
             tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
             
-            # 🛑 [주문가능 원화 API 호출]
             ord_psbl_cash = fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
             dnca_tot = ord_psbl_cash if ord_psbl_cash > 0 else float(summary[0].get('dnca_tot_amt', 0))
             
@@ -904,7 +902,6 @@ with tab2:
         col_m1.markdown(mts_metric_html("💰 총 평가 금액", f"{real_total_eval:,.0f} 원"), unsafe_allow_html=True)
         col_m2.markdown(mts_metric_html("📥 투자 원금", f"{real_invested_principal:,.0f} 원"), unsafe_allow_html=True)
         col_m3.markdown(mts_metric_html("📈 누적 수익금", f"{real_eval_pnl:+,.0f} 원"), unsafe_allow_html=True)
-        # 🛑 [라벨 변경] 가용 현금 -> 주문가능 원화
         col_m4.markdown(mts_metric_html("💵 주문가능 원화", f"{real_cash_avail:,.0f} 원"), unsafe_allow_html=True)
         if not real_stocks_df.empty:
             display_real_df = real_stocks_df.drop(columns=['_raw_price', '_raw_buy'], errors='ignore')
@@ -917,7 +914,6 @@ with tab3:
     col_c1, col_c2, col_c3 = st.columns(3)
     col_c1.metric("🚨 킬 스위치", "차단됨" if kill_switch else "정상")
     col_c2.metric("🚀 자동주문", "활성화" if auto_trade_enabled else "비활성화")
-    # 🛑 [라벨 변경] 가용 예수금 -> 주문가능 원화
     col_c3.metric("💵 주문가능 원화", f"{real_cash_avail:,.0f} 원")
     st.markdown("---")
     
@@ -1072,9 +1068,63 @@ with tab4:
                     else:
                         st.info("해당 연도 동안 AI 스캐너 조건에 포착되어 청산까지 완료된 거래가 없습니다.")
 
+# 🛑 [핵심 보강] 웹 시스템의 영구적인 기준이 될 '알고리즘 백서 및 시스템 프롬프트 헌장'
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
     <hr>
-    <p>본 시스템은 Core(대형주 추세추종)와 Satellite(중소형주 수급 눌림목) 전략을 결합한 듀얼 퀀트 시스템입니다.</p>
+    
+    <h3>📌 1. 대원칙 (Grand Principles)</h3>
+    <ul>
+        <li><b>100% 실전 동일 환경 구축:</b> 모든 백테스트와 시뮬레이션은 실제 라이브 자동매매 봇이 작동하는 환경(수수료, 매수 비중 공식, 슬리피지, 갭상승 등)과 완벽하게 동일한 조건으로 동작해야 한다.</li>
+        <li><b>미래 참조 및 생존자 편향 완벽 차단:</b> 백테스트 시 '미래의 시가총액 데이터'를 끌어와 과거에 적용하는 치팅(Cheating) 행위를 원천 금지한다. 종목 발굴은 철저하게 '과거 그 시점(Point-in-Time)'의 데이터만을 바탕으로 이루어져야 한다.</li>
+    </ul>
+
+    <h3>🔎 2. 종목 발굴 메커니즘 (AI 스캐너 & 유니버스)</h3>
+    <p>AI 스캐너는 다음 4단계 다중 필터링을 거쳐 관심종목을 스캔한다.</p>
+    <ul>
+        <li><b>Step 1 (시장/시총 필터):</b> KOSPI(Core 전략) 또는 KOSDAQ(Satellite 전략) 상장 종목 중 시가총액 상위 우량주 50개(시뮬레이션 시 30개)를 1차 후보군으로 선정 (잡주 차단).</li>
+        <li><b>Step 2 (200일선 추세 필터):</b> 현재가가 과거 200일 이동평균선 위에 위치한 대세 상승 국면 종목만 통과.</li>
+        <li><b>Step 3 (전략별 타점 필터):</b>
+            <ul>
+                <li><b>Core (추세추종):</b> 60일선이 우상향 중이며, 20일선이 60일선을 상향 돌파(버퍼 이상) 시 매수.</li>
+                <li><b>Satellite (눌림목):</b> 현재가와 20일선의 이격도가 -5% ~ +3% 사이에 위치할 시 매수.</li>
+            </ul>
+        </li>
+        <li><b>Step 4 (AI 매력도 점수):</b> 타점 강도 산출식에 의해 85점~99점으로 점수화. (Core: 이격도가 클수록 고득점 / Satellite: 이격도가 낮을수록 고득점).</li>
+    </ul>
+
+    <h3>💳 3. 매매 체결 및 자금 관리 (Trade Execution & Money Management)</h3>
+    <ul>
+        <li><b>복리 기반 동적 비중 분할 매수:</b> 종목당 목표 매수 금액은 <code>(현재 가용 예수금 + 주식 평가금) * (max_alloc_pct / 100)</code> 공식을 엄격히 따른다. 수익 시 비중이 증가하고 손실 시 축소된다.</li>
+        <li><b>매수 수량 산출:</b> 수수료로 인해 예수금이 마이너스가 되는 것을 방지하기 위해 <code>매수 가능 수량 = 할당 예수금 / (현재가 * 1.0025)</code> 공식을 따른다.</li>
+        <li><b>익일 시가 체결 (Test 3):</b> 시뮬레이션에서 매수 시그널은 장 마감 시점에 확정되며, 실제 체결은 다음 날 아침 <b>시가(Open)</b>로 처리하여 슬리피지를 100% 반영한다.</li>
+        <li><b>수수료:</b> 매수 0.25%, 매도 0.25% (왕복 0.5%)가 매 거래 시마다 정확히 차감된다.</li>
+    </ul>
+
+    <h3>🛡️ 4. 리스크 관리 및 청산 (Risk Management & Exit)</h3>
+    <p>청산 우선순위에 따라 다음 세 가지 조건 중 하나라도 만족 시 전량 매도 및 예수금으로 즉각 회수된다.</p>
+    <ul>
+        <li><b>장중 저가 칼손절 (Intraday Stop Loss):</b> 하루 종가(Close)가 아닌 당일의 <b>저가(Low)</b>가 매수가 대비 손절선(기본 -15%)을 터치하면 그 즉시 시장가 매도 청산된다.</li>
+        <li><b>트레일링 익절 (Trailing Stop):</b> 보유 기간 중 주가가 목표 수익률(기본 +30%)을 돌파한 시점부터 역대 최고가(Highest Price)를 갱신하며, 이 최고가 대비 설정 하락폭(기본 -10%)이 발생하면 즉시 이익 실현(청산)한다.</li>
+        <li><b>추세선 이탈:</b> 장 마감 종가 기준으로 Core 전략은 60일선, Satellite 전략은 20일선을 하향 이탈할 경우 다음 날 즉시 청산한다.</li>
+    </ul>
+
+    <h3>🖥️ 5. 시스템 UI 및 기능 매핑</h3>
+    <ul>
+        <li><b>Tab 1 (관심종목):</b> AI 스캐너 발굴 + 수동 검색 편입 + 매일 AI 타점 점수화(50~99점) 및 큐(Queue) 정렬.</li>
+        <li><b>Tab 2 (실전 계좌):</b> KIS API 연동. <code>TTTC8908R</code> API를 통한 정확한 <b>주문가능 원화</b> 표시. 증거금 제외 진짜 현금과 투자 원금 역산 매핑.</li>
+        <li><b>Tab 3 (자동매매 큐):</b> 가용 예수금 대비 종목별 매수/매도 수량 및 필요 자금 자동 계산 표.</li>
+        <li><b>Tab 4 (시뮬레이터 3종):</b>
+            <ul>
+                <li><b>Test 1:</b> 현재 관심종목 대상 포워드 테스트 (실계좌 성과와 1:1 직관적 비교).</li>
+                <li><b>Test 2:</b> 현재 관심종목 대상 장기 백테스트 (현재 유니버스의 알고리즘 적합도 판별).</li>
+                <li><b>Test 3 (Dynamic Point-in-Time):</b> 특정 연도 1년 고정. 매주 월요일 과거 주도주 자동 발굴 및 편입. 익일 시가 매수 및 장중 저가 손절이 100% 적용된 순수 알고리즘 알파 검증기.</li>
+            </ul>
+        </li>
+    </ul>
+
+    <hr>
+    <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 웹 애플리케이션의 코드를 업데이트하거나 수정할 때, 위 1~5항에 기록된 <b>'대원칙, 계산 공식, 레이아웃 정렬, API 호출 규칙, 백테스트 체결 규칙(익일 시가/장중 저가)'</b>을 단 하나라도 임의로 훼손하거나 삭제해서는 안 된다. 사용자가 특정 기능을 업데이트해 달라고 요청할 경우, <b>반드시 이 백서에 기록된 원칙들과 상충하는 부분이 없는지 선행 검토해야 하며, 만약 원칙을 수정해야만 하는 상황이라면 코드를 출력하기 전에 사용자에게 명확히 보고하고 승인을 얻어야만 한다.</b></p>
     """, unsafe_allow_html=True)
