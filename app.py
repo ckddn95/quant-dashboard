@@ -191,18 +191,19 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e:
         return None, None, f"서버 통신 에러: {str(e)}"
 
+# 🛑 [패치] min_periods=1 적용하여 데이터 누락 방어
 def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
-        if df is None or len(df) < 60:
-            return c_price, "분석 불가", 0.0, "과거 60일 이상 거래 데이터 부족"
+        if df is None or df.empty:
+            return c_price, "분석 불가", 0.0, "과거 데이터 없음"
         
         close_p = float(df['Close'].iloc[-1])
         if c_price <= 0: c_price = close_p
         
-        ma20 = df['Close'].rolling(20).mean().iloc[-1]
-        ma60 = df['Close'].rolling(60).mean().iloc[-1]
-        ma200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else c_price
+        ma20 = df['Close'].rolling(20, min_periods=1).mean().iloc[-1]
+        ma60 = df['Close'].rolling(60, min_periods=1).mean().iloc[-1]
+        ma200 = df['Close'].rolling(200, min_periods=1).mean().iloc[-1]
         
         dist_20_60 = ((ma20 / ma60) - 1) * 100 if ma60 > 0 else 0.0
         dist_c_20 = ((c_price / ma20) - 1) * 100 if ma20 > 0 else 0.0
@@ -223,7 +224,7 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
         ma200_str = " (200일선 지지)" if pass_ma200 and use_ma200 else ""
         
         if strat == "Core":
-            m60_up = ma60 > df['Close'].rolling(60).mean().iloc[-11]
+            m60_up = True if len(df) < 60 else (ma60 > df['Close'].rolling(60, min_periods=1).mean().iloc[-11])
             if pass_ma200 and (ma20 >= ma60 * (1 + buf_pct)) and m60_up:
                 score = min(85.0 + max(0, dist_20_60), 99.0)
                 return c_price, "🟢 매수 시그널 발생", round(score, 1), f"20/60일선 이격도 {dist_20_60:+.1f}% 골든크로스{ma200_str}"
@@ -262,33 +263,44 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
-# 🛑 [핵심 패치] 시뮬레이터 Pandas 'ME' 적용 및 실전 모사 정밀화
+# 🛑 [핵심 패치] 시뮬레이터 결측치 증발 버그 해결 (min_periods=1 적용 및 dropna 삭제)
 @st.cache_data(ttl=1800)
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_a, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
-    f_start = pd.to_datetime(start_date) - datetime.timedelta(days=150)
+    # 200일선 계산을 위해 넉넉하게 과거 400일 데이터 요청
+    f_start = pd.to_datetime(start_date) - datetime.timedelta(days=400)
     sim_data = {}
     for _, row in sim_stocks.iterrows():
         tk, nm = str(row.get('티커','')).strip().zfill(6), str(row.get('종목명',''))
         try:
             df = fdr.DataReader(tk, start=f_start, end=end_date)
             if df is not None and not df.empty:
-                df['MA20'] = df['Close'].rolling(20).mean()
-                df['MA60'] = df['Close'].rolling(60).mean()
-                df['MA200'] = df['Close'].rolling(200).mean()
-                df['M60_Up'] = df['MA60'] > df['MA60'].shift(10)
-                sim_data[nm] = df.dropna()
+                df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
+                df['MA60'] = df['Close'].rolling(60, min_periods=1).mean()
+                df['MA200'] = df['Close'].rolling(200, min_periods=1).mean()
+                df['M60_Up'] = df['MA60'] > df['MA60'].shift(10).fillna(0)
+                # dropna() 삭제하여 데이터 증발 완전 차단
+                sim_data[nm] = df
         except: pass
         
     if not sim_data: return None
     
     summary_rows = []
     total_final_val = 0.0
-    alloc_cash = init_cash / len(sim_data)
+    alloc_cash = init_cash / len(sim_data) if len(sim_data) > 0 else init_cash
     
     for nm, df in sim_data.items():
         sub_df = df[df.index >= pd.to_datetime(start_date)]
-        if sub_df.empty: continue
+        if sub_df.empty: 
+            # 검색 기간에 데이터가 아예 없는 경우 원금 보존 처리 (수익률 0%)
+            total_final_val += alloc_cash
+            summary_rows.append({
+                '종목명': nm, '최종 보유 주수': "0 주",
+                '기말 평가금': f"{alloc_cash:,.0f} 원", '총 순수익 (원)': "0 원",
+                '수익률 (%)': "+0.00%", '매매 횟수': "매수 0회 / 매도 0회", 
+                '총 발생 수수료': "0 원", '기말 포트폴리오 비중': "0%"
+            })
+            continue
         
         cash, qty, buy_price, highest_price = alloc_cash, 0, 0.0, 0.0
         buy_count, sell_count, total_fee = 0, 0, 0.0
@@ -346,11 +358,8 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         v = float(r['기말 평가금'].replace(',','').replace(' 원',''))
         r['기말 포트폴리오 비중'] = f"{(v / total_final_val) * 100 if total_final_val > 0 else 0:.2f}%"
     
-    # pandas 2.2.0 이상 호환성 수정: 'M' -> 'ME'
-    try:
-        dates = pd.date_range(start=start_date, end=end_date, freq='ME').strftime('%Y-%m')
-    except:
-        dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y-%m')
+    try: dates = pd.date_range(start=start_date, end=end_date, freq='ME').strftime('%Y-%m')
+    except: dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y-%m')
         
     chart_data = [{'Date': d, 'Asset': nm, 'Weight': 100.0 / len(sim_data)} for d in dates for nm in sim_data.keys()]
             
@@ -493,10 +502,6 @@ if kis_data:
     real_eval_pnl = kis_data.get('total_pnl', 0.0)
     real_cash_avail = kis_data.get('cash_avail', total_cash)
     real_stocks_df = pd.DataFrame(kis_data['stocks'])
-
-real_base_date_str = p_data.get('real_base_date', p_data.get('created_at', '2024-01-01')) if p_data else '2024-01-01'
-try: real_base_date = pd.to_datetime(real_base_date_str).date()
-except: real_base_date = datetime.datetime.now(KST).date()
 
 total_invested_principal = float(total_cash)
 
@@ -733,7 +738,7 @@ with tab3:
     if st.button("⚡ 대기열 일괄 주문 수동 전송", type="primary", use_container_width=True):
         st.success("수동 주문 검토 완료 (실제 집행은 봇이 안전하게 수행합니다)")
 
-# 🛑 [핵심 패치] Test 1 UI 전면 개편 (복잡한 저장 로직 삭제 및 직관적 비교)
+# 🛑 [핵심 패치 1 & 2] 줄 맞춤 교정 및 데이터 증발 방지
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트 (Simulation & Backtest)")
     if not p_data or not selected_port: 
@@ -746,57 +751,63 @@ with tab4:
         st.info("💡 **어떻게 비교하나요?** 내가 지정한 시작일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다. (번거로운 수동 기준 저장 기능을 없애고 직관적으로 자동 계산하도록 개선했습니다.)")
         
         col_fw_date, col_fw_btn = st.columns([3, 7])
-        test1_start_date = col_fw_date.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
+        with col_fw_date:
+            test1_start_date = st.date_input("📅 가상 운용 시작일", datetime.date(2023, 1, 1), key="t4_date")
         
-        if col_fw_btn.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
-            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
-            else:
-                with st.spinner("포워드 테스트 구동 중..."):
-                    res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                    if res_fw:
-                        col_fw1, col_fw2 = st.columns(2)
-                        with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
-                        with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{((real_total_eval/total_invested_principal)-1)*100 if total_invested_principal>0 else 0:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
-                        st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
+        with col_fw_btn:
+            # 버튼 상단 여백을 주어 날짜 칸과 완벽하게 수평 정렬
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
+                if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+                else:
+                    with st.spinner("포워드 테스트 구동 중..."):
+                        res_fw = run_quant_simulation(stocks_df, active_strat, total_invested_principal, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                        if res_fw:
+                            col_fw1, col_fw2 = st.columns(2)
+                            with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                            with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{((real_total_eval/total_invested_principal)-1)*100 if total_invested_principal>0 else 0:+.2f}%", f"현재 자산: {real_total_eval:,.0f} 원"), unsafe_allow_html=True)
+                            st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.subheader("📊 Test 2. 장기 초과수익 검증 (관심종목 대상)")
-        col_sim1, col_sim2 = st.columns(2)
-        with col_sim1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t2_s")
-        with col_sim2: end_date = st.date_input("종료일", today_date, key="t2_e")
-
-        if st.button("🚀 관심종목 대상 장기 Backtest 실행", type="primary", use_container_width=True):
-            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
-            else:
-                with st.spinner("장기 백테스트 구동 중..."):
-                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                    if bt_result:
-                        st.success("✅ 장기 백테스트 완료!")
-                        col_r1, col_r2 = st.columns(2)
-                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                        with col_r2: st.markdown(mts_metric_html("AI 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                        st.dataframe(pd.DataFrame(bt_result['summary_rows']), use_container_width=True, hide_index=True)
+        col_t2_1, col_t2_2, col_t2_3 = st.columns([3, 3, 4])
+        with col_t2_1: start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t2_s")
+        with col_t2_2: end_date = st.date_input("종료일", today_date, key="t2_e")
+        with col_t2_3:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("🚀 관심종목 대상 장기 Backtest 실행", type="primary", use_container_width=True):
+                if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+                else:
+                    with st.spinner("장기 백테스트 구동 중..."):
+                        bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                        if bt_result:
+                            st.success("✅ 장기 백테스트 완료!")
+                            col_r1, col_r2 = st.columns(2)
+                            with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                            with col_r2: st.markdown(mts_metric_html("AI 기말 자산", f"{bt_result['final_asset']:,.0f} 원", f"{bt_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                            st.dataframe(pd.DataFrame(bt_result['summary_rows']), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.subheader("💡 Test 3. 동적 유니버스 블라인드 백테스트 (시장 주도주 자율 매매)")
-        col_d1, col_d2 = st.columns(2)
-        with col_d1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
-        with col_d2: dyn_end_date = st.date_input("종료일", today_date, key="t3_e")
-
-        if st.button("🚀 AI 자율 매매 블라인드 테스트 실행", type="primary", use_container_width=True):
-            krx_univ = load_krx_universe()
-            if krx_univ.empty: st.error("KRX 유니버스 로드 실패. API 일일 접속량을 확인하세요.")
-            else:
-                sim_cands = krx_univ.sort_values('Marcap', ascending=False).head(10) if 'Marcap' in krx_univ.columns else krx_univ.head(10)
-                sim_df_cands = pd.DataFrame({'종목명': sim_cands['Name'] if 'Name' in sim_cands.columns else sim_cands['종목명'], '티커': sim_cands['Code'] if 'Code' in sim_cands.columns else sim_cands['티커']})
-                with st.spinner("블라인드 테스트 구동 중..."):
-                    dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                    if dyn_result:
-                        st.success("✅ 블라인드 테스트 완료!")
-                        col_r1, col_r2 = st.columns(2)
-                        with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                        with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                        st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
+        col_t3_1, col_t3_2, col_t3_3 = st.columns([3, 3, 4])
+        with col_t3_1: dyn_start_date = st.date_input("시작일", datetime.date(2023, 1, 1), key="t3_s")
+        with col_t3_2: dyn_end_date = st.date_input("종료일", today_date, key="t3_e")
+        with col_t3_3:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("🚀 AI 자율 매매 블라인드 테스트 실행", type="primary", use_container_width=True):
+                krx_univ = load_krx_universe()
+                if krx_univ.empty: st.error("KRX 유니버스 로드 실패. API 일일 접속량을 확인하세요.")
+                else:
+                    sim_cands = krx_univ.sort_values('Marcap', ascending=False).head(10) if 'Marcap' in krx_univ.columns else krx_univ.head(10)
+                    sim_df_cands = pd.DataFrame({'종목명': sim_cands['Name'] if 'Name' in sim_cands.columns else sim_cands['종목명'], '티커': sim_cands['Code'] if 'Code' in sim_cands.columns else sim_cands['티커']})
+                    with st.spinner("블라인드 테스트 구동 중..."):
+                        dyn_result = run_quant_simulation(sim_df_cands, active_strat, total_cash, dyn_start_date, dyn_end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                        if dyn_result:
+                            st.success("✅ 블라인드 테스트 완료!")
+                            col_r1, col_r2 = st.columns(2)
+                            with col_r1: st.markdown(mts_metric_html("총 초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                            with col_r2: st.markdown(mts_metric_html("블라인드 기말 자산", f"{dyn_result['final_asset']:,.0f} 원", f"{dyn_result['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                            st.dataframe(pd.DataFrame(dyn_result['summary_rows']), use_container_width=True, hide_index=True)
 
 with tab5:
     st.markdown("""
