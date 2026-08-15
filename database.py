@@ -5,7 +5,12 @@ from datetime import datetime
 DB_PATH = "quant_system.db"
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # 🛑 [핵심 방어 패치] 클라우드 환경의 DB Lock(잠김) 현상을 방지하는 강력한 옵션 추가
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=20)
+    try:
+        conn.execute('PRAGMA journal_mode=WAL;') # 동시 읽기/쓰기 모드 활성화
+    except:
+        pass
     conn.row_factory = sqlite3.Row
     return conn
 
