@@ -138,9 +138,6 @@ rd = st.session_state.get('real_data', db.get_setting('last_real_data', default_
 st.session_state['real_data'] = rd 
 
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
-base_date_str = db.get_setting('created_at', '2024-01-01')
-try: real_base_date = pd.to_datetime(base_date_str).date()
-except: real_base_date = datetime.date(2024, 1, 1)
 
 # ==================== 메인 화면 ====================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 알고리즘 백서"])
@@ -250,7 +247,7 @@ with tab2:
     else: st.info("API 키를 설정해주세요.")
 
 with tab3:
-    st.header("🤖 실전 자동매매 큐 (UI -> DB 의도 생성)")
+    st.header("🤖 실전 자동매매 큐 (상태 머신 연동)")
     c1, c2, c3 = st.columns(3)
     c1.metric("🚨 킬 스위치", "차단됨" if kill_switch else "정상")
     c2.metric("🚀 자동주문", "활성화" if auto_trade else "비활성화")
@@ -310,11 +307,19 @@ with tab3:
     if not q_df.empty:
         q_df = q_df.sort_values(by=['분류', '점수'], ascending=[True, False]).reset_index(drop=True)
         st.table(q_df[['종목명', '구분', '점수', '단가', '수량']])
+        
+        # 🛑 버튼 클릭 시 'INTENT_CREATED' 상태로 기록 (봇이 이후 처리)
         if st.button("⚡ 대기열 일괄 주문 DB 기록", type="primary"):
             for _, r in q_df.iterrows():
                 db.add_order_intent(r['티커'], r['구분'], r['수량'], r['단가'])
-            st.success("✅ SQLite에 기록 완료! bot.py가 즉시 체결을 시작합니다.")
+            st.success("✅ 주문 의도(INTENT_CREATED) 생성 완료! 봇이 체결을 담당합니다.")
     else: st.info("대기 중인 시그널이 없습니다.")
+    
+    st.markdown("### 📊 실시간 체결 대사 (Reconciliation) 현황")
+    intents = db.get_orders_by_status(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'FILLED', 'REJECTED'])
+    if intents:
+        i_df = pd.DataFrame(intents)
+        st.dataframe(i_df[['ticker', 'order_type', 'qty', 'status', 'cum_filled_qty', 'avg_fill_price', 'updated_at']], use_container_width=True)
 
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트")
@@ -381,7 +386,7 @@ with tab4:
                     if logs: st.dataframe(pd.DataFrame(logs))
 
 # ==========================================
-# 🛑 [핵심 보강] Part 5. 시스템 무결성 및 데이터 계약 추가
+# 🛑 [핵심 보강] Part 6. 주문 상태 머신 및 대사 원칙 추가
 # ==========================================
 with tab5:
     st.markdown("""
@@ -426,7 +431,6 @@ with tab5:
     </ul>
 
     <h3>⚙️ 5. 시스템 무결성 및 데이터 계약 (System Integrity & Contracts)</h3>
-    <p>시스템의 오작동을 방지하기 위해 다음 5가지 무결성 계약이 엔진에 영구적으로 하드코딩되어 있다.</p>
     <ul>
         <li><b>전략 계약 (Strategy Enum):</b> 내부 로직은 <code>Strategy.CORE</code>, <code>Strategy.SATELLITE</code> Enum 상수만 사용하며, UI 텍스트와 완벽히 분리된다. 모든 파라미터는 무결성 검증(NaN, Inf, 범위 체크)이 포함된 <code>StrategyConfig</code> 단일 객체로만 전달된다.</li>
         <li><b>소수점 단위 단일화 (Decimal Standardization):</b> 엔진 내부 및 DB의 모든 비율(%) 값은 순수 소수점(예: 1.5% → 0.015)으로만 연산/저장되며, UI(화면) 렌더링 시에만 100을 곱하여 표시한다.</li>
@@ -435,7 +439,15 @@ with tab5:
         <li><b>치명적 오류 차단 (HALTED_CONFIG_ERROR):</b> 알 수 없는 전략 텍스트나 DB 오염이 감지되면 즉각 시스템의 모든 신규 매매를 강제 정지한다.</li>
     </ul>
 
+    <h3>📡 6. 주문 상태 머신 및 체결 대사 원칙 (Order State Machine & Reconciliation)</h3>
+    <ul>
+        <li><b>강제 상태 전이 (State Transition):</b> <code>INTENT_CREATED → CLAIMED → SUBMITTING → ACKNOWLEDGED 또는 UNKNOWN → PARTIALLY_FILLED → FILLED</code>의 방향으로만 전이되며 역행은 불가하다. (종결: REJECTED, CANCELED, EXPIRED)</li>
+        <li><b>ACKNOWLEDGED 분리:</b> KIS API로 주문 접수가 성공했다고 해서 체결(FILLED)로 간주하지 않으며, 오직 증권사 원장 대사를 통해서만 체결을 확정한다.</li>
+        <li><b>망분리 대응 (UNKNOWN):</b> 타임아웃 등으로 KIS 응답을 받지 못한 주문은 <code>UNKNOWN</code> 처리되며 절대 자동으로 중복 재전송하지 않고 폴링을 통한 서버 확인을 대기한다.</li>
+        <li><b>멱등성 보장 (Idempotency):</b> 체결 내역은 <code>fill_id</code> 단위로 UNIQUE하게 저장되며, 이전 체결량과의 델타(Delta) 값만을 산출하여 포지션(수량, 평단가) 및 현금(가상 원장)에 정확히 1회만 반영한다. 부분 매도 시에도 남은 수량(managed_qty)은 안전하게 유지된다.</li>
+    </ul>
+
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~5에 기록된 <b>'대원칙, 계산 공식, API 구조, 백테스트 규칙, 3대 고급 안전장치 논리, 무결성 계약(소수점 단일화, 공통 순수 함수 사용 등)'을 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~6에 기록된 <b>'대원칙, 계산 공식, API 구조, 백테스트 규칙, 고급 안전장치, 무결성 계약, 주문 상태 머신 대사 원칙'을 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
