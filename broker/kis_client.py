@@ -21,8 +21,7 @@ def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
     params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).strip().zfill(6)}
     try:
         res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200 and res.json().get('rt_cd') == '0': 
-            return float(res.json()['output']['stck_prpr'])
+        if res.status_code == 200 and res.json().get('rt_cd') == '0': return float(res.json()['output']['stck_prpr'])
     except: pass
     return 0.0
 
@@ -55,15 +54,14 @@ def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_
     except: pass
     return 0.0
 
-# 🛑 [신규] 봇 전용 POST 실제 매매 집행 함수
 def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is_buy, qty, price=0, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash"
-    tr_id = "VTTC0802U" if is_buy else "VTTC0801U" # 모의 매수/매도 (실전은 TTTC0802U/TTTC0801U)
+    tr_id = "VTTC0802U" if is_buy else "VTTC0801U"
     if not is_mock: tr_id = "TTTC0802U" if is_buy else "TTTC0801U"
     
     headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
-    ord_dvsn = "01" if price == 0 else "00" # 01: 시장가, 00: 지정가
+    ord_dvsn = "01" if price == 0 else "00"
     unpr = "0" if price == 0 else str(int(price))
     
     body = {"CANO": str(cano).strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "PDNO": str(ticker).zfill(6), "ORD_DVSN": ord_dvsn, "ORD_QTY": str(int(qty)), "ORD_UNPR": unpr}
