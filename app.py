@@ -31,7 +31,6 @@ def mts_metric_html(label, value, delta=None):
 st.title("Core-Satellite Quant System (MSA)")
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
-# ==================== 전략 및 파라미터 (UI ↔ 내부 분리) ====================
 STRAT_DISPLAY_MAP = {quant.Strategy.CORE: '대형주 (Core)', quant.Strategy.SATELLITE: '중소형주 (Satellite)'}
 
 # 1. 안전한 Enum 바인딩 및 HALTED_CONFIG_ERROR 검출
@@ -78,7 +77,6 @@ with st.sidebar.expander("🔑 KIS API 설정", expanded=not has_keys):
 
 st.sidebar.markdown("---")
 st.sidebar.header("📱 봇 제어 (DB 연동)")
-st.sidebar.info("UI 변경 사항은 즉시 SQLite DB에 기록되어 백그라운드 봇에 반영됩니다.")
 
 init_ks = bool(db.get_setting('kill_switch', False))
 init_at = bool(db.get_setting('auto_trade_enabled', False))
@@ -115,7 +113,6 @@ if is_custom:
 else: st.sidebar.success("✅ 기본 권장 파라미터 적용 중")
 
 saved_p['ma200'] = st.sidebar.checkbox("🛡️ 200일 추세선", value=saved_p['ma200'])
-# 퍼센트 UI 표시 (* 100), 내부 저장 (/ 100)
 saved_p['buf'] = st.sidebar.slider("골든크로스 버퍼 (%)", 0.0, 5.0, float(saved_p['buf']) * 100.0, 0.1) / 100.0
 saved_p['sl'] = st.sidebar.slider("긴급 손절 컷 (%)", -30.0, -5.0, float(saved_p['sl']) * 100.0, 1.0) / 100.0
 with st.sidebar.expander("🧪 시뮬레이션 및 고급 안전장치", expanded=is_custom):
@@ -196,7 +193,14 @@ with tab1:
         ticker = str(row['티커']).zfill(6)
         tok = st.session_state.get('kis_token')
         c_price = kis.fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else 0.0
-        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, current_config, c_price=c_price)
+        
+        # SQLite 포지션 정보 결합
+        db_positions = {p['ticker']: p for p in db.get_positions()}
+        buy_p = db_positions[ticker]['buy_price'] if ticker in db_positions else 0.0
+        high_p = db_positions[ticker]['highest_price'] if ticker in db_positions else 0.0
+        days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[ticker]['buy_date'])).days if ticker in db_positions else 0
+
+        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, current_config, buy_p, high_p, c_price, days_held)
         return {'🗑️ 삭제': False, '종목명': row['종목명'], '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
 
     if current_watchlist:
@@ -216,7 +220,7 @@ with tab1:
     else: st.info("현재 등록된 관심종목이 없습니다.")
 
 with tab2:
-    st.header("🔌 실전 계좌 모니터링")
+    st.header("🔌 실전 계좌 모니터링 (SQLite 동기화)")
     if SYS_APP_KEY and SYS_CANO:
         if st.button("🔄 잔고 동기화"):
             token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK)
@@ -226,6 +230,11 @@ with tab2:
                 if h is not None:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
                     st.session_state['real_data'] = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
+                    
+                    # 🛑 [핵심 패치 3] 포지션 SQLite SSOT 매핑
+                    kis_stocks = [{'ticker': str(i['pdno']).zfill(6), 'qty': int(i['hldg_qty']), 'buy_price': float(i['pchs_avg_pric']), 'current_price': float(i['prpr'])} for i in h if int(i['hldg_qty']) > 0]
+                    db.sync_positions_from_broker(kis_stocks)
+
                     st.success("완료!")
                     time.sleep(0.5); st.rerun()
                 else: st.error(err)
@@ -253,14 +262,16 @@ with tab3:
     
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
-        qty, buy_p = 0, 0.0
-        for s in rd['stocks']:
-            if s['pdno'] == tk:
-                qty, buy_p = int(s['hldg_qty']), float(s['pchs_avg_pric'])
         
+        db_positions = {p['ticker']: p for p in db.get_positions()}
+        qty = db_positions[tk]['qty'] if tk in db_positions else 0
+        buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
+        high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
+        days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[tk]['buy_date'])).days if tk in db_positions else 0
+
         tok = st.session_state.get('kis_token')
         c_price = kis.fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SEC, tk, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else 0.0
-        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, buy_p, c_price)
+        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, c_price, days_held)
         
         if "매도" in action or "청산" in action or "익절" in action:
             if qty > 0: return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '구분': action, '단가': cp, '수량': qty}
@@ -292,7 +303,6 @@ with tab4:
     today_date = datetime.datetime.now(KST).date()
     
     st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
-    st.info("💡 **어떻게 비교하나요?** 포트폴리오 개설일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다.")
     col_fw_date, col_fw_btn = st.columns([3, 7])
     with col_fw_date:
         test1_start_date = st.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
@@ -378,8 +388,8 @@ with tab5:
 
     <h3>💳 3. 자금 관리 및 3대 고급 안전장치</h3>
     <ul>
-        <li><b>복리 비중 분할 매수:</b> $Target\_Fund = Total\_Equity \times (Max\_Alloc\_Pct / 100)$</li>
-        <li><b>강세장 부스터 (Bull Market Booster):</b> $If \ Index > MA200 \Rightarrow Max\_Alloc\_Pct += 10.0\%$</li>
+        <li><b>복리 비중 분할 매수:</b> $Target\_Fund = Total\_Equity \times (Max\_Alloc\_Pct)$</li>
+        <li><b>강세장 부스터 (Bull Market Booster):</b> $If \ Index > MA200 \Rightarrow Max\_Alloc\_Pct += 0.10$</li>
         <li><b>쿨다운 대기:</b> 2회 연속 손실 발생 시 일정 기간(cd_days) 매수 차단.</li>
         <li><b>최소 보유 기간:</b> 휩소 방지를 위해 매수 후 일정 기간(min_h) 동안 추세 이탈 매도 보류 (손절은 즉시 작동).</li>
     </ul>
