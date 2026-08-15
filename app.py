@@ -133,10 +133,9 @@ SYS_APP_SEC = db.get_setting('manual_app_secret')
 SYS_CANO = db.get_setting('manual_cano')
 SYS_IS_MOCK = bool(db.get_setting('manual_is_mock', True))
 
-# 🛑 [핵심 패치] 계좌 정보를 DB에서 최우선으로 불러오도록 수정
 default_rd = {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []}
 rd = st.session_state.get('real_data', db.get_setting('last_real_data', default_rd))
-st.session_state['real_data'] = rd # 세션 동기화
+st.session_state['real_data'] = rd 
 
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
 base_date_str = db.get_setting('created_at', '2024-01-01')
@@ -229,8 +228,6 @@ with tab2:
                 h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
                 if h is not None:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
-                    
-                    # 🛑 [핵심 패치] 계좌 정보를 DB에 영구 저장
                     new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
                     st.session_state['real_data'] = new_rd
                     db.set_setting('last_real_data', new_rd)
@@ -263,6 +260,29 @@ with tab3:
     target_buy_amt = max(rd['eval'], float(total_cash)) * current_config.alloc
     temp_q = []
     
+    # 🛑 [핵심 방어 패치] 관심종목 유니버스 + DB 보유 포지션 통합 탐색
+    # 사용자가 관심종목에서 종목을 삭제하더라도 보유 중이면 끝까지 감시하여 청산함.
+    eval_list = []
+    eval_tickers = set()
+
+    for w in current_watchlist:
+        tk = str(w['티커']).zfill(6)
+        eval_tickers.add(tk)
+        eval_list.append({'티커': tk, '종목명': w['종목명']})
+
+    db_positions_list = db.get_positions()
+    for p in db_positions_list:
+        tk = str(p['ticker']).zfill(6)
+        if tk not in eval_tickers:
+            eval_tickers.add(tk)
+            # 계좌 잔고 정보에서 종목명을 추출 (안전 장치)
+            nm = tk
+            for s in rd.get('stocks', []):
+                if str(s.get('pdno', '')).zfill(6) == tk:
+                    nm = s.get('prdt_name', tk)
+                    break
+            eval_list.append({'티커': tk, '종목명': nm})
+    
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
         
@@ -284,9 +304,9 @@ with tab3:
             if add_qty > 0: return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '구분': "🛒 신규/추가 매수", '단가': cp, '수량': add_qty}
         return None
 
-    if current_watchlist:
+    if eval_list:
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-            for r in ex.map(process_q, current_watchlist):
+            for r in ex.map(process_q, eval_list):
                 if r: temp_q.append(r)
                 
     q_df = pd.DataFrame(temp_q)
