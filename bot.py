@@ -6,8 +6,12 @@ def main_loop():
     print("🤖 퀀트 오토파일럿 봇 가동 시작...")
     while True:
         try:
-            kill_switch = bool(db.get_setting('kill_switch', False))
-            if kill_switch:
+            status = db.get_system_status()
+            if status == "HALTED_CONFIG_ERROR":
+                print("🚨 [HALTED_CONFIG_ERROR] 알 수 없는 전략 설정 오류로 인해 신규 주문이 차단되었습니다.")
+                time.sleep(10)
+                continue
+            elif status == "KILL_SWITCH":
                 print("🚨 킬 스위치 작동 중! 대기...")
                 time.sleep(10)
                 continue
@@ -28,7 +32,7 @@ def main_loop():
                                 ticker = order['ticker']
                                 is_buy = "매수" in order['order_type']
                                 qty = order['qty']
-                                price = 0 # 시장가 주문 고정 (슬리피지 대응)
+                                price = 0 
                                 
                                 success, msg = kis.execute_kis_order(api_key, api_sec, cano, "01", token, ticker, is_buy, qty, price, is_mock)
                                 if success:
