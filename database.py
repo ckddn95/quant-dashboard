@@ -13,18 +13,14 @@ def migrate_db():
     with get_connection() as conn:
         c = conn.cursor()
         try:
-            # 1. 전략 Enum 마이그레이션
             c.execute("SELECT value FROM settings WHERE key='strategy'")
             row = c.fetchone()
             if row:
                 val = row['value'].strip('"')
-                if val == '대형주 (Core)':
-                    c.execute("UPDATE settings SET value='\"CORE\"' WHERE key='strategy'")
-                elif val == '중소형주 (Satellite)':
-                    c.execute("UPDATE settings SET value='\"SATELLITE\"' WHERE key='strategy'")
+                if val == '대형주 (Core)': c.execute("UPDATE settings SET value='\"CORE\"' WHERE key='strategy'")
+                elif val == '중소형주 (Satellite)': c.execute("UPDATE settings SET value='\"SATELLITE\"' WHERE key='strategy'")
         except: pass
 
-        # 2. 파라미터 소수점 체계 마이그레이션
         for old_s, new_s in [('대형주 (Core)', 'CORE'), ('중소형주 (Satellite)', 'SATELLITE')]:
             try:
                 c.execute("SELECT value FROM settings WHERE key=?", (f'params_{old_s}',))
@@ -56,6 +52,14 @@ def init_db():
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         ticker TEXT, order_type TEXT, qty INTEGER, price REAL, 
                         status TEXT DEFAULT 'PENDING', created_at TIMESTAMP
+                     )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS positions (
+                        ticker TEXT PRIMARY KEY, qty INTEGER, buy_price REAL, 
+                        highest_price REAL, buy_date TIMESTAMP
+                     )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS executions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker TEXT, order_type TEXT, qty INTEGER, price REAL, executed_at TIMESTAMP
                      )''')
         conn.commit()
     migrate_db()
@@ -91,8 +95,7 @@ def get_watchlist():
 def add_to_watchlist(ticker, name):
     with get_connection() as conn:
         c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO watchlist (ticker, name, added_at) VALUES (?, ?, ?)",
-                  (str(ticker).zfill(6), name, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        c.execute("INSERT OR REPLACE INTO watchlist (ticker, name, added_at) VALUES (?, ?, ?)", (str(ticker).zfill(6), name, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
 
 def clear_and_update_watchlist(keep_list):
@@ -100,15 +103,38 @@ def clear_and_update_watchlist(keep_list):
         c = conn.cursor()
         c.execute("DELETE FROM watchlist")
         for item in keep_list:
-            c.execute("INSERT INTO watchlist (ticker, name, added_at) VALUES (?, ?, ?)",
-                      (str(item['티커']).zfill(6), item['종목명'], datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            c.execute("INSERT INTO watchlist (ticker, name, added_at) VALUES (?, ?, ?)", (str(item['티커']).zfill(6), item['종목명'], datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
+
+def sync_positions_from_broker(broker_positions):
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT ticker, highest_price, buy_date FROM positions")
+        db_map = {row['ticker']: dict(row) for row in c.fetchall()}
+        c.execute("DELETE FROM positions")
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        for bp in broker_positions:
+            tk, qty, buy_p, cur_p = bp['ticker'], bp['qty'], bp['buy_price'], bp['current_price']
+            if tk in db_map:
+                high_p = max(db_map[tk]['highest_price'], cur_p, buy_p)
+                b_date = db_map[tk]['buy_date']
+            else:
+                high_p = max(cur_p, buy_p)
+                b_date = now_str
+            c.execute("INSERT INTO positions (ticker, qty, buy_price, highest_price, buy_date) VALUES (?, ?, ?, ?, ?)", (tk, qty, buy_p, high_p, b_date))
+        conn.commit()
+
+def get_positions():
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM positions")
+        return [dict(r) for r in c.fetchall()]
 
 def add_order_intent(ticker, order_type, qty, price):
     with get_connection() as conn:
         c = conn.cursor()
-        c.execute("INSERT INTO order_intents (ticker, order_type, qty, price, created_at) VALUES (?, ?, ?, ?, ?)",
-                  (str(ticker).zfill(6), order_type, qty, price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        c.execute("INSERT INTO order_intents (ticker, order_type, qty, price, created_at) VALUES (?, ?, ?, ?, ?)", (str(ticker).zfill(6), order_type, qty, price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
 
 def get_pending_orders():
@@ -121,6 +147,12 @@ def update_order_status(order_id, status):
     with get_connection() as conn:
         c = conn.cursor()
         c.execute("UPDATE order_intents SET status = ? WHERE id = ?", (status, order_id))
+        conn.commit()
+
+def add_execution(ticker, order_type, qty, price):
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO executions (ticker, order_type, qty, price, executed_at) VALUES (?, ?, ?, ?, ?)", (ticker, order_type, qty, price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
 
 init_db()
