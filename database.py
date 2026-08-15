@@ -12,11 +12,8 @@ def get_connection():
 def init_db():
     with get_connection() as conn:
         c = conn.cursor()
-        # 설정 관리 (전략 파라미터, API키, 킬 스위치 등)
         c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-        # 관심종목 관리
         c.execute('''CREATE TABLE IF NOT EXISTS watchlist (ticker TEXT PRIMARY KEY, name TEXT, added_at TIMESTAMP)''')
-        # 주문 의도 (UI -> Bot 단방향 통신)
         c.execute('''CREATE TABLE IF NOT EXISTS order_intents (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         ticker TEXT, order_type TEXT, qty INTEGER, price REAL, 
@@ -41,11 +38,33 @@ def set_setting(key, value):
         c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, val_str))
         conn.commit()
 
+def get_watchlist():
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT ticker, name FROM watchlist")
+        return [{'티커': r['ticker'], '종목명': r['name']} for r in c.fetchall()]
+
+def add_to_watchlist(ticker, name):
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO watchlist (ticker, name, added_at) VALUES (?, ?, ?)",
+                  (str(ticker).zfill(6), name, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+
+def clear_and_update_watchlist(keep_list):
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM watchlist")
+        for item in keep_list:
+            c.execute("INSERT INTO watchlist (ticker, name, added_at) VALUES (?, ?, ?)",
+                      (str(item['티커']).zfill(6), item['종목명'], datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+
 def add_order_intent(ticker, order_type, qty, price):
     with get_connection() as conn:
         c = conn.cursor()
         c.execute("INSERT INTO order_intents (ticker, order_type, qty, price, created_at) VALUES (?, ?, ?, ?, ?)",
-                  (ticker, order_type, qty, price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                  (str(ticker).zfill(6), order_type, qty, price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
 
 def get_pending_orders():
@@ -60,5 +79,4 @@ def update_order_status(order_id, status):
         c.execute("UPDATE order_intents SET status = ? WHERE id = ?", (status, order_id))
         conn.commit()
 
-# 초기화 실행
 init_db()
