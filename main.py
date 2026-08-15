@@ -42,8 +42,8 @@ active_strat = db.get_setting('strategy', '대형주 (Core)')
 active_strat = st.sidebar.selectbox("운용 전략", ['대형주 (Core)', '중소형주 (Satellite)'], index=0 if active_strat=='대형주 (Core)' else 1)
 db.set_setting('strategy', active_strat)
 
-total_cash = db.get_setting('virtual_cash', 10000000)
-new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", value=int(total_cash), step=1000000)
+total_cash = int(db.get_setting('virtual_cash', 10000000))
+new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", value=total_cash, step=1000000)
 if new_cash != total_cash: db.set_setting('virtual_cash', new_cash)
 
 has_keys = bool(db.get_setting('manual_app_key'))
@@ -67,9 +67,9 @@ st.sidebar.markdown("---")
 st.sidebar.header("📱 봇 제어 (DB 연동)")
 st.sidebar.info("UI 변경 사항은 즉시 SQLite DB에 기록되어 백그라운드 봇에 반영됩니다.")
 
-init_ks = db.get_setting('kill_switch', False)
-init_at = db.get_setting('auto_trade_enabled', False)
-init_ap = db.get_setting('auto_pilot', False)
+init_ks = bool(db.get_setting('kill_switch', False))
+init_at = bool(db.get_setting('auto_trade_enabled', False))
+init_ap = bool(db.get_setting('auto_pilot', False))
 
 kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=init_ks)
 auto_trade = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at)
@@ -119,17 +119,13 @@ use_ma200_filter, whipsaw_buffer, sat_stop_loss = p['ma200'], p['buf'] / 100.0, 
 cooldown_days, max_alloc_pct, min_hold_days = p['cd'], float(p['alloc']), p['min_h']
 ts_target_pct, ts_drop_pct, bull_market_boost = p['ts_tgt'] / 100.0, p['ts_drp'] / 100.0, p['boost']
 
-# 🛑 [핵심 버그 픽스] 실계좌 글로벌 변수 선언 오류 해결
 rd = st.session_state.get('real_data', {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []})
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
-
 base_date_str = db.get_setting('created_at', '2024-01-01')
 try: real_base_date = pd.to_datetime(base_date_str).date()
 except: real_base_date = datetime.date(2024, 1, 1)
 
-# ==========================================
-# 2. 메인 화면 구성
-# ==========================================
+# ==================== 메인 화면 ====================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
 with tab1:
@@ -186,18 +182,23 @@ with tab1:
             for res in executor.map(process_w, current_watchlist):
                 if res: display_records.append(res)
         
-        display_df = pd.DataFrame(display_records).sort_values('🔥 매력도 점수', ascending=False)
-        edited_df = st.data_editor(display_df, use_container_width=True)
-        if st.button("💾 변경된 내용 반영 (삭제 적용)", type="primary"):
-            keep_df = edited_df[edited_df['🗑️ 삭제'] == False]
-            db.clear_and_update_watchlist(keep_df.to_dict('records'))
-            st.success("업데이트 완료!")
-            time.sleep(0.5); st.rerun()
+        display_df = pd.DataFrame(display_records)
+        # 🛑 [에러 방어 완벽 패치] 데이터프레임이 비어있지 않을 때만 정렬 수행
+        if not display_df.empty:
+            display_df = display_df.sort_values('🔥 매력도 점수', ascending=False).reset_index(drop=True)
+            edited_df = st.data_editor(display_df, use_container_width=True)
+            if st.button("💾 변경된 내용 반영 (삭제 적용)", type="primary"):
+                keep_df = edited_df[edited_df['🗑️ 삭제'] == False]
+                db.clear_and_update_watchlist(keep_df.to_dict('records'))
+                st.success("업데이트 완료!")
+                time.sleep(0.5); st.rerun()
+    else:
+        st.info("현재 등록된 관심종목이 없습니다. 스캐너를 돌리거나 직접 검색하여 추가해주세요.")
 
 SYS_APP_KEY = db.get_setting('manual_app_key')
 SYS_APP_SEC = db.get_setting('manual_app_secret')
 SYS_CANO = db.get_setting('manual_cano')
-SYS_IS_MOCK = db.get_setting('manual_is_mock', True)
+SYS_IS_MOCK = bool(db.get_setting('manual_is_mock', True))
 
 with tab2:
     st.header("🔌 실전 계좌 모니터링")
@@ -211,7 +212,7 @@ with tab2:
                     st.session_state['real_data'] = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
                     st.success("완료!")
                     time.sleep(0.5)
-                    st.rerun() # 전역 갱신 반영
+                    st.rerun()
                 else: st.error(err)
         
         c1, c2, c3, c4 = st.columns(4)
@@ -232,7 +233,7 @@ with tab3:
     c3.metric("💵 주문가능 원화", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
-    target_buy_amt = max(rd['eval'], total_cash) * (max_alloc_pct / 100.0)
+    target_buy_amt = max(rd['eval'], float(total_cash)) * (max_alloc_pct / 100.0)
     temp_q = []
     
     def process_q(row):
@@ -299,15 +300,17 @@ with tab4:
     with c2: end_d = st.date_input("종료일", today_date)
     with c3:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        if st.button("장기 Backtest 실행", type="primary", use_container_width=True) and not stocks_df.empty:
-            with st.spinner("구동 중..."):
-                res = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d, end_d, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
-                if res:
-                    st.success("완료!")
-                    r1, r2 = st.columns(2)
-                    r1.markdown(mts_metric_html("초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
-                    r2.markdown(mts_metric_html("기말 자산", f"{res['final_asset']:,.0f} 원", f"{res['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(res['summary_rows']))
+        if st.button("장기 Backtest 실행", type="primary", use_container_width=True):
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner("구동 중..."):
+                    res = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d, end_d, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if res:
+                        st.success("완료!")
+                        r1, r2 = st.columns(2)
+                        r1.markdown(mts_metric_html("초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                        r2.markdown(mts_metric_html("기말 자산", f"{res['final_asset']:,.0f} 원", f"{res['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(res['summary_rows']))
 
     st.markdown("---")
     st.subheader("💡 Test 3. 동적 포착 AI 자율매매 백테스트 (과거 주도주 발굴 ➡️ 시가 매수)")
@@ -373,6 +376,5 @@ with tab5:
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~4에 기록된 <b>'대원칙, 계산 공식, API 구조(SQLite 단방향 통신, bot.py 단독 Writer), 백테스트 규칙(익일 시가/장중 저가), 3대 고급 안전장치 논리'를 단 하나라도 임의로 훼손해서는 안 됩니다.</b> 
-    원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~4에 기록된 <b>'대원칙, 계산 공식, API 구조(SQLite 단방향 통신, bot.py 단독 Writer), 백테스트 규칙(익일 시가/장중 저가), 3대 고급 안전장치 논리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
