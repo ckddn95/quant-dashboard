@@ -119,6 +119,11 @@ use_ma200_filter, whipsaw_buffer, sat_stop_loss = p['ma200'], p['buf'] / 100.0, 
 cooldown_days, max_alloc_pct, min_hold_days = p['cd'], float(p['alloc']), p['min_h']
 ts_target_pct, ts_drop_pct, bull_market_boost = p['ts_tgt'] / 100.0, p['ts_drp'] / 100.0, p['boost']
 
+SYS_APP_KEY = db.get_setting('manual_app_key')
+SYS_APP_SEC = db.get_setting('manual_app_secret')
+SYS_CANO = db.get_setting('manual_cano')
+SYS_IS_MOCK = bool(db.get_setting('manual_is_mock', True))
+
 rd = st.session_state.get('real_data', {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []})
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
 base_date_str = db.get_setting('created_at', '2024-01-01')
@@ -172,9 +177,12 @@ with tab1:
     st.markdown("### 📋 현재 감시 리스트")
     display_records = []
     
+    # 🛑 [에러 방어 완벽 패치 1] 모듈 명 및 세션 토큰 매핑 완료
     def process_w(row):
         ticker = str(row['티커']).zfill(6)
-        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days)
+        tok = st.session_state.get('kis_token')
+        c_price = kis.fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else 0.0
+        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days, c_price)
         return {'🗑️ 삭제': False, '종목명': row['종목명'], '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
 
     if current_watchlist:
@@ -183,7 +191,6 @@ with tab1:
                 if res: display_records.append(res)
         
         display_df = pd.DataFrame(display_records)
-        # 🛑 [에러 방어 완벽 패치] 데이터프레임이 비어있지 않을 때만 정렬 수행
         if not display_df.empty:
             display_df = display_df.sort_values('🔥 매력도 점수', ascending=False).reset_index(drop=True)
             edited_df = st.data_editor(display_df, use_container_width=True)
@@ -195,17 +202,13 @@ with tab1:
     else:
         st.info("현재 등록된 관심종목이 없습니다. 스캐너를 돌리거나 직접 검색하여 추가해주세요.")
 
-SYS_APP_KEY = db.get_setting('manual_app_key')
-SYS_APP_SEC = db.get_setting('manual_app_secret')
-SYS_CANO = db.get_setting('manual_cano')
-SYS_IS_MOCK = bool(db.get_setting('manual_is_mock', True))
-
 with tab2:
     st.header("🔌 실전 계좌 모니터링")
     if SYS_APP_KEY and SYS_CANO:
         if st.button("🔄 잔고 동기화"):
             token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK)
             if token:
+                st.session_state['kis_token'] = token # 🛑 [패치 2] 발급받은 토큰을 세션에 저장
                 h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
                 if h is not None:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
@@ -236,13 +239,17 @@ with tab3:
     target_buy_amt = max(rd['eval'], float(total_cash)) * (max_alloc_pct / 100.0)
     temp_q = []
     
+    # 🛑 [패치 3] 자동매매 큐에서도 변수명 충돌 완벽 방어
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
         qty, buy_p = 0, 0.0
         for s in rd['stocks']:
             if s['pdno'] == tk:
                 qty, buy_p = int(s['hldg_qty']), float(s['pchs_avg_pric'])
-        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, buy_p, buy_p, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days)
+        
+        tok = st.session_state.get('kis_token')
+        c_price = kis.fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SEC, tk, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else 0.0
+        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, buy_p, buy_p, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days, c_price)
         
         if "매도" in action or "청산" in action or "익절" in action:
             if qty > 0: return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '구분': action, '단가': cp, '수량': qty}
