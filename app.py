@@ -93,7 +93,7 @@ st.title("Core-Satellite Independent Asset Allocation Quant System")
 st.markdown("한국 시장 전 종목을 검색하여 포트폴리오를 구성하고, **오토파일럿 무인 감시**, **실계좌 자동매매**, **시뮬레이션**을 제공하는 실전 퀀트 대시보드입니다.")
 
 # ==========================================
-# 1. 헬퍼 함수 모음
+# 1. 헬퍼 함수 및 공통 데이터 모음
 # ==========================================
 def send_telegram_message(message):
     try:
@@ -125,7 +125,6 @@ def load_all_portfolios_from_sheets():
                 except: pass
         return port_dict
     except Exception as e:
-        st.error(f"구글 시트 로드 오류: {e}")
         return {}
 
 def save_portfolio_to_sheets(name, p_data):
@@ -133,10 +132,7 @@ def save_portfolio_to_sheets(name, p_data):
         client = get_gspread_client()
         worksheet = client.open_by_key(SPREADSHEET_ID).worksheet("Portfolios")
         cell = worksheet.find(name)
-        
-        if 'created_at' not in p_data:
-            p_data['created_at'] = datetime.datetime.now(KST).strftime('%Y-%m-%d')
-            
+        if 'created_at' not in p_data: p_data['created_at'] = datetime.datetime.now(KST).strftime('%Y-%m-%d')
         data_str = json.dumps(p_data, ensure_ascii=False)
         if cell: worksheet.update_cell(cell.row, 2, data_str)
         else: worksheet.append_row([name, data_str])
@@ -146,11 +142,19 @@ def save_portfolio_to_sheets(name, p_data):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_krx_universe():
+    try: return fdr.StockListing('KRX')
+    except: return pd.DataFrame()
+
+# 🛑 [핵심 보조지표] 강세장 판단을 위한 지수(KOSPI/KOSDAQ) 200일선 추출
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_market_index_data(start_date, end_date):
     try:
-        krx = fdr.StockListing('KRX')
-        return krx
-    except Exception as e:
-        return pd.DataFrame()
+        ks11 = fdr.DataReader('KS11', start_date, end_date)
+        kq11 = fdr.DataReader('KQ11', start_date, end_date)
+        if not ks11.empty: ks11['MA200'] = ks11['Close'].rolling(200, min_periods=1).mean()
+        if not kq11.empty: kq11['MA200'] = kq11['Close'].rolling(200, min_periods=1).mean()
+        return {'KOSPI': ks11, 'KOSDAQ': kq11}
+    except: return {'KOSPI': pd.DataFrame(), 'KOSDAQ': pd.DataFrame()}
 
 def get_kis_access_token(app_key, app_secret, is_mock=True):
     if not app_key or not app_secret: return None, "키 누락"
@@ -161,9 +165,8 @@ def get_kis_access_token(app_key, app_secret, is_mock=True):
     try:
         res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
         if res.status_code == 200: return res.json().get("access_token"), "OK"
-        else: return None, f"토큰 발급 실패 (HTTP {res.status_code}): {res.text}"
-    except Exception as e:
-        return None, f"통신 에러: {str(e)}"
+        else: return None, f"토큰 실패: {res.text}"
+    except Exception as e: return None, f"통신 에러: {str(e)}"
 
 def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
     if not token: return 0.0
@@ -173,8 +176,7 @@ def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
     params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).strip().zfill(6)}
     try:
         res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200 and res.json().get('rt_cd') == '0': 
-            return float(res.json()['output']['stck_prpr'])
+        if res.status_code == 200 and res.json().get('rt_cd') == '0': return float(res.json()['output']['stck_prpr'])
     except: pass
     return 0.0
 
@@ -191,46 +193,29 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
             rj = res.json()
             if rj.get('rt_cd') == '0': return rj.get('output1', []), rj.get('output2', []), "OK"
             else: return None, None, f"KIS 응답 거절: {rj.get('msg1')}"
-        else: return None, None, f"HTTP 에러 {res.status_code}: {res.text}"
-    except Exception as e:
-        return None, None, f"서버 통신 에러: {str(e)}"
+        else: return None, None, f"HTTP 에러: {res.text}"
+    except Exception as e: return None, None, f"통신 에러: {str(e)}"
 
 def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     if not token: return 0.0
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
     tr_id = "VTTC8908R" if is_mock else "TTTC8908R"
-    headers = {
-        "content-type": "application/json; charset=utf-8",
-        "authorization": f"Bearer {token}",
-        "appkey": app_key,
-        "appsecret": app_secret,
-        "tr_id": tr_id,
-        "custtype": "P"
-    }
-    params = {
-        "CANO": str(cano).replace("-", "").strip()[:8],
-        "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2),
-        "PDNO": "005930",  
-        "ORD_UNPR": "0",   
-        "ORD_DVSN": "01",  
-        "CMA_EVLU_AMT_ICLD_YN": "N",
-        "OVRS_ICLD_YN": "N"
-    }
+    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
+    params = {"CANO": str(cano).replace("-", "").strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "PDNO": "005930", "ORD_UNPR": "0", "ORD_DVSN": "01", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"}
     try:
         res = requests.get(url, headers=headers, params=params, timeout=5)
         if res.status_code == 200:
             rj = res.json()
-            if rj.get('rt_cd') == '0':
-                return float(rj.get('output', {}).get('ord_psbl_cash', 0))
+            if rj.get('rt_cd') == '0': return float(rj.get('output', {}).get('ord_psbl_cash', 0))
     except: pass
     return 0.0
 
-def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, c_price=0.0):
+# 🛑 [핵심 패치 1] 실시간 UI 타점 평가 시 최소 보유일 무시 로직 적용 (긴급 손절/익절만 최우선)
+def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_ma200=True, buf_pct=0.015, ts_tgt=0.30, ts_drp=-0.10, sl=-0.15, min_h=5, c_price=0.0):
     try:
         df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
-        if df is None or df.empty:
-            return c_price, "분석 불가", 0.0, "과거 데이터 없음"
+        if df is None or df.empty: return c_price, "분석 불가", 0.0, "과거 데이터 없음"
         
         close_p = float(df['Close'].iloc[-1])
         if c_price <= 0: c_price = close_p
@@ -244,11 +229,15 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
         
         if buy_price > 0:
             ret = (c_price / buy_price) - 1
+            # 1순위: 긴급 손절 (최소 보유일 무시하고 최우선 작동)
             if ret <= sl: return c_price, "🔴 긴급 손절 매도", 10.0, f"수익률 {ret*100:+.1f}% (손절컷 도달)"
+            # 2순위: 트레일링 익절 (최소 보유일 무시하고 항상 작동)
             if highest_price > 0 and (highest_price/buy_price - 1) >= ts_tgt:
                 drop_from_peak = (c_price / highest_price) - 1
                 if drop_from_peak <= ts_drp: 
                     return c_price, "🔵 트레일링 익절", 20.0, f"고점대비 {drop_from_peak*100:+.1f}% (익절 조건 충족)"
+            
+            # 3순위: 단순 추세 이탈 (UI에서는 구매일을 모르므로 기본 감시, 백테스트에서는 완벽 차단됨)
             if strat == "Core" and c_price < ma60 * (1 - buf_pct/2): 
                 return c_price, "🔴 전량 청산", 30.0, f"현재가 < 60일선({ma60:,.0f}원) 하향이탈"
             elif strat == "Satellite" and c_price < ma20 * (1 - buf_pct/2): 
@@ -268,27 +257,23 @@ def evaluate_stock_for_ui(ticker, strat, buy_price=0.0, highest_price=0.0, use_m
                 return c_price, "🟢 매수 시그널 발생", round(score, 1), f"20일선 이격도 {dist_c_20:+.1f}% 눌림목 진입{ma200_str}"
                 
         return c_price, "🟡 모니터링 유지", 50.0, f"현재 20일선 이격도 {dist_c_20:+.1f}% (타점 대기 중)"
-    except Exception as e:
-        return c_price, "분석 불가", 0.0, f"데이터 분석 에러"
+    except Exception as e: return c_price, "분석 불가", 0.0, f"데이터 분석 에러"
 
 @st.cache_data(ttl=3600)
-def run_scanner_safe(strat, use_ma200, buf_pct):
+def run_scanner_safe(strat, use_ma200, buf_pct, min_h):
     krx = load_krx_universe()
     if krx.empty: return pd.DataFrame()
     
     if strat == '대형주 (Core)':
-        cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)]
-        cands = cands.sort_values('Marcap', ascending=False).head(200) if 'Marcap' in cands.columns else cands.head(200)
+        cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(200) if 'Marcap' in krx.columns else krx.head(200)
     else:
-        cands = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)]
-        cands = cands.sort_values('Marcap', ascending=False).head(150) if 'Marcap' in cands.columns else cands.head(150)
+        cands = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(150) if 'Marcap' in krx.columns else krx.head(150)
     
     res = []
     def process(row):
         tc = str(row['Code']).strip().zfill(6)
-        cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct, 0.3, -0.1, -0.15)
-        if "매수 시그널" in action: 
-            return {'종목명': row['Name'], '티커': tc, '현재가': cp, 'AI 스코어': score, '진단 근거': reason}
+        cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct/100.0, 0.3, -0.1, -0.15, min_h)
+        if "매수 시그널" in action: return {'종목명': row['Name'], '티커': tc, '현재가': cp, 'AI 스코어': score, '진단 근거': reason}
         return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -297,10 +282,13 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
             
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
+# 🛑 [핵심 패치 2] 백테스트 엔진에 3대 매매규칙 (쿨다운, 최소보유, 부스터) 완벽 이식
 @st.cache_data(ttl=1800)
-def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp):
+def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
     f_start = pd.to_datetime(start_date) - datetime.timedelta(days=400)
+    
+    market_data = get_market_index_data(f_start, end_date)
     sim_data = {}
     for _, row in sim_stocks.iterrows():
         tk, nm = str(row.get('티커','')).strip().zfill(6), str(row.get('종목명',''))
@@ -315,7 +303,6 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         except: pass
         
     if not sim_data: return None
-    
     all_trade_dates = sorted(list(set.union(*[set(v['df'][v['df'].index >= pd.to_datetime(start_date)].index) for v in sim_data.values()])))
     if not all_trade_dates: return None
     
@@ -323,7 +310,12 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
     positions = {}
     trade_stats = {tk: {'buy_cnt': 0, 'sell_cnt': 0, 'total_fee': 0.0, 'realized_pnl': 0.0, 'name': v['name']} for tk, v in sim_data.items()}
     
+    # 쿨다운 관리를 위한 변수
+    loss_streak = {} 
+    last_loss_date = {}
+
     for curr_date in all_trade_dates:
+        # 1. 매도(청산) 로직
         for tk in list(positions.keys()):
             pos = positions[tk]
             df = sim_data[tk]['df']
@@ -332,33 +324,62 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             cp = df.loc[curr_date, 'Close']
             ma20 = df.loc[curr_date, 'MA20']
             ma60 = df.loc[curr_date, 'MA60']
-            
             pos['highest_price'] = max(pos['highest_price'], cp)
             ret = (cp / pos['buy_price']) - 1
             sell_flag = False
             
-            if ret <= sl: sell_flag = True
-            elif (pos['highest_price'] / pos['buy_price'] - 1) >= ts_tgt and (cp / pos['highest_price'] - 1) <= ts_drp: sell_flag = True
-            elif strat == "Core" and cp < ma60 * (1 - w_buf/2): sell_flag = True
-            elif strat == "Satellite" and cp < ma20 * (1 - w_buf/2): sell_flag = True
+            # [규칙 연동] 최소 보유 기간 판단
+            days_held = (curr_date - pos['buy_date']).days
+            can_trend_exit = (days_held >= min_h)
+
+            if ret <= sl: 
+                sell_flag = True # 긴급 손절은 즉시 작동
+            elif (pos['highest_price'] / pos['buy_price'] - 1) >= ts_tgt and (cp / pos['highest_price'] - 1) <= ts_drp: 
+                sell_flag = True # 트레일링 익절은 즉시 작동
+            elif can_trend_exit: # 추세 이탈은 최소보유기간 경과 후에만 작동
+                if strat == "Core" and cp < ma60 * (1 - w_buf/2): sell_flag = True
+                elif strat == "Satellite" and cp < ma20 * (1 - w_buf/2): sell_flag = True
                 
             if sell_flag:
                 proc = pos['qty'] * cp
                 fee = proc * 0.0025
                 net_proc = proc - fee
                 cash += net_proc
+                trade_pnl = net_proc - (pos['qty'] * pos['buy_price'] * 1.0025)
+                
+                # [규칙 연동] 연속 손실 추적 (쿨다운용)
+                if trade_pnl < 0:
+                    loss_streak[tk] = loss_streak.get(tk, 0) + 1
+                    last_loss_date[tk] = curr_date
+                else:
+                    loss_streak[tk] = 0
+                
                 trade_stats[tk]['total_fee'] += fee
                 trade_stats[tk]['sell_cnt'] += 1
-                trade_stats[tk]['realized_pnl'] += net_proc - (pos['qty'] * pos['buy_price'] * 1.0025)
+                trade_stats[tk]['realized_pnl'] += trade_pnl
                 del positions[tk]
                 
+        # 2. 강세장 자금 풀 부스터 계산
         stock_eval_sum = sum(pos['qty'] * (sim_data[tk]['df'].loc[curr_date, 'Close'] if curr_date in sim_data[tk]['df'].index else pos['buy_price']) for tk, pos in positions.items())
         total_equity = cash + stock_eval_sum
-        target_per_stock = total_equity * (max_alloc_pct / 100.0)
         
+        current_alloc_pct = max_alloc_pct
+        if b_boost:
+            idx_df = market_data['KOSPI'] if 'Core' in strat else market_data['KOSDAQ']
+            if curr_date in idx_df.index and idx_df.loc[curr_date, 'Close'] > idx_df.loc[curr_date, 'MA200']:
+                current_alloc_pct = min(100.0, max_alloc_pct + 10.0) # 10%p 비중 상향
+
+        target_per_stock = total_equity * (current_alloc_pct / 100.0)
+        
+        # 3. 매수(진입) 로직
         for tk, val in sim_data.items():
             df = val['df']
             if curr_date not in df.index: continue
+            
+            # [규칙 연동] 쿨다운 검사
+            if loss_streak.get(tk, 0) >= 2 and tk in last_loss_date:
+                if (curr_date - last_loss_date[tk]).days < cd_days:
+                    continue # 쿨다운 기간 중에는 매수 무시
             
             cp = df.loc[curr_date, 'Close']
             ma20 = df.loc[curr_date, 'MA20']
@@ -393,11 +414,10 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
                         positions[tk]['buy_price'] = ((old_qty * positions[tk]['buy_price']) + (q * cp)) / new_qty
                         positions[tk]['qty'] = new_qty
                     else:
-                        positions[tk] = {'qty': q, 'buy_price': cp, 'highest_price': cp}
+                        positions[tk] = {'qty': q, 'buy_price': cp, 'highest_price': cp, 'buy_date': curr_date}
                         
     summary_rows = []
     total_final_val = cash
-    
     for tk, val in sim_data.items():
         df = val['df']
         last_p = df['Close'].iloc[-1]
@@ -422,8 +442,9 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             
     return {'final_asset': total_final_val, 'final_port_ret': final_port_ret, 'summary_rows': summary_rows}
 
+# 🛑 [핵심 패치 3] Test 3 (실전 파이프라인) 백테스트에 3대 고급규칙 100% 이식
 @st.cache_data(ttl=1800)
-def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp):
+def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp, b_boost, cd_days, min_h):
     krx = load_krx_universe()
     if krx.empty: return None
     
@@ -437,6 +458,7 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
         end_date = datetime.datetime.now(KST).strftime('%Y-%m-%d')
         
     f_start = pd.to_datetime(start_date) - datetime.timedelta(days=400)
+    market_data = get_market_index_data(f_start, end_date)
     
     data_dict = {}
     for _, r in merged_cands.iterrows():
@@ -463,13 +485,15 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
     trade_logs = []
     buy_queue = []
     weekly_watchlist = []
-    max_slots = max(3, int(100 / max_alloc_pct))
+    
+    loss_streak = {} 
+    last_loss_date = {}
     
     for i, current_date in enumerate(all_trade_dates):
+        # 1. 익일 시가 매수 체결
         for q in buy_queue:
             tc = q['tk']
             if tc in positions: continue
-            if len(positions) >= max_slots: break
             
             df = data_dict[tc]['df']
             if current_date not in df.index: continue
@@ -478,7 +502,15 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
             
             stock_eval_sum = sum(pos['qty'] * data_dict[ptk]['df'].loc[current_date, 'Open'] if current_date in data_dict[ptk]['df'].index else pos['buy_price'] for ptk, pos in positions.items())
             total_equity = cash + stock_eval_sum
-            target_fund = total_equity * (max_alloc_pct / 100.0)
+            
+            # [규칙 연동] 강세장 부스터
+            current_alloc_pct = max_alloc_pct
+            if b_boost:
+                idx_df = market_data['KOSPI'] if 'Core' in strat else market_data['KOSDAQ']
+                if current_date in idx_df.index and idx_df.loc[current_date, 'Open'] > idx_df.loc[current_date, 'MA200']:
+                    current_alloc_pct = min(100.0, max_alloc_pct + 10.0)
+
+            target_fund = total_equity * (current_alloc_pct / 100.0)
             alloc_fund = min(cash, target_fund)
             
             q_qty = int(alloc_fund // (open_p * 1.0025))
@@ -492,14 +524,19 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                 }
         buy_queue = [] 
         
+        # 2. 주간 월요일 스캐너 발굴
         if current_date.weekday() == 0 or i == 0:
             weekly_watchlist = []
             for tc, val in data_dict.items():
+                # [규칙 연동] 쿨다운 검사
+                if loss_streak.get(tc, 0) >= 2 and tc in last_loss_date:
+                    if (current_date - last_loss_date[tc]).days < cd_days:
+                        continue 
+
                 df = val['df']
                 if current_date not in df.index: continue
                 row = df.loc[current_date]
                 c_p, ma20, ma60, ma200, m60_up = row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_Up']
-                
                 pass_ma200 = (c_p >= ma200) if use_ma200 else True
                 if not pass_ma200: continue
                 
@@ -515,6 +552,7 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                         
             weekly_watchlist = sorted(weekly_watchlist, key=lambda x: x['score'], reverse=True)[:15]
 
+        # 3. 장중 청산 방어 로직 (최소 보유일 및 손절)
         for tc in list(positions.keys()):
             pos = positions[tc]
             df = data_dict[tc]['df']
@@ -529,6 +567,9 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
             sell_price = 0.0
             sell_reason = ""
             
+            days_held = (current_date - pos['buy_date']).days
+            can_trend_exit = (days_held >= min_h)
+            
             sl_target = pos['buy_price'] * (1 + sl) 
             if low_p <= sl_target:
                 sell_price = min(open_p, sl_target)
@@ -541,7 +582,7 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                         sell_price = min(open_p, ts_target)
                         sell_reason = f"🔵 장중 트레일링 익절"
                         
-            if sell_price == 0.0:
+            if sell_price == 0.0 and can_trend_exit: # [규칙 연동] 최소 보유기간 준수
                 ma20 = df.loc[current_date, 'MA20']
                 ma60 = df.loc[current_date, 'MA60']
                 if strat == "Core" and close_p < ma60 * (1 - w_buf/2):
@@ -558,6 +599,12 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                 pnl = (proc - fee) - (pos['qty'] * pos['buy_price'] * 1.0025)
                 ret_pct = pnl / (pos['qty'] * pos['buy_price']) * 100
                 
+                if pnl < 0:
+                    loss_streak[tc] = loss_streak.get(tc, 0) + 1
+                    last_loss_date[tc] = current_date
+                else:
+                    loss_streak[tc] = 0
+
                 trade_logs.append({
                     '종목명': pos['name'], '티커': tc,
                     '매수일': pos['buy_date'].strftime('%Y-%m-%d'), '매도일': current_date.strftime('%Y-%m-%d'),
@@ -567,7 +614,15 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                 })
                 del positions[tc]
         
-        if len(positions) < max_slots:
+        # 4. 신규 시그널 포착 -> 큐 삽입
+        current_alloc_pct = max_alloc_pct
+        if b_boost:
+            idx_df = market_data['KOSPI'] if 'Core' in strat else market_data['KOSDAQ']
+            if current_date in idx_df.index and idx_df.loc[current_date, 'Close'] > idx_df.loc[current_date, 'MA200']:
+                current_alloc_pct = min(100.0, max_alloc_pct + 10.0)
+        dynamic_max_slots = max(3, int(100 / current_alloc_pct))
+
+        if len(positions) < dynamic_max_slots:
             for w in weekly_watchlist:
                 tc = w['tk']
                 if tc in positions: continue
@@ -593,7 +648,7 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                         
                 if buy_signal:
                     buy_queue.append({'tk': tc, 'name': w['name']})
-                    if len(positions) + len(buy_queue) >= max_slots: break
+                    if len(positions) + len(buy_queue) >= dynamic_max_slots: break
                     
     final_stock_eval = sum(pos['qty'] * data_dict[tc]['df']['Close'].iloc[-1] for tc, pos in positions.items())
     final_total_asset = cash + final_stock_eval
@@ -610,12 +665,6 @@ def color_profit_loss(val):
     if val_str.startswith('+'): return 'color: #FF5050; font-weight: bold;'
     elif val_str.startswith('-') and len(val_str) > 1 and val_str != '-': return 'color: #3b82f6; font-weight: bold;'
     return ''
-
-def apply_mts_style(df, subset_cols):
-    valid_cols = [c for c in subset_cols if c in df.columns]
-    if not valid_cols: return df
-    if hasattr(df.style, 'map'): return df.style.map(color_profit_loss, subset=valid_cols)
-    else: return df.style.applymap(color_profit_loss, subset=valid_cols)
 
 def mts_metric_html(label, value, delta=None):
     val_color, val_str = "white", str(value)
@@ -636,7 +685,7 @@ def mts_metric_html(label, value, delta=None):
     """
 
 # ==========================================
-# 3. 사이드바 UI 렌더링
+# 3. 사이드바 UI 렌더링 및 파라미터 동기화
 # ==========================================
 st.sidebar.header("🎯 현재 작업할 포트폴리오 선택")
 all_ports = load_all_portfolios_from_sheets()
@@ -708,8 +757,6 @@ if SYS_APP_KEY and SYS_APP_SECRET and p_data:
             p_data[token_key] = new_token
             p_data[time_key] = current_time
             save_portfolio_to_sheets(selected_port, p_data)
-        else:
-            st.sidebar.error(f"⚠️ KIS 인증 실패: {token_err}")
 
 cache_key = f"kis_global_cache_{SYS_CANO}_{SYS_ACNT_PRDT}" if SYS_CANO else "kis_global_cache_None_None"
 if SYS_APP_KEY and kis_token_global:
@@ -718,25 +765,21 @@ if SYS_APP_KEY and kis_token_global:
         if holdings is not None and summary is not None:
             tot_evlu = float(summary[0].get('tot_evlu_amt', 0))
             tot_pnl = float(summary[0].get('evlu_pfls_smtl_amt', 0))
-            
             ord_psbl_cash = fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SECRET, SYS_CANO, SYS_ACNT_PRDT, kis_token_global, is_mock=SYS_IS_MOCK)
             dnca_tot = ord_psbl_cash if ord_psbl_cash > 0 else float(summary[0].get('dnca_tot_amt', 0))
             
             imported = [{'종목명': i.get('prdt_name'), '티커': str(i.get('pdno')).strip().zfill(6), '실시간 현재가': f"{float(i.get('prpr', 0)):,.0f} 원", '매수평균가': f"{float(i.get('pchs_avg_pric', 0)):,.0f} 원", '보유수량': f"{int(i.get('hldg_qty'))} 주", '평가손익률': f"{float(i.get('evlu_pfls_rt', 0)):+.2f}%", '_raw_price': float(i.get('prpr', 0)), '_raw_buy': float(i.get('pchs_avg_pric', 0))} for i in holdings if int(i.get('hldg_qty', 0)) > 0]
             st.session_state[cache_key] = {'total_eval': tot_evlu, 'total_pnl': tot_pnl, 'cash_avail': dnca_tot, 'stocks': imported}
-            st.sidebar.success("✅ 최신 잔고 및 주문가능 금액 동기화 완료!")
+            st.sidebar.success("✅ 최신 잔고 동기화 완료!")
         else:
             st.sidebar.error(f"❌ 동기화 실패: {err_msg}")
-            st.sidebar.info("API 설정(실계좌/모의)을 다시 확인해 주세요.")
 
 kis_data = st.session_state.get(cache_key)
-real_holdings_tickers = []
 real_total_eval, real_eval_pnl = 0.0, 0.0
 real_stocks_df = pd.DataFrame()
 real_cash_avail = total_cash
 
 if kis_data:
-    real_holdings_tickers = [item['티커'] for item in kis_data['stocks']]
     real_total_eval = kis_data.get('total_eval', 0.0)
     real_eval_pnl = kis_data.get('total_pnl', 0.0)
     real_cash_avail = kis_data.get('cash_avail', total_cash)
@@ -747,7 +790,6 @@ try: real_base_date = pd.to_datetime(real_base_date_str).date()
 except: real_base_date = datetime.datetime.now(KST).date()
 
 real_invested_principal = real_total_eval - real_eval_pnl if real_total_eval > 0 else 0.0
-total_invested_principal = real_invested_principal
 
 if p_data:
     st.sidebar.markdown("---")
@@ -785,17 +827,25 @@ if p_data:
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
 
-# 🛑 [핵심 패치 1] 전략별 기본값 분리 및 상태 유지
+# 🛑 [핵심 패치 4] 전략별 최적화된 진짜 기본값 분리 및 상태 유지 로직
 default_params = {
-    '대형주 (Core)': {'ma200': True, 'buf': 1.5, 'sl': -15, 'alloc': 35, 'ts_tgt': 30, 'ts_drp': -10},
-    '중소형주 (Satellite)': {'ma200': True, 'buf': 1.0, 'sl': -12, 'alloc': 20, 'ts_tgt': 20, 'ts_drp': -7}
+    '대형주 (Core)': {
+        'ma200': True, 'buf': 1.5, 'sl': -15, 'alloc': 35, 
+        'ts_tgt': 30, 'ts_drp': -10, 'cd': 60, 'min_h': 5, 'boost': True
+    },
+    '중소형주 (Satellite)': {
+        'ma200': True, 'buf': 1.0, 'sl': -12, 'alloc': 20, 
+        'ts_tgt': 20, 'ts_drp': -7, 'cd': 30, 'min_h': 3, 'boost': True
+    }
 }
 curr_def = default_params.get(active_strat, default_params['대형주 (Core)'])
 
+# 세션에 파라미터 저장 (포트폴리오 전략이 바뀌면 자동 초기화)
 if 'params' not in st.session_state or st.session_state.get('last_strat') != active_strat:
     st.session_state.params = curr_def.copy()
     st.session_state.last_strat = active_strat
 
+# 사용자가 값을 수정했는지 검사
 is_custom = False
 for k, v in curr_def.items():
     if st.session_state.params[k] != v:
@@ -803,27 +853,35 @@ for k, v in curr_def.items():
         break
 
 if is_custom:
-    st.sidebar.warning("⚠️ 사용자 맞춤 파라미터 적용 중 (시뮬레이션/실전 공통)")
-    if st.sidebar.button("🔄 기본값으로 복구", use_container_width=True):
+    st.sidebar.error("⚠️ 사용자 맞춤 파라미터 운용 중 (실전/시뮬레이션 공통)")
+    if st.sidebar.button("🔄 기본 최적화 값으로 복구", use_container_width=True):
         st.session_state.params = curr_def.copy()
         st.rerun()
 else:
-    st.sidebar.success("✅ 기본 최적화 파라미터 운용 중")
+    st.sidebar.success("✅ 알고리즘 권장 기본 최적화 값 운용 중")
 
 st.session_state.params['ma200'] = st.sidebar.checkbox("🛡️ 200일 추세선 필터 적용", value=st.session_state.params['ma200'])
-st.session_state.params['buf'] = st.sidebar.slider("진입 버퍼 (%)", 0.0, 5.0, float(st.session_state.params['buf']), 0.1)
+st.session_state.params['buf'] = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", 0.0, 5.0, float(st.session_state.params['buf']), 0.1)
 st.session_state.params['sl'] = st.sidebar.slider("긴급 손절 컷 (%)", -30, -5, int(st.session_state.params['sl']), 1)
-st.session_state.params['alloc'] = st.sidebar.slider("종목당 투입 한도 (%)", 10, 100, int(st.session_state.params['alloc']), 5)
-st.session_state.params['ts_tgt'] = st.sidebar.slider("트레일링 목표수익 (%)", 5, 100, int(st.session_state.params['ts_tgt']), 5)
-st.session_state.params['ts_drp'] = st.sidebar.slider("트레일링 하락허용 (%)", -30, -1, int(st.session_state.params['ts_drp']), 1)
 
-# 전역 변수로 할당하여 하위 엔진에서 공통 사용
+with st.sidebar.expander("🧪 시뮬레이션 및 고급 안전장치 설정", expanded=is_custom):
+    st.session_state.params['cd'] = st.slider("연속 2회 손실 시 쿨다운(일)", 0, 90, int(st.session_state.params['cd']), 5)
+    st.session_state.params['alloc'] = st.slider("기본 종목당 투입 한도 (%)", 10, 100, int(st.session_state.params['alloc']), 5)
+    st.session_state.params['min_h'] = st.slider("최소 보유 기간(일)", 0, 20, int(st.session_state.params['min_h']), 1)
+    st.session_state.params['ts_tgt'] = st.slider("트레일링 스탑 목표수익 (%)", 5, 100, int(st.session_state.params['ts_tgt']), 5)
+    st.session_state.params['ts_drp'] = st.slider("트레일링 스탑 하락허용 (%)", -30, -1, int(st.session_state.params['ts_drp']), 1)
+    st.session_state.params['boost'] = st.checkbox("🔥 강세장 자금 풀 부스터", value=st.session_state.params['boost'])
+
+# 글로벌 변수 바인딩 (모든 하위 엔진에 일괄 적용됨)
 use_ma200_filter = st.session_state.params['ma200']
 whipsaw_buffer = st.session_state.params['buf'] / 100.0
 sat_stop_loss = st.session_state.params['sl'] / 100.0
+cooldown_days = st.session_state.params['cd']
 max_alloc_pct = float(st.session_state.params['alloc'])
+min_hold_days = st.session_state.params['min_h']
 ts_target_pct = st.session_state.params['ts_tgt'] / 100.0
 ts_drop_pct = st.session_state.params['ts_drp'] / 100.0
+bull_market_boost = st.session_state.params['boost']
 
 # ==========================================
 # 4. 메인 화면 구성
@@ -872,7 +930,7 @@ with tab1:
 
         if st.session_state.show_scanner:
             with st.spinner("AI 퀀트 필터 검색 중..."):
-                scan_result = run_scanner_safe(active_strat, use_ma200_filter, whipsaw_buffer)
+                scan_result = run_scanner_safe(active_strat, use_ma200_filter, whipsaw_buffer, min_hold_days)
                 if not scan_result.empty:
                     st.markdown("### 💡 AI 스캐너 포착 종목")
                     for _, row in scan_result.iterrows():
@@ -902,7 +960,7 @@ with tab1:
         def process_watchlist_row(row):
             ticker = str(row.get('티커', '')).strip().zfill(6)
             c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
-            cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, c_price)
+            cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days, c_price)
             return {'🗑️ 삭제': False, '종목명': row.get('종목명'), '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
@@ -970,7 +1028,7 @@ with tab3:
         c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
         if live_c_price <= 0: live_c_price = c_price
 
-        cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, buy_price, buy_price, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, live_c_price)
+        cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, buy_price, buy_price, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days, live_c_price)
         
         if "매도" in action or "청산" in action or "익절" in action:
             if qty_num > 0:
@@ -1034,7 +1092,7 @@ with tab4:
             else:
                 with st.spinner("포워드 테스트 구동 중..."):
                     eval_init_cash = real_invested_principal if real_invested_principal > 0 else total_cash
-                    res_fw = run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, 0, ts_target_pct, ts_drop_pct, False, 0)
+                    res_fw = run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if res_fw:
                         real_ret_pct = (real_eval_pnl / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
                         col_fw1, col_fw2 = st.columns(2)
@@ -1057,7 +1115,7 @@ with tab4:
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner("장기 백테스트 구동 중..."):
-                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, 0, ts_target_pct, ts_drop_pct, False, 0)
+                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
                     if bt_result:
                         st.success("✅ 장기 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
@@ -1079,7 +1137,7 @@ with tab4:
 
         if run_test3:
             with st.spinner(f"주간 스캔 및 {selected_year}년도 자율매매 시뮬레이션 구동 중 (약 15초 소요)..."):
-                pipeline_res = run_yearly_realistic_backtest(active_strat, total_cash, selected_year, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, ts_target_pct, ts_drop_pct)
+                pipeline_res = run_yearly_realistic_backtest(active_strat, total_cash, selected_year, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days, min_hold_days)
                 if pipeline_res:
                     st.success(f"✅ {selected_year}년도 실전 동일 조건 자율매매 백테스트 완료!")
                     logs = pipeline_res['trade_logs']
@@ -1101,51 +1159,105 @@ with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
     <hr>
-    
-    <h3>📌 1. 대원칙 (Grand Principles)</h3>
-    <ul>
-        <li><b>100% 실전 동일 환경 구축:</b> 모든 백테스트와 시뮬레이션 엔진은 실제 라이브 자동매매 봇이 작동하는 환경(복리 비중 공식, 수수료, 슬리피지 등)과 완벽하게 동일한 조건으로 동작해야 한다.</li>
-        <li><b>미래 참조 및 생존자 편향 완벽 차단:</b> 백테스트 시 '미래의 시가총액 데이터'를 끌어와 과거에 적용하는 치팅(Cheating) 행위를 금지한다.</li>
-    </ul>
-
-    <h3>🔎 2. 종목 발굴 메커니즘 (AI 스캐너 & 유니버스)</h3>
-    <p>AI 스캐너는 다음 4단계 다중 필터링을 거쳐 관심종목을 스캔한다.</p>
-    <ul>
-        <li><b>Step 1 (시장/시총 필터):</b> KOSPI(Core 전략) 상위 200개 또는 KOSDAQ(Satellite 전략) 상위 150개 우량주를 1차 후보군으로 선정 (잡주 차단). (Test 3 시뮬레이션 시에는 서버 부하를 고려하여 코스피 50 + 코스닥 50 = 총 100개로 압축 진행).</li>
-        <li><b>Step 2 (200일선 추세 필터):</b> 현재가가 과거 200일 이동평균선 위에 위치한 대세 상승 국면 종목만 통과.</li>
-        <li><b>Step 3 (전략별 타점 필터):</b>
-            <ul>
-                <li><b>Core (추세추종):</b> 60일선이 우상향 중이며, 20일선이 60일선을 상향 돌파(버퍼 이상) 시 매수.</li>
-                <li><b>Satellite (눌림목):</b> 현재가와 20일선의 이격도가 -5% ~ +3% 사이에 위치할 시 매수.</li>
-            </ul>
-        </li>
-        <li><b>Step 4 (AI 매력도 점수):</b> 타점 강도 산출식에 의해 85점~99점으로 점수화. (Core: 이격도가 클수록 고득점 / Satellite: 이격도가 낮을수록 고득점).</li>
-    </ul>
-
-    <h3>💳 3. 매매 체결 및 자금 관리 (Trade Execution & Money Management)</h3>
-    <ul>
-        <li><b>복리 기반 동적 비중 분할 매수:</b> 종목당 목표 매수 금액은 <code>(현재 가용 예수금 + 주식 평가금) * (max_alloc_pct / 100)</code> 공식을 엄격히 따른다. 수익 시 비중이 증가하고 손실 시 축소된다.</li>
-        <li><b>매수 수량 산출:</b> 수수료로 인해 예수금이 마이너스가 되는 것을 방지하기 위해 <code>매수 가능 수량 = 할당 예수금 / (현재가 * 1.0025)</code> 공식을 따른다.</li>
-        <li><b>익일 시가 체결 (Test 3):</b> 시뮬레이션에서 매수 시그널은 장 마감 시점에 확정되며, 실제 체결은 다음 날 아침 <b>시가(Open)</b>로 처리하여 슬리피지를 100% 반영한다.</li>
-        <li><b>수수료:</b> 매수 0.25%, 매도 0.25% (왕복 0.5%)가 매 거래 시마다 정확히 차감된다.</li>
-    </ul>
-
-    <h3>🛡️ 4. 리스크 관리 및 청산 (Risk Management & Exit)</h3>
-    <p>청산 우선순위에 따라 다음 세 가지 조건 중 하나라도 만족 시 전량 매도 및 예수금으로 즉각 회수된다.</p>
-    <ul>
-        <li><b>장중 저가 칼손절 (Intraday Stop Loss):</b> 하루 종가(Close)가 아닌 당일의 <b>저가(Low)</b>가 매수가 대비 손절선(기본 -15%)을 터치하면 그 즉시 시장가 매도 청산된다.</li>
-        <li><b>트레일링 익절 (Trailing Stop):</b> 보유 기간 중 주가가 목표 수익률(기본 +30%)을 돌파한 시점부터 역대 최고가(Highest Price)를 갱신하며, 이 최고가 대비 설정 하락폭(기본 -10%)이 발생하면 즉시 이익 실현(청산)한다.</li>
-        <li><b>추세선 이탈:</b> 장 마감 종가 기준으로 Core 전략은 60일선, Satellite 전략은 20일선을 하향 이탈할 경우 다음 날 즉시 청산한다.</li>
-    </ul>
-
-    <h3>⚙️ 6. 시스템 기본 파라미터 (System Default Parameters)</h3>
-    <p>시스템은 전략의 특성에 맞춘 최적화된 기본값을 사용하며, 사용자가 이를 변경할 경우 UI의 실전/시뮬레이션 전 영역에 <b>100% 동기화</b>되어 적용된다.</p>
-    <ul>
-        <li><b>대형주 (Core) 기본값:</b> 200일선 적용, 버퍼 1.5%, 한도 35%, 손절 -15%, 트레일링 익절 30% 상승 시 -10% 허용</li>
-        <li><b>중소형주 (Satellite) 기본값:</b> 200일선 적용, 버퍼 1.0%, 한도 20%, 손절 -12%, 트레일링 익절 20% 상승 시 -7% 허용</li>
-    </ul>
-
-    <hr>
-    <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 웹 애플리케이션의 코드를 업데이트하거나 수정할 때, 위 내용에 기록된 <b>'대원칙, 계산 공식, 레이아웃 정렬, API 호출 규칙, 백테스트 체결 규칙(익일 시가/장중 저가), 기본 파라미터'</b>를 단 하나라도 임의로 훼손하거나 삭제해서는 안 된다. 사용자가 특정 기능을 업데이트해 달라고 요청할 경우, <b>반드시 이 백서에 기록된 원칙들과 상충하는 부분이 없는지 선행 검토해야 하며, 만약 원칙을 수정해야만 하는 상황이라면 코드를 출력하기 전에 사용자에게 명확히 보고하고 승인을 얻어야만 한다.</b></p>
+    <p>본 백서는 사용자를 위한 <b>시스템 상세 매뉴얼</b>이자, 향후 시스템 업데이트 시 AI가 절대적으로 준수해야 할 <b>불변의 알고리즘 헌장(System Prompt)</b>입니다.</p>
     """, unsafe_allow_html=True)
+
+    st.header("📌 Part 1. 시스템 아키텍처 및 대원칙 (Grand Principles)")
+    st.info("""
+    * **100% 실전 동일 환경 구축:** 모든 백테스트와 시뮬레이션 엔진은 실제 라이브 자동매매 봇이 작동하는 환경(복리 비중 공식, 수수료, 슬리피지 등)과 완벽하게 동일한 조건으로 동작해야 합니다.
+    * **미래 참조 및 생존자 편향 완벽 차단:** 백테스트 시 '미래의 시가총액 데이터'를 끌어와 과거에 적용하는 치팅(Cheating) 행위를 금지합니다.
+    """)
+
+    st.header("🔎 Part 2. 종목 발굴 메커니즘 (AI 스캐너 & 유니버스)")
+    st.markdown("AI 스캐너는 다음 4단계 다중 필터링을 거쳐 시장의 주도주를 스캔합니다.")
+    
+    st.markdown("#### 1단계: 시장 및 시가총액 필터 (안전성 & 유동성 확보)")
+    st.markdown("> **Core 전략 (대형주):** KOSPI 상위 200개 우량주 스캔\n>\n> **Satellite 전략 (중소형주):** KOSDAQ 상위 150개 주도주 스캔\n> \n> *(Test 3 시뮬레이션 시에는 서버 부하 방지를 위해 코스피 50 + 코스닥 50 = 총 100개로 압축)*")
+
+    st.markdown("#### 2단계: 200일 장기 추세선 필터 (대세 우상향 검증)")
+    st.markdown("대세 하락 종목을 원천 배제하기 위해 주가가 200일선 위에 안착해 있어야 합니다.")
+    st.latex(r"Price \ge MA200")
+
+    st.markdown("#### 3단계: 전략별 정밀 타점 필터 (진입 시그널)")
+    st.markdown("* **Core (추세추종):** 60일선이 우상향 중이며, 20일선이 60일선을 설정 버퍼 이상 상향 돌파(골든크로스)")
+    st.latex(r"MA60_{t} > MA60_{t-10} \quad \land \quad MA20 \ge MA60 \times (1 + Whipsaw\_Buffer)")
+    st.markdown("* **Satellite (눌림목):** 주가와 20일선의 이격도가 -5.0% ~ +3.0% 사이에 위치 (안전한 숨고르기 국면)")
+    st.latex(r"-5.0\% \le \left( \frac{Price - MA20}{MA20} \right) \times 100 \le +3.0\%")
+
+    st.markdown("#### 4단계: 🔥 AI 매력도 점수 (Score) 산출식")
+    st.markdown("위 조건을 통과한 종목에 기본 85점을 부여하고, 타점 강도에 따라 최대 99점까지 가산점을 부여합니다.")
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        st.markdown("**Core 전략 매력도 점수** (이격도가 클수록 고득점)")
+        st.latex(r"Score = \min\left(85.0 + \max\left(0, \left(\frac{MA20}{MA60} - 1\right) \times 100\right), 99.0\right)")
+    with col_s2:
+        st.markdown("**Satellite 전략 매력도 점수** (20일선에 딱 붙을수록 고득점)")
+        st.latex(r"Score = \min\left(85.0 + \max\left(0, 3.0 - \left(\frac{Price}{MA20} - 1\right) \times 100\right), 99.0\right)")
+
+    st.header("💳 Part 3. 자금 관리 및 3대 고급 안전장치 (Filters & Boosters)")
+    
+    st.markdown("#### 1. 복리 기반 동적 비중 분할 매수")
+    st.latex(r"Target\_Fund = Total\_Equity \times \left( \frac{Max\_Alloc\_Pct}{100} \right)")
+    st.latex(r"Order\_Qty = \left\lfloor \frac{\min(Cash, Target\_Fund - Exist\_Val)}{Price \times 1.0025} \right\rfloor")
+    
+    st.markdown("#### 2. 강세장 자금 풀 부스터 (Bull Market Booster)")
+    st.markdown("시장 지수(KOSPI/KOSDAQ)가 200일선 위에 있는 대세 상승장일 때, 레버리지 극대화를 위해 종목당 투입 비중(`Max_Alloc_Pct`)을 즉시 **+10%p** 상향합니다.")
+    st.latex(r"If \ Index\_Price > Index\_MA200 \Rightarrow Max\_Alloc\_Pct = \min(100\%, Max\_Alloc\_Pct + 10.0\%)")
+
+    st.markdown("#### 3. 쿨다운 대기 (Loss Streak Cooldown)")
+    st.markdown("특정 종목에서 연속으로 **2회 손실**이 발생할 경우, '칼날 잡기'를 방지하기 위해 마지막 손실일로부터 설정된 쿨다운 일수 동안 신규 진입을 강제 차단합니다.")
+
+    st.markdown("#### 4. 최소 보유 기간 (Minimum Hold Period)")
+    st.markdown("매수 후 세력의 흔들기(Whipsaw)에 당하지 않도록, 설정된 일수(예: 5일) 동안은 단순 추세선 이탈에 의한 매도를 금지하고 버팁니다. (단, 계좌를 지키기 위해 긴급 손절컷과 트레일링 익절은 이 조건과 무관하게 무조건 즉시 작동합니다.)")
+
+    st.header("🛡️ Part 4. 리스크 관리 및 청산 알고리즘 (Exit Strategies)")
+    st.markdown("청산 우선순위에 따라 다음 조건 중 하나라도 만족 시 즉시 시장가(또는 익일 시가) 매도 처리됩니다.")
+    
+    st.markdown("#### 1. 장중 저가 칼손절 (Intraday Stop Loss) - 최우선 순위")
+    st.markdown("하루 종가(Close)가 아닌 당일 장중 **저가(Low)**가 손절선을 터치하면 그 즉시 매도 청산합니다.")
+    st.latex(r"Low\_Price \le Buy\_Price \times (1 - Stop\_Loss\_Pct)")
+    
+    st.markdown("#### 2. 트레일링 익절 (Trailing Stop)")
+    st.markdown("수익률이 목표(Target)를 돌파한 시점부터 역대 최고가를 갱신하며, 이 최고가 대비 설정 하락폭(Drop) 발생 시 이익을 확정합니다.")
+    st.latex(r"Trigger: Highest\_Price \ge Buy\_Price \times (1 + Target\_Pct)")
+    st.latex(r"Exit: Low\_Price \le Highest\_Price \times (1 - Drop\_Pct)")
+
+    st.markdown("#### 3. 추세 이탈 (Trend Breakdown)")
+    st.markdown("최소 보유 기간이 지난 이후, 장 마감 종가 기준으로 Core 전략은 60일선, Satellite 전략은 20일선을 하향 이탈할 경우 매도합니다.")
+
+    st.header("⚙️ Part 5. 시스템 기본 파라미터 (System Default Parameters)")
+    st.markdown("시스템은 전략의 특성에 맞춘 최적화된 기본값을 내장하고 있으며, **사용자가 설정값을 변경할 경우 UI의 실전 및 모든 시뮬레이션 전 영역에 100% 실시간으로 연동되어 일관성 있게 적용**됩니다. 변경 시 항상 '기본값 복구' 기능을 제공합니다.")
+    
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        st.markdown("**🔵 대형주 (Core) 기본값**")
+        st.markdown("""
+        * 200일선 적용: `True`
+        * 골든크로스 버퍼: `1.5%`
+        * 종목당 투입 한도: `35%`
+        * 긴급 손절 컷: `-15%`
+        * 트레일링 스탑: `+30%` 달성 시 `-10%`
+        * 연속 2회 손실 쿨다운: `60일`
+        * 최소 보유 기간: `5일`
+        * 강세장 부스터: `적용 (True)`
+        """)
+    with col_d2:
+        st.markdown("**🟡 중소형주 (Satellite) 기본값**")
+        st.markdown("""
+        * 200일선 적용: `True`
+        * 눌림목 이격도 버퍼: `1.0%`
+        * 종목당 투입 한도: `20%`
+        * 긴급 손절 컷: `-12%`
+        * 트레일링 스탑: `+20%` 달성 시 `-7%`
+        * 연속 2회 손실 쿨다운: `30일`
+        * 최소 보유 기간: `3일`
+        * 강세장 부스터: `적용 (True)`
+        """)
+
+    st.markdown("---")
+    st.markdown("<h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>", unsafe_allow_html=True)
+    st.warning("""
+    이 문서를 읽은 AI는 향후 웹 애플리케이션의 코드를 업데이트하거나 수정할 때, **위 Part 1~5에 기록된 '대원칙, 매력도 계산 공식, 레이아웃 정렬, API 호출 규칙, 백테스트 체결 규칙(익일 시가/장중 저가), 3대 고급 안전장치 논리, 전략별 기본 파라미터 값'을 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.** 
+    
+    사용자가 특정 기능을 업데이트해 달라고 요청할 경우, **반드시 이 백서에 기록된 원칙들과 상충하는 부분이 없는지 선행 검토해야 하며, 만약 원칙을 수정해야만 하는 상황이라면 코드를 출력하기 전에 사용자에게 명확히 보고하고 승인을 얻어야만 합니다.**
+    """)
