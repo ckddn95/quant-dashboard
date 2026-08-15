@@ -33,7 +33,6 @@ st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**,
 
 STRAT_DISPLAY_MAP = {quant.Strategy.CORE: '대형주 (Core)', quant.Strategy.SATELLITE: '중소형주 (Satellite)'}
 
-# 1. 안전한 Enum 바인딩 및 HALTED_CONFIG_ERROR 검출
 raw_strat = db.get_setting('strategy', 'CORE')
 try:
     active_strat = quant.Strategy(raw_strat)
@@ -94,7 +93,6 @@ if kill_switch: st.sidebar.error("⚠️ 킬 스위치 작동 중!")
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
 
-# 2. StrategyConfig 연동 및 UI 퍼센트 매핑
 default_cfg = quant.get_default_config(active_strat)
 saved_p = db.get_setting(f'params_{active_strat.value}', None)
 
@@ -123,7 +121,6 @@ with st.sidebar.expander("🧪 시뮬레이션 및 고급 안전장치", expande
     saved_p['ts_drp'] = st.slider("하락 허용 (%)", -30, -1, int(float(saved_p['ts_drp']) * 100.0), 1) / 100.0
     saved_p['boost'] = st.checkbox("🔥 강세장 부스터", value=saved_p['boost'])
 
-# 무결성 검증 후 DB 저장
 try:
     current_config = quant.StrategyConfig(**saved_p)
     db.set_setting(f'params_{active_strat.value}', saved_p)
@@ -136,7 +133,11 @@ SYS_APP_SEC = db.get_setting('manual_app_secret')
 SYS_CANO = db.get_setting('manual_cano')
 SYS_IS_MOCK = bool(db.get_setting('manual_is_mock', True))
 
-rd = st.session_state.get('real_data', {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []})
+# 🛑 [핵심 패치] 계좌 정보를 DB에서 최우선으로 불러오도록 수정
+default_rd = {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []}
+rd = st.session_state.get('real_data', db.get_setting('last_real_data', default_rd))
+st.session_state['real_data'] = rd # 세션 동기화
+
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
 base_date_str = db.get_setting('created_at', '2024-01-01')
 try: real_base_date = pd.to_datetime(base_date_str).date()
@@ -194,7 +195,6 @@ with tab1:
         tok = st.session_state.get('kis_token')
         c_price = kis.fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else 0.0
         
-        # SQLite 포지션 정보 결합
         db_positions = {p['ticker']: p for p in db.get_positions()}
         buy_p = db_positions[ticker]['buy_price'] if ticker in db_positions else 0.0
         high_p = db_positions[ticker]['highest_price'] if ticker in db_positions else 0.0
@@ -229,9 +229,12 @@ with tab2:
                 h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
                 if h is not None:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
-                    st.session_state['real_data'] = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
                     
-                    # 🛑 [핵심 패치 3] 포지션 SQLite SSOT 매핑
+                    # 🛑 [핵심 패치] 계좌 정보를 DB에 영구 저장
+                    new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
+                    st.session_state['real_data'] = new_rd
+                    db.set_setting('last_real_data', new_rd)
+                    
                     kis_stocks = [{'ticker': str(i['pdno']).zfill(6), 'qty': int(i['hldg_qty']), 'buy_price': float(i['pchs_avg_pric']), 'current_price': float(i['prpr'])} for i in h if int(i['hldg_qty']) > 0]
                     db.sync_positions_from_broker(kis_stocks)
 
