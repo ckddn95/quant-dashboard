@@ -7,9 +7,6 @@ import database as db
 import broker.kis_client as kis
 import quant_engine as quant
 
-# ==========================================
-# 0. 페이지 설정 및 초기화
-# ==========================================
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
@@ -34,13 +31,29 @@ def mts_metric_html(label, value, delta=None):
 st.title("Core-Satellite Quant System (MSA)")
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
-# ==========================================
-# 1. 사이드바 UI (SQLite 연동)
-# ==========================================
+# ==================== 전략 및 파라미터 (UI ↔ 내부 분리) ====================
+STRAT_DISPLAY_MAP = {quant.Strategy.CORE: '대형주 (Core)', quant.Strategy.SATELLITE: '중소형주 (Satellite)'}
+
+# 1. 안전한 Enum 바인딩 및 HALTED_CONFIG_ERROR 검출
+raw_strat = db.get_setting('strategy', 'CORE')
+try:
+    active_strat = quant.Strategy(raw_strat)
+    db.set_setting('halted_config_error', False)
+except ValueError:
+    db.set_setting('halted_config_error', True)
+    st.error("🚨 [HALTED_CONFIG_ERROR] 알 수 없는 전략이 감지되어 시스템이 강제 정지되었습니다. DB를 초기화하십시오.")
+    st.stop()
+
 st.sidebar.header("🎯 전략 및 환경 설정")
-active_strat = db.get_setting('strategy', '대형주 (Core)')
-active_strat = st.sidebar.selectbox("운용 전략", ['대형주 (Core)', '중소형주 (Satellite)'], index=0 if active_strat=='대형주 (Core)' else 1)
-db.set_setting('strategy', active_strat)
+display_options = list(STRAT_DISPLAY_MAP.values())
+current_display = STRAT_DISPLAY_MAP[active_strat]
+selected_display = st.sidebar.selectbox("운용 전략", display_options, index=display_options.index(current_display))
+selected_strat = [k for k, v in STRAT_DISPLAY_MAP.items() if v == selected_display][0]
+
+if selected_strat != active_strat:
+    db.set_setting('strategy', selected_strat.value)
+    active_strat = selected_strat
+    st.rerun()
 
 total_cash = int(db.get_setting('virtual_cash', 10000000))
 new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", value=total_cash, step=1000000)
@@ -82,42 +95,44 @@ if kill_switch: st.sidebar.error("⚠️ 킬 스위치 작동 중!")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
-default_params = {
-    '대형주 (Core)': {'ma200': True, 'buf': 1.5, 'sl': -15, 'alloc': 35, 'ts_tgt': 30, 'ts_drp': -10, 'cd': 60, 'min_h': 5, 'boost': True},
-    '중소형주 (Satellite)': {'ma200': True, 'buf': 1.0, 'sl': -12, 'alloc': 20, 'ts_tgt': 20, 'ts_drp': -7, 'cd': 30, 'min_h': 3, 'boost': True}
-}
-curr_def = default_params[active_strat]
 
-if 'params' not in st.session_state or st.session_state.get('last_strat') != active_strat:
-    st.session_state.params = db.get_setting(f'params_{active_strat}', curr_def.copy())
+# 2. StrategyConfig 연동 및 UI 퍼센트 매핑
+default_cfg = quant.get_default_config(active_strat)
+saved_p = db.get_setting(f'params_{active_strat.value}', None)
+
+if saved_p is None or st.session_state.get('last_strat') != active_strat:
+    saved_p = default_cfg.__dict__.copy()
+    db.set_setting(f'params_{active_strat.value}', saved_p)
     st.session_state.last_strat = active_strat
 
-is_custom = any(st.session_state.params[k] != v for k, v in curr_def.items())
+is_custom = any(saved_p[k] != v for k, v in default_cfg.__dict__.items())
 if is_custom:
     st.sidebar.error("⚠️ 사용자 맞춤 파라미터 적용 중")
     if st.sidebar.button("🔄 기본값 복구"):
-        st.session_state.params = curr_def.copy()
-        db.set_setting(f'params_{active_strat}', st.session_state.params)
+        saved_p = default_cfg.__dict__.copy()
+        db.set_setting(f'params_{active_strat.value}', saved_p)
         st.rerun()
 else: st.sidebar.success("✅ 기본 권장 파라미터 적용 중")
 
-p = st.session_state.params
-p['ma200'] = st.sidebar.checkbox("🛡️ 200일 추세선", value=p['ma200'])
-p['buf'] = st.sidebar.slider("골든크로스 버퍼 (%)", 0.0, 5.0, float(p['buf']), 0.1)
-p['sl'] = st.sidebar.slider("긴급 손절 컷 (%)", -30, -5, int(p['sl']), 1)
+saved_p['ma200'] = st.sidebar.checkbox("🛡️ 200일 추세선", value=saved_p['ma200'])
+# 퍼센트 UI 표시 (* 100), 내부 저장 (/ 100)
+saved_p['buf'] = st.sidebar.slider("골든크로스 버퍼 (%)", 0.0, 5.0, float(saved_p['buf']) * 100.0, 0.1) / 100.0
+saved_p['sl'] = st.sidebar.slider("긴급 손절 컷 (%)", -30.0, -5.0, float(saved_p['sl']) * 100.0, 1.0) / 100.0
 with st.sidebar.expander("🧪 시뮬레이션 및 고급 안전장치", expanded=is_custom):
-    p['cd'] = st.slider("쿨다운(일)", 0, 90, int(p['cd']), 5)
-    p['alloc'] = st.slider("투입 한도 (%)", 10, 100, int(p['alloc']), 5)
-    p['min_h'] = st.slider("최소 보유(일)", 0, 20, int(p['min_h']), 1)
-    p['ts_tgt'] = st.slider("익절 목표 (%)", 5, 100, int(p['ts_tgt']), 5)
-    p['ts_drp'] = st.slider("하락 허용 (%)", -30, -1, int(p['ts_drp']), 1)
-    p['boost'] = st.checkbox("🔥 강세장 부스터", value=p['boost'])
+    saved_p['cd'] = st.slider("쿨다운(일)", 0, 90, int(saved_p['cd']), 5)
+    saved_p['alloc'] = st.slider("투입 한도 (%)", 10, 100, int(float(saved_p['alloc']) * 100.0), 5) / 100.0
+    saved_p['min_h'] = st.slider("최소 보유(일)", 0, 20, int(saved_p['min_h']), 1)
+    saved_p['ts_tgt'] = st.slider("익절 목표 (%)", 5, 100, int(float(saved_p['ts_tgt']) * 100.0), 5) / 100.0
+    saved_p['ts_drp'] = st.slider("하락 허용 (%)", -30, -1, int(float(saved_p['ts_drp']) * 100.0), 1) / 100.0
+    saved_p['boost'] = st.checkbox("🔥 강세장 부스터", value=saved_p['boost'])
 
-db.set_setting(f'params_{active_strat}', p)
-
-use_ma200_filter, whipsaw_buffer, sat_stop_loss = p['ma200'], p['buf'] / 100.0, p['sl'] / 100.0
-cooldown_days, max_alloc_pct, min_hold_days = p['cd'], float(p['alloc']), p['min_h']
-ts_target_pct, ts_drop_pct, bull_market_boost = p['ts_tgt'] / 100.0, p['ts_drp'] / 100.0, p['boost']
+# 무결성 검증 후 DB 저장
+try:
+    current_config = quant.StrategyConfig(**saved_p)
+    db.set_setting(f'params_{active_strat.value}', saved_p)
+except ValueError as e:
+    st.sidebar.error(f"입력값 오류: {e}")
+    st.stop()
 
 SYS_APP_KEY = db.get_setting('manual_app_key')
 SYS_APP_SEC = db.get_setting('manual_app_secret')
@@ -160,7 +175,7 @@ with tab1:
 
     if st.session_state.get('show_scanner'):
         with st.spinner("AI 검색 중..."):
-            scan_res = quant.run_scanner_safe(active_strat, use_ma200_filter, whipsaw_buffer, min_hold_days)
+            scan_res = quant.run_scanner_safe(active_strat, current_config)
             if not scan_res.empty:
                 st.markdown("### 💡 AI 스캐너 포착 종목")
                 for _, row in scan_res.iterrows():
@@ -177,12 +192,11 @@ with tab1:
     st.markdown("### 📋 현재 감시 리스트")
     display_records = []
     
-    # 🛑 [에러 방어 완벽 패치 1] 모듈 명 및 세션 토큰 매핑 완료
     def process_w(row):
         ticker = str(row['티커']).zfill(6)
         tok = st.session_state.get('kis_token')
         c_price = kis.fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else 0.0
-        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days, c_price)
+        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, current_config, c_price=c_price)
         return {'🗑️ 삭제': False, '종목명': row['종목명'], '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
 
     if current_watchlist:
@@ -199,8 +213,7 @@ with tab1:
                 db.clear_and_update_watchlist(keep_df.to_dict('records'))
                 st.success("업데이트 완료!")
                 time.sleep(0.5); st.rerun()
-    else:
-        st.info("현재 등록된 관심종목이 없습니다. 스캐너를 돌리거나 직접 검색하여 추가해주세요.")
+    else: st.info("현재 등록된 관심종목이 없습니다.")
 
 with tab2:
     st.header("🔌 실전 계좌 모니터링")
@@ -208,14 +221,13 @@ with tab2:
         if st.button("🔄 잔고 동기화"):
             token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK)
             if token:
-                st.session_state['kis_token'] = token # 🛑 [패치 2] 발급받은 토큰을 세션에 저장
+                st.session_state['kis_token'] = token 
                 h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
                 if h is not None:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
                     st.session_state['real_data'] = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
                     st.success("완료!")
-                    time.sleep(0.5)
-                    st.rerun()
+                    time.sleep(0.5); st.rerun()
                 else: st.error(err)
         
         c1, c2, c3, c4 = st.columns(4)
@@ -236,10 +248,9 @@ with tab3:
     c3.metric("💵 주문가능 원화", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
-    target_buy_amt = max(rd['eval'], float(total_cash)) * (max_alloc_pct / 100.0)
+    target_buy_amt = max(rd['eval'], float(total_cash)) * current_config.alloc
     temp_q = []
     
-    # 🛑 [패치 3] 자동매매 큐에서도 변수명 충돌 완벽 방어
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
         qty, buy_p = 0, 0.0
@@ -249,7 +260,7 @@ with tab3:
         
         tok = st.session_state.get('kis_token')
         c_price = kis.fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SEC, tk, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else 0.0
-        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, buy_p, buy_p, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days, c_price)
+        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, buy_p, c_price)
         
         if "매도" in action or "청산" in action or "익절" in action:
             if qty > 0: return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '구분': action, '단가': cp, '수량': qty}
@@ -292,7 +303,7 @@ with tab4:
             else:
                 with st.spinner("포워드 테스트 구동 중..."):
                     eval_init_cash = real_invested_principal if real_invested_principal > 0 else float(total_cash)
-                    res_fw = quant.run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    res_fw = quant.run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, current_config)
                     if res_fw:
                         real_ret_pct = (rd['pnl'] / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
                         col_fw1, col_fw2 = st.columns(2)
@@ -311,7 +322,7 @@ with tab4:
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner("구동 중..."):
-                    res = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d, end_d, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    res = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d, end_d, current_config)
                     if res:
                         st.success("완료!")
                         r1, r2 = st.columns(2)
@@ -327,7 +338,7 @@ with tab4:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
         if st.button(f"{yr}년도 자율매매 백테스트 실행", type="primary", use_container_width=True):
             with st.spinner(f"서버 부하 방지를 위해 우량주 100개 풀에서 {yr}년도 시뮬레이션 중..."):
-                res = quant.run_yearly_realistic_backtest(active_strat, total_cash, yr, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days, min_hold_days)
+                res = quant.run_yearly_realistic_backtest(active_strat, total_cash, yr, current_config)
                 if res:
                     st.success("완료!")
                     logs = res['trade_logs']
