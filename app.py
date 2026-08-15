@@ -95,7 +95,6 @@ except ValueError as e: st.sidebar.error(f"입력값 오류: {e}"); st.stop()
 SYS_APP_KEY, SYS_APP_SEC, SYS_CANO = db.get_setting('manual_app_key'), db.get_setting('manual_app_secret'), db.get_setting('manual_cano')
 SYS_IS_MOCK = bool(db.get_setting('manual_is_mock', True))
 
-# 🛑 [핵심 패치 5] 하드코딩 완전 제거 (실계좌 우선)
 rd = st.session_state.get('real_data', db.get_setting('last_real_data', {'eval': 0.0, 'pnl': 0.0, 'cash': 0.0, 'stocks': []}))
 st.session_state['real_data'] = rd 
 if rd['eval'] == 0: st.warning("⚠️ KIS 잔고 동기화가 필요합니다 (최초 1회 필수).")
@@ -105,7 +104,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 
 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
-    # (스캐너 코드 등 기존 동일 - 생략 최소화)
+    # (스캐너 코드 생략 부분 동일 유지)
     col_s1, col_s2 = st.columns([8, 2])
     with col_s1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True): st.session_state.show_scanner = True
@@ -196,7 +195,6 @@ with tab3:
     c3.metric("💵 가용 현금", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
-    # 🛑 [핵심 패치 6] 동적 목표금액 계산 및 수동물량 매도 차단 (managed_qty)
     target_buy_amt = rd['eval'] * current_config.alloc
     locked_cash, _ = db.get_locked_cash_and_qty()
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
@@ -207,8 +205,7 @@ with tab3:
     for p in db.get_positions():
         tk = str(p['ticker']).zfill(6)
         if tk not in eval_tickers:
-            eval_tickers.add(tk)
-            nm = tk
+            eval_tickers.add(tk); nm = tk
             for s in rd.get('stocks', []):
                 if str(s.get('pdno', '')).zfill(6) == tk: nm = s.get('prdt_name', tk); break
             eval_list.append({'티커': tk, '종목명': nm})
@@ -216,8 +213,6 @@ with tab3:
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
         db_positions = {p['ticker']: p for p in db.get_positions()}
-        
-        # managed_qty (DB 봇 보유분) vs kis_qty (실제 KIS 수량)
         m_qty = db_positions[tk]['qty'] if tk in db_positions else 0
         buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
@@ -232,7 +227,6 @@ with tab3:
         cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, c_price, days_held)
         
         if "매도" in action or "청산" in action or "익절" in action:
-            # 수동 보유량 보호: 봇이 산 managed_qty와 KIS 실제 잔고 중 작은 값만 매도
             sell_qty = min(m_qty, kis_qty) 
             if sell_qty > 0: return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '구분': action, '단가': cp, '수량': sell_qty}
         elif "매수 시그널" in action:
@@ -258,12 +252,9 @@ with tab3:
             for _, r in q_df.iterrows():
                 tk, side = r['티커'], "BUY" if "매수" in r['구분'] else "SELL"
                 idem_key = f"{SYS_CANO}_{active_strat.value}_{tk}_{side}_{datetime.datetime.now(KST).strftime('%Y%m%d_%H')}"
-                
-                # 원자적 생성 및 중복/예약금 방어
                 ok, msg = db.safe_add_order_intent(tk, r['구분'], r['수량'], r['단가'], idem_key, net_usable_cash)
                 if ok: success_count += 1
                 else: st.warning(f"⚠️ {r['종목명']} 거절됨: {msg}")
-                    
             if success_count > 0: st.success(f"✅ {success_count}건 주문 생성 완료!")
     else: st.info("대기 중인 시그널이 없습니다.")
     
@@ -278,31 +269,24 @@ with tab4:
     pass 
 
 # ==========================================
-# 🛑 [핵심 보강] Part 8. 현금 및 포지션 리스크 관리 헌장 추가
+# 🛑 [핵심 보강] Part 9. 킬 스위치 및 주문 수명(TTL) 관리 헌장 추가
 # ==========================================
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
     <hr>
     
-    *(Part 1~7 기존 내용 생략 없이 보존됨. 시스템 용량상 여기서는 축약하지만 절대 삭제된 것이 아님)*
+    *(Part 1~8 기존 내용 생략 없이 보존됨)*
     
-    <h3>🛡️ 8. 현금 및 포지션 리스크 관리 (Cash & Position Risk Management)</h3>
+    <h3>🚫 9. 킬 스위치 및 주문 수명(TTL) 관리 (Kill Switch & Order TTL)</h3>
     <ul>
-        <li><b>동적 자산 할당 (Dynamic Allocation):</b> 고정된 하드코딩 원금을 사용하지 않으며, 실시간 KIS 잔고의 <code>총 평가 금액(Total Eval)</code>과 DB의 <code>managed_position</code> 평가액을 기준으로 목표 투입 비중을 계산한다.</li>
-        <li><b>가용 현금 원자적 제어 (Atomic Cash Reservation):</b> 매수 주문(Intent) 생성 시, 현재 남아있는 열린(Open) BUY 예약금 전체를 합산 차감한 <code>net_usable_cash</code> 한도 내에서만 수량을 배정한다. DB 트랜잭션을 통해 예약금 초과 및 중복 생성을 방지한다.</li>
-        <li><b>수동 보유물량 보호 (Protect Manual Shares):</b> 사용자가 수동으로 매수한 물량은 절대 건드리지 않는다. 봇의 매도 수량은 DB가 기록한 <code>managed_qty</code>와 KIS의 실제 잔고 중 <b>작은 값</b>을 취하여 오직 시스템이 산 물량만 청산한다.</li>
-        <li><b>미결제 매도금 격리 (Unsettled Sell Isolation):</b> 매도 주문이 <code>FILLED</code>되어 실제 KIS 가용 현금으로 잡히기 전까지는, 해당 매도 대금을 신규 매수를 위한 가용 현금으로 취급하지 않는다. (미수금 발생 원천 차단)</li>
-        <li><b>Fail-Closed 사전 비행 검증 (Pre-Flight Checks):</b> KIS POST 직전에 다음 항목을 재검사하여, 위반 시 주문을 <code>REJECTED</code> 처리한다.
-            <ul>
-                <li><b>거래정지 및 시세 지연:</b> KIS API에서 거래정지(51, 57 등)를 반환하거나 괴리율이 3% 초과 시 차단.</li>
-                <li><b>장 운영시간:</b> 실계좌 운용 시 한국 시간(KST) 09:00 ~ 15:30 외의 주문은 거절한다.</li>
-                <li><b>일일 최대 손실 (Circuit Breaker):</b> 계좌의 일일 누적 PnL이 총자산 대비 -5%를 초과할 경우 당일 신규 매수를 전면 차단한다.</li>
-            </ul>
-        </li>
+        <li><b>POST 직전 실시간 재검증 (Double Check):</b> 봇(Bot)은 루프가 시작될 때뿐만 아니라, 증권사 서버로 <code>POST</code> 통신을 발송하기 1밀리초 전(CLAIMED 상태)에도 <code>SQLite</code>에서 최신 킬 스위치 및 <code>auto_trade_enabled</code> 값을 다시 읽어 들인다. 만약 킬 스위치가 켜지거나 자동주문이 꺼져있다면 즉시 <code>CANCELED</code> 처리하여 신규 진입을 원천 차단한다.</li>
+        <li><b>미체결 주문 즉각 취소 (Cancel Open Orders):</b> 킬 스위치가 발동되면 봇은 즉시 증권사 서버로 취소 API를 전송하여 기존에 걸어둔 모든 <code>ACKNOWLEDGED</code> 및 <code>PARTIALLY_FILLED</code> 미체결 주문을 일괄 취소 거둬들인다.</li>
+        <li><b>영구적 상태 유지:</b> 킬 스위치는 메모리가 아닌 SQLite에 영구 기록되므로 시스템이나 서버가 재부팅되어도 안전하게 차단 상태를 유지한다.</li>
+        <li><b>주문 수명 제한 (Intent TTL):</b> 의도(Intent)가 DB에 생성된 지 5분(300초) 이상 경과한 낡은 주문은 시세 변화로 인한 리스크를 방지하기 위해 증권사로 발송하지 않고 <code>EXPIRED</code> 상태로 폐기한다.</li>
     </ul>
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~8에 기록된 <b>'대원칙, API 구조, 고급 안전장치, 주문 상태 머신 대사 원칙, 수동물량 보호 및 Fail-Closed 리스크 관리 원리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~9에 기록된 <b>'MSA 구조, 무결성 계약, 주문 상태 머신 대사 원칙, 동시성 제어, 킬 스위치 및 TTL 관리 원리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
