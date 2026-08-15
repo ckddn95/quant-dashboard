@@ -260,8 +260,6 @@ with tab3:
     target_buy_amt = max(rd['eval'], float(total_cash)) * current_config.alloc
     temp_q = []
     
-    # 🛑 [핵심 방어 패치] 관심종목 유니버스 + DB 보유 포지션 통합 탐색
-    # 사용자가 관심종목에서 종목을 삭제하더라도 보유 중이면 끝까지 감시하여 청산함.
     eval_list = []
     eval_tickers = set()
 
@@ -275,7 +273,6 @@ with tab3:
         tk = str(p['ticker']).zfill(6)
         if tk not in eval_tickers:
             eval_tickers.add(tk)
-            # 계좌 잔고 정보에서 종목명을 추출 (안전 장치)
             nm = tk
             for s in rd.get('stocks', []):
                 if str(s.get('pdno', '')).zfill(6) == tk:
@@ -383,6 +380,9 @@ with tab4:
                     r3.markdown(mts_metric_html("체결 횟수 / 승률", f"{len(logs)} 회", f"승률 {rate:.1f}%"), unsafe_allow_html=True)
                     if logs: st.dataframe(pd.DataFrame(logs))
 
+# ==========================================
+# 🛑 [핵심 보강] Part 5. 시스템 무결성 및 데이터 계약 추가
+# ==========================================
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
@@ -425,7 +425,17 @@ with tab5:
         <li><b>익일 시가 체결 (Test 3):</b> 시그널은 장 마감에 확정되며, 실제 체결은 다음 날 아침 <b>시가(Open)</b>로 처리하여 슬리피지 반영.</li>
     </ul>
 
+    <h3>⚙️ 5. 시스템 무결성 및 데이터 계약 (System Integrity & Contracts)</h3>
+    <p>시스템의 오작동을 방지하기 위해 다음 5가지 무결성 계약이 엔진에 영구적으로 하드코딩되어 있다.</p>
+    <ul>
+        <li><b>전략 계약 (Strategy Enum):</b> 내부 로직은 <code>Strategy.CORE</code>, <code>Strategy.SATELLITE</code> Enum 상수만 사용하며, UI 텍스트와 완벽히 분리된다. 모든 파라미터는 무결성 검증(NaN, Inf, 범위 체크)이 포함된 <code>StrategyConfig</code> 단일 객체로만 전달된다.</li>
+        <li><b>소수점 단위 단일화 (Decimal Standardization):</b> 엔진 내부 및 DB의 모든 비율(%) 값은 순수 소수점(예: 1.5% → 0.015)으로만 연산/저장되며, UI(화면) 렌더링 시에만 100을 곱하여 표시한다.</li>
+        <li><b>단일 소스 로직 (Single Source of Logic):</b> UI, 스캐너, 봇, 모든 백테스트(Test 1~3)는 중복 코드 없이 오직 <code>quant_engine.py</code>의 공통 순수 함수(<code>check_entry_signal</code>, <code>check_exit_signal</code>)만을 호출하여 100% 동일한 결과를 보장한다.</li>
+        <li><b>보유 종목 강제 추적 (Blind Spot 방지):</b> 사용자가 관심종목 리스트에서 종목을 삭제하더라도, 계좌(DB)에 보유 수량이 남아있는 한 봇은 이를 강제로 감시 대상에 병합하여 청산(손절/익절) 규칙을 끝까지 추적 집행한다.</li>
+        <li><b>치명적 오류 차단 (HALTED_CONFIG_ERROR):</b> 알 수 없는 전략 텍스트나 DB 오염이 감지되면 즉각 시스템의 모든 신규 매매를 강제 정지한다.</li>
+    </ul>
+
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~4에 기록된 <b>'대원칙, 계산 공식, API 구조(SQLite 단방향 통신, bot.py 단독 Writer), 백테스트 규칙(익일 시가/장중 저가), 3대 고급 안전장치 논리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~5에 기록된 <b>'대원칙, 계산 공식, API 구조, 백테스트 규칙, 3대 고급 안전장치 논리, 무결성 계약(소수점 단일화, 공통 순수 함수 사용 등)'을 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
