@@ -16,7 +16,6 @@ ALLOWED_TRANSITIONS = {
 }
 
 def get_connection():
-    # 🛑 [핵심 패치 1] SQLite WAL 모드 및 busy_timeout 5초(5000ms) 적용
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=20)
     try:
         conn.execute('PRAGMA journal_mode=WAL;')
@@ -36,7 +35,6 @@ def migrate_db():
                 if val == '대형주 (Core)': c.execute("UPDATE settings SET value='\"CORE\"' WHERE key='strategy'")
                 elif val == '중소형주 (Satellite)': c.execute("UPDATE settings SET value='\"SATELLITE\"' WHERE key='strategy'")
         except: pass
-        
         try: c.execute("ALTER TABLE order_intents ADD COLUMN idempotency_key TEXT UNIQUE")
         except: pass
         conn.commit()
@@ -46,11 +44,9 @@ def init_db():
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS watchlist (ticker TEXT PRIMARY KEY, name TEXT, added_at TIMESTAMP)''')
-        # 🛑 [핵심 패치 2] idempotency_key UNIQUE 제약 추가
         c.execute('''CREATE TABLE IF NOT EXISTS order_intents (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        correlation_id TEXT UNIQUE,
-                        idempotency_key TEXT UNIQUE,
+                        correlation_id TEXT UNIQUE, idempotency_key TEXT UNIQUE,
                         ticker TEXT, order_type TEXT, qty INTEGER, price REAL, 
                         status TEXT DEFAULT 'INTENT_CREATED', 
                         broker_order_id TEXT, branch_no TEXT,
@@ -65,7 +61,6 @@ def init_db():
                         fill_id TEXT PRIMARY KEY, order_id INTEGER,
                         ticker TEXT, fill_qty INTEGER, fill_price REAL, executed_at TIMESTAMP
                      )''')
-        # 🛑 [핵심 패치 3] 계좌별 단일 worker lease 테이블 생성
         c.execute('''CREATE TABLE IF NOT EXISTS worker_leases (
                         account_id TEXT PRIMARY KEY, worker_id TEXT, expires_at TIMESTAMP
                      )''')
@@ -127,47 +122,55 @@ def clear_and_update_watchlist(keep_list):
             c.execute("INSERT INTO watchlist (ticker, name, added_at) VALUES (?, ?, ?)", (str(item['티커']).zfill(6), item['종목명'], datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
 
-def sync_positions_from_broker(broker_positions):
-    with get_connection() as conn:
-        c = conn.cursor()
-        c.execute("SELECT ticker, highest_price, buy_date FROM positions")
-        db_map = {row['ticker']: dict(row) for row in c.fetchall()}
-        c.execute("DELETE FROM positions")
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        for bp in broker_positions:
-            tk, qty, buy_p, cur_p = bp['ticker'], bp['qty'], bp['buy_price'], bp['current_price']
-            high_p = max(db_map[tk]['highest_price'], cur_p, buy_p) if tk in db_map else max(cur_p, buy_p)
-            b_date = db_map[tk]['buy_date'] if tk in db_map else now_str
-            c.execute("INSERT INTO positions (ticker, qty, buy_price, highest_price, buy_date) VALUES (?, ?, ?, ?, ?)", (tk, qty, buy_p, high_p, b_date))
-        conn.commit()
-
 def get_positions():
     with get_connection() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM positions")
         return [dict(r) for r in c.fetchall()]
 
-def has_open_order(ticker, side):
+def get_locked_cash_and_qty(ticker=None):
     with get_connection() as conn:
         c = conn.cursor()
-        open_statuses = ['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED']
-        like_side = "%매수%" if side == "BUY" else "%매도%"
-        c.execute(f"SELECT 1 FROM order_intents WHERE ticker=? AND order_type LIKE ? AND status IN ({','.join(['?']*len(open_statuses))})", [ticker, like_side] + open_statuses)
-        return c.fetchone() is not None
+        open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED')"
+        c.execute(f"SELECT SUM((qty - cum_filled_qty) * price) as locked_cash FROM order_intents WHERE order_type LIKE '%매수%' AND status IN {open_states}")
+        r1 = c.fetchone()
+        locked_cash = float(r1['locked_cash']) if r1['locked_cash'] else 0.0
+        
+        locked_sell_qty = 0
+        if ticker:
+            c.execute(f"SELECT SUM(qty - cum_filled_qty) as locked_qty FROM order_intents WHERE ticker=? AND order_type LIKE '%매도%' AND status IN {open_states}", (ticker,))
+            r2 = c.fetchone()
+            locked_sell_qty = int(r2['locked_qty']) if r2['locked_qty'] else 0
+            
+        return locked_cash, locked_sell_qty
 
-def add_order_intent(ticker, order_type, qty, price, idem_key):
-    corr_id = str(uuid.uuid4())
+# 🛑 [핵심 패치 1] 원자적(Atomic) 매수 예약금 확보 및 중복 큐 제어
+def safe_add_order_intent(ticker, order_type, qty, price, idem_key, current_usable_cash):
     try:
         with get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             c = conn.cursor()
+            
+            # 매수 시: 현재 DB에 예약된 현금을 원자적으로 계산하여 초과 방지
+            if "매수" in order_type:
+                open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED')"
+                c.execute(f"SELECT SUM((qty - cum_filled_qty) * price) as locked FROM order_intents WHERE order_type LIKE '%매수%' AND status IN {open_states}")
+                r = c.fetchone()
+                locked_cash = float(r['locked']) if r['locked'] else 0.0
+                if current_usable_cash - locked_cash < (qty * price):
+                    conn.rollback()
+                    return False, "잔고 부족 (타 매수예약금 선점됨)"
+            
+            corr_id = str(uuid.uuid4())
             c.execute("INSERT INTO order_intents (correlation_id, idempotency_key, ticker, order_type, qty, price, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'INTENT_CREATED', ?, ?)", 
                       (corr_id, idem_key, str(ticker).zfill(6), order_type, qty, price, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             conn.commit()
-            return True
+            return True, "OK"
     except sqlite3.IntegrityError:
-        return False
+        return False, "중복 주문 (Idempotency 차단)"
+    except Exception as e:
+        return False, str(e)
 
-# 🛑 [핵심 패치 4] BEGIN IMMEDIATE 트랜잭션으로 원자적(Atomic) 큐 점유
 def claim_next_order():
     conn = get_connection()
     try:
@@ -180,10 +183,8 @@ def claim_next_order():
             conn.commit()
             return dict(row)
         conn.commit()
-    except sqlite3.Error:
-        conn.rollback()
-    finally:
-        conn.close()
+    except sqlite3.Error: conn.rollback()
+    finally: conn.close()
     return None
 
 def get_orders_by_status(statuses):
@@ -193,7 +194,7 @@ def get_orders_by_status(statuses):
         return [dict(r) for r in c.fetchall()]
 
 def transition_order_status(order_id, current_status, new_status, broker_id=None, branch=None, code=None):
-    if new_status not in ALLOWED_TRANSITIONS.get(current_status, []): raise ValueError(f"Invalid state transition: {current_status} -> {new_status}")
+    if new_status not in ALLOWED_TRANSITIONS.get(current_status, []): raise ValueError(f"Invalid state transition")
     with get_connection() as conn:
         c = conn.cursor()
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -220,27 +221,19 @@ def process_fill_event(order_id, ticker, order_type, fill_qty, fill_price):
         new_status = 'FILLED' if new_cum >= req_qty else 'PARTIALLY_FILLED'
         c.execute("UPDATE order_intents SET cum_filled_qty=?, avg_fill_price=?, status=?, updated_at=? WHERE id=?", (new_cum, new_avg, new_status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), order_id))
 
-        c.execute("SELECT value FROM settings WHERE key='virtual_cash'")
-        cash_row = c.fetchone()
-        cash = float(json.loads(cash_row['value'])) if cash_row else 10000000.0
-
         c.execute("SELECT qty, buy_price FROM positions WHERE ticker=?", (ticker,))
         p_row = c.fetchone()
         p_qty, p_buy = p_row['qty'] if p_row else 0, p_row['buy_price'] if p_row else 0.0
 
         if "매수" in order_type:
-            cash -= (fill_qty * fill_price * 1.0025)
             new_p_qty = p_qty + fill_qty
             new_p_buy = ((p_qty * p_buy) + (fill_qty * fill_price)) / new_p_qty
             if p_row: c.execute("UPDATE positions SET qty=?, buy_price=? WHERE ticker=?", (new_p_qty, new_p_buy, ticker))
             else: c.execute("INSERT INTO positions (ticker, qty, buy_price, highest_price, buy_date) VALUES (?, ?, ?, ?, ?)", (ticker, new_p_qty, new_p_buy, fill_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         else: 
-            cash += (fill_qty * fill_price * 0.9975)
             new_p_qty = p_qty - fill_qty
             if new_p_qty <= 0: c.execute("DELETE FROM positions WHERE ticker=?", (ticker,))
             else: c.execute("UPDATE positions SET qty=? WHERE ticker=?", (new_p_qty, ticker))
-                
-        c.execute("UPDATE settings SET value=? WHERE key='virtual_cash'", (json.dumps(cash),))
         conn.commit()
         return True
 
