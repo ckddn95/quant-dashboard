@@ -60,13 +60,17 @@ def run_scanner_safe(strat, use_ma200, buf_pct, min_h):
     res = []
     def process(row):
         tc = str(row['Code']).strip().zfill(6)
-        cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct/100.0, 0.3, -0.1, -0.15, min_h)
+        cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct, 0.3, -0.1, -0.15, min_h)
         if "매수 시그널" in action: return {'종목명': row['Name'], '티커': tc, '현재가': cp, 'AI 스코어': score, '진단 근거': reason}
         return None
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         for r in executor.map(process, [r for _, r in cands.iterrows()]):
             if r: res.append(r)
-    return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
+            
+    # 🛑 [에러 방어 완벽 패치] 빈 데이터프레임일 때 정렬 에러 원천 차단
+    res_df = pd.DataFrame(res)
+    if not res_df.empty: return res_df.sort_values('AI 스코어', ascending=False)
+    return res_df
 
 def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, min_h, ts_tgt, ts_drp, b_boost, cd_days):
     if sim_stocks.empty: return None
@@ -134,7 +138,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
         current_alloc_pct = max_alloc_pct
         if b_boost:
             idx_df = market_data['KOSPI'] if 'Core' in strat else market_data['KOSDAQ']
-            if curr_date in idx_df.index and idx_df.loc[curr_date, 'Close'] > idx_df.loc[curr_date, 'MA200']:
+            if curr_date in idx_df.index and idx_df.loc[curr_date, 'Close'] > idx_df.loc[current_date, 'MA200']:
                 current_alloc_pct = min(100.0, max_alloc_pct + 10.0)
 
         target_per_stock = total_equity * (current_alloc_pct / 100.0)
@@ -144,7 +148,7 @@ def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use
             if curr_date not in df.index: continue
             if loss_streak.get(tk, 0) >= 2 and tk in last_loss_date and (curr_date - last_loss_date[tk]).days < cd_days: continue
             
-            cp, ma20, ma60, ma200, m60_up = df.loc[curr_date, 'Close'], df.loc[curr_date, 'MA20'], df.loc[curr_date, 'MA60'], df.loc[curr_date, 'MA200'], df.loc[curr_date, 'M60_Up']
+            cp, ma20, ma60, ma200, m60_up = df.loc[curr_date, 'Close'], df.loc[current_date, 'MA20'], df.loc[current_date, 'MA60'], df.loc[current_date, 'MA200'], df.loc[current_date, 'M60_Up']
             pass_ma200 = (cp >= ma200) if use_ma200 else True
             buy_flag = False
             
@@ -253,7 +257,7 @@ def run_yearly_realistic_backtest(strat, init_cash, year, use_ma200, w_buf, sl, 
                 elif strat != 'Core' and -0.05 <= (c_p/ma20)-1 <= 0.03: weekly_watchlist.append({'tk': tc, 'name': val['name'], 'score': min(85.0 + max(0, (0.03 - ((c_p/ma20)-1))*100), 99.0)})
             weekly_watchlist = sorted(weekly_watchlist, key=lambda x: x['score'], reverse=True)[:15]
 
-        # 3. 장중 청산 방어 로직 (최소 보유일 및 손절)
+        # 3. 장중 청산 방어 로직
         for tc in list(positions.keys()):
             pos, df = positions[tc], data_dict[tc]['df']
             if current_date not in df.index: continue
