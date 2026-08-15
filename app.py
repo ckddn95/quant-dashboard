@@ -92,18 +92,28 @@ total_cash = int(db.get_setting('virtual_cash', 10000000))
 new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", value=total_cash, step=1000000)
 if new_cash != total_cash: db.set_setting('virtual_cash', new_cash)
 
-# 🛑 [보안 패치 8] UI에서 평문 키 입력을 없애고, OS 환경변수 연결 여부만 표시
-SYS_APP_KEY = os.getenv('KIS_APP_KEY')
-SYS_APP_SEC = os.getenv('KIS_APP_SECRET')
-SYS_CANO = os.getenv('KIS_CANO')
-SYS_IS_MOCK = os.getenv('KIS_IS_MOCK', 'True').lower() == 'true'
+# 🛑 [보안 패치 8 수정] 스트림릿 Secrets 기반 복수 계좌 스위칭
+account_key = "core" if active_strat == quant.Strategy.CORE else "satellite"
 
-with st.sidebar.expander("🔑 KIS API 환경변수 연동 상태", expanded=not bool(SYS_APP_KEY)):
-    if SYS_APP_KEY and SYS_APP_SEC and SYS_CANO:
-        st.success("✅ OS 환경변수 (KIS_APP_KEY) 연동 완료")
-        st.info(f"계좌: {SYS_CANO} ({'모의' if SYS_IS_MOCK else '실전'})")
+try:
+    acc_config = st.secrets["kis_accounts"][account_key]
+    SYS_APP_KEY = acc_config["app_key"]
+    SYS_APP_SEC = acc_config["app_secret"]
+    SYS_CANO = str(acc_config["cano"]).strip()
+    SYS_IS_MOCK = bool(acc_config.get("is_mock", False))
+    SYS_ACNT_PRDT = str(acc_config.get("acnt_prdt", "01")).strip()
+except KeyError:
+    SYS_APP_KEY, SYS_APP_SEC, SYS_CANO = None, None, None
+    SYS_IS_MOCK = True
+    SYS_ACNT_PRDT = "01"
+
+with st.sidebar.expander("🔑 KIS 계좌 연동 상태", expanded=not bool(SYS_APP_KEY)):
+    if SYS_APP_KEY and SYS_CANO:
+        strat_name = "대형주 (Core)" if account_key == "core" else "중소형주 (Satellite)"
+        st.success(f"✅ {strat_name} 계좌 연동 완료")
+        st.caption(f"계좌번호: {SYS_CANO} ({'모의' if SYS_IS_MOCK else '실전'})")
     else:
-        st.error("⚠️ OS 환경변수에 KIS_APP_KEY 등이 설정되지 않았습니다. .env 파일이나 서버 설정을 확인하세요.")
+        st.error("⚠️ 스트림릿 Secrets에서 계좌 정보를 찾을 수 없습니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📱 봇 제어 (DB 연동)")
