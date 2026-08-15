@@ -14,8 +14,9 @@ def get_kis_access_token(app_key, app_secret, is_mock=True):
         return None, f"토큰 발급 실패: {res.text}"
     except Exception as e: return None, str(e)
 
+# 🛑 [핵심 패치 4] 장중 고가(High), 저가(Low), 정지 여부 반환
 def fetch_kis_current_price_ext(app_key, app_secret, ticker, token, is_mock=True):
-    if not token: return 0.0, False
+    if not token: return 0.0, 0.0, 0.0, False
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST01010100"}
@@ -24,11 +25,10 @@ def fetch_kis_current_price_ext(app_key, app_secret, ticker, token, is_mock=True
         res = requests.get(url, headers=headers, params=params, timeout=5)
         if res.status_code == 200 and res.json().get('rt_cd') == '0':
             out = res.json()['output']
-            # 51: 매매거래정지, 57: 매매정지
             is_halted = out.get('iscd_stat_cls_code') in ['51', '57'] 
-            return float(out['stck_prpr']), is_halted
+            return float(out['stck_prpr']), float(out['stck_hgpr']), float(out['stck_lwpr']), is_halted
     except: pass
-    return 0.0, False
+    return 0.0, 0.0, 0.0, False
 
 def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     if not token: return None, None, "토큰 누락"
@@ -46,7 +46,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e: return None, None, str(e)
     return None, None, "HTTP 에러"
 
-# 🛑 [에러 픽스] 실수로 누락되었던 주문가능 현금 조회 함수 완벽 복구
 def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     if not token: return 0.0
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
