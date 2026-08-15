@@ -5,9 +5,10 @@ from datetime import datetime
 
 DB_PATH = "quant_system.db"
 
+# 🛑 [핵심 패치 1] CLAIMED 상태에서 CANCELED 및 EXPIRED(TTL 만료)로 넘어갈 수 있도록 상태 전이 허용
 ALLOWED_TRANSITIONS = {
     'INTENT_CREATED': ['CLAIMED', 'CANCELED'],
-    'CLAIMED': ['SUBMITTING', 'CANCELED'],
+    'CLAIMED': ['SUBMITTING', 'CANCELED', 'EXPIRED'],
     'SUBMITTING': ['ACKNOWLEDGED', 'UNKNOWN', 'REJECTED'],
     'ACKNOWLEDGED': ['PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'EXPIRED'],
     'UNKNOWN': ['ACKNOWLEDGED', 'PARTIALLY_FILLED', 'FILLED', 'REJECTED', 'CANCELED', 'EXPIRED'],
@@ -144,14 +145,11 @@ def get_locked_cash_and_qty(ticker=None):
             
         return locked_cash, locked_sell_qty
 
-# 🛑 [핵심 패치 1] 원자적(Atomic) 매수 예약금 확보 및 중복 큐 제어
 def safe_add_order_intent(ticker, order_type, qty, price, idem_key, current_usable_cash):
     try:
         with get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             c = conn.cursor()
-            
-            # 매수 시: 현재 DB에 예약된 현금을 원자적으로 계산하여 초과 방지
             if "매수" in order_type:
                 open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED')"
                 c.execute(f"SELECT SUM((qty - cum_filled_qty) * price) as locked FROM order_intents WHERE order_type LIKE '%매수%' AND status IN {open_states}")
@@ -194,7 +192,7 @@ def get_orders_by_status(statuses):
         return [dict(r) for r in c.fetchall()]
 
 def transition_order_status(order_id, current_status, new_status, broker_id=None, branch=None, code=None):
-    if new_status not in ALLOWED_TRANSITIONS.get(current_status, []): raise ValueError(f"Invalid state transition")
+    if new_status not in ALLOWED_TRANSITIONS.get(current_status, []): raise ValueError(f"Invalid state transition: {current_status} -> {new_status}")
     with get_connection() as conn:
         c = conn.cursor()
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
