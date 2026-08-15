@@ -14,7 +14,6 @@ def get_kis_access_token(app_key, app_secret, is_mock=True):
         return None, f"토큰 발급 실패: {res.text}"
     except Exception as e: return None, str(e)
 
-# 🛑 [핵심 패치 2] 가격 외에 거래정지(is_halted) 여부 반환
 def fetch_kis_current_price_ext(app_key, app_secret, ticker, token, is_mock=True):
     if not token: return 0.0, False
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
@@ -25,7 +24,6 @@ def fetch_kis_current_price_ext(app_key, app_secret, ticker, token, is_mock=True
         res = requests.get(url, headers=headers, params=params, timeout=5)
         if res.status_code == 200 and res.json().get('rt_cd') == '0':
             out = res.json()['output']
-            # 51: 매매거래정지, 57: 매매정지
             is_halted = out.get('iscd_stat_cls_code') in ['51', '57'] 
             return float(out['stck_prpr']), is_halted
     except: pass
@@ -47,19 +45,6 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
     except Exception as e: return None, None, str(e)
     return None, None, "HTTP 에러"
 
-def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
-    if not token: return 0.0
-    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
-    tr_id = "VTTC8908R" if is_mock else "TTTC8908R"
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
-    params = {"CANO": str(cano).strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "PDNO": "005930", "ORD_UNPR": "0", "ORD_DVSN": "01", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"}
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200 and res.json().get('rt_cd') == '0': return float(res.json().get('output', {}).get('ord_psbl_cash', 0))
-    except: pass
-    return 0.0
-
 def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is_buy, qty, price=0, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash"
@@ -78,6 +63,21 @@ def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is
             return True, "OK", rj['output']['ODNO'], rj['output']['KRX_FWDG_ORD_ORGNO'], rj.get('rt_cd')
         return False, rj.get('msg1', '에러'), None, None, rj.get('rt_cd')
     except Exception as e: return False, str(e), None, None, "EXCEPTION"
+
+# 🛑 [핵심 패치 2] KIS 주문 취소 API 추가
+def cancel_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, odno, branch, is_mock=True):
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/uapi/domestic-stock/v1/trading/order-rvsecncl"
+    tr_id = "VTTC0803U" if is_mock else "TTTC0803U"
+    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
+    
+    body = {"CANO": str(cano).strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "KRX_FWDG_ORD_ORGNO": str(branch), "ORGN_ODNO": str(odno), "ORD_DVSN": "01", "RVSE_CNCL_DVSN": "02", "ORD_QTY": "0", "ORD_UNPR": "0"}
+    try:
+        res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
+        rj = res.json()
+        if res.status_code == 200 and rj.get('rt_cd') == '0': return True, "취소 성공"
+        return False, rj.get('msg1', '취소 에러')
+    except Exception as e: return False, str(e)
 
 def fetch_kis_order_executions(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
