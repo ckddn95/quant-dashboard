@@ -7,6 +7,9 @@ import database as db
 import broker.kis_client as kis
 import quant_engine as quant
 
+# ==========================================
+# 0. 페이지 설정 및 초기화
+# ==========================================
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
@@ -31,7 +34,9 @@ def mts_metric_html(label, value, delta=None):
 st.title("Core-Satellite Quant System (MSA)")
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
-# ==================== 사이드바 (SQLite 통신) ====================
+# ==========================================
+# 1. 사이드바 UI (SQLite 연동)
+# ==========================================
 st.sidebar.header("🎯 전략 및 환경 설정")
 active_strat = db.get_setting('strategy', '대형주 (Core)')
 active_strat = st.sidebar.selectbox("운용 전략", ['대형주 (Core)', '중소형주 (Satellite)'], index=0 if active_strat=='대형주 (Core)' else 1)
@@ -60,7 +65,12 @@ with st.sidebar.expander("🔑 KIS API 설정", expanded=not has_keys):
 
 st.sidebar.markdown("---")
 st.sidebar.header("📱 봇 제어 (DB 연동)")
-init_ks, init_at, init_ap = db.get_setting('kill_switch', False), db.get_setting('auto_trade_enabled', False), db.get_setting('auto_pilot', False)
+st.sidebar.info("UI 변경 사항은 즉시 SQLite DB에 기록되어 백그라운드 봇에 반영됩니다.")
+
+init_ks = db.get_setting('kill_switch', False)
+init_at = db.get_setting('auto_trade_enabled', False)
+init_ap = db.get_setting('auto_pilot', False)
+
 kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=init_ks)
 auto_trade = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at)
 auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기", value=init_ap)
@@ -109,7 +119,17 @@ use_ma200_filter, whipsaw_buffer, sat_stop_loss = p['ma200'], p['buf'] / 100.0, 
 cooldown_days, max_alloc_pct, min_hold_days = p['cd'], float(p['alloc']), p['min_h']
 ts_target_pct, ts_drop_pct, bull_market_boost = p['ts_tgt'] / 100.0, p['ts_drp'] / 100.0, p['boost']
 
-# ==================== 메인 화면 ====================
+# 🛑 [핵심 버그 픽스] 실계좌 글로벌 변수 선언 오류 해결
+rd = st.session_state.get('real_data', {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []})
+real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
+
+base_date_str = db.get_setting('created_at', '2024-01-01')
+try: real_base_date = pd.to_datetime(base_date_str).date()
+except: real_base_date = datetime.date(2024, 1, 1)
+
+# ==========================================
+# 2. 메인 화면 구성
+# ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
 with tab1:
@@ -159,7 +179,7 @@ with tab1:
     def process_w(row):
         ticker = str(row['티커']).zfill(6)
         cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, min_hold_days)
-        return {'🗑️ 삭제': False, '종목명': row['종목명'], '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
+        return {'🗑️ 삭제': False, '종목명': row['종목명'], '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
 
     if current_watchlist:
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -190,12 +210,13 @@ with tab2:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
                     st.session_state['real_data'] = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
                     st.success("완료!")
+                    time.sleep(0.5)
+                    st.rerun() # 전역 갱신 반영
                 else: st.error(err)
         
-        rd = st.session_state.get('real_data', {'eval': 0, 'pnl': 0, 'cash': total_cash, 'stocks': []})
         c1, c2, c3, c4 = st.columns(4)
         c1.markdown(mts_metric_html("💰 총 평가 금액", f"{rd['eval']:,.0f} 원"), unsafe_allow_html=True)
-        c2.markdown(mts_metric_html("📥 투자 원금", f"{rd['eval'] - rd['pnl']:,.0f} 원"), unsafe_allow_html=True)
+        c2.markdown(mts_metric_html("📥 투자 원금", f"{real_invested_principal:,.0f} 원"), unsafe_allow_html=True)
         c3.markdown(mts_metric_html("📈 누적 수익금", f"{rd['pnl']:+,.0f} 원"), unsafe_allow_html=True)
         c4.markdown(mts_metric_html("💵 주문가능 원화", f"{rd['cash']:,.0f} 원"), unsafe_allow_html=True)
         if rd['stocks']:
@@ -205,7 +226,6 @@ with tab2:
 
 with tab3:
     st.header("🤖 실전 자동매매 큐 (UI -> DB 의도 생성)")
-    rd = st.session_state.get('real_data', {'cash': total_cash, 'eval': total_cash, 'stocks': []})
     c1, c2, c3 = st.columns(3)
     c1.metric("🚨 킬 스위치", "차단됨" if kill_switch else "정상")
     c2.metric("🚀 자동주문", "활성화" if auto_trade else "비활성화")
@@ -214,7 +234,6 @@ with tab3:
     
     target_buy_amt = max(rd['eval'], total_cash) * (max_alloc_pct / 100.0)
     temp_q = []
-    current_watchlist = db.get_watchlist()
     
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
@@ -253,6 +272,27 @@ with tab4:
     stocks_df = pd.DataFrame(db.get_watchlist())
     today_date = datetime.datetime.now(KST).date()
     
+    st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
+    st.info("💡 **어떻게 비교하나요?** 포트폴리오 개설일로부터 AI가 현재 관심종목들을 운용했을 때의 **이론적 성과**와 현재 **내 실제 계좌 성과**를 1:1로 비교합니다.")
+    col_fw_date, col_fw_btn = st.columns([3, 7])
+    with col_fw_date:
+        test1_start_date = st.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
+    with col_fw_btn:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner("포워드 테스트 구동 중..."):
+                    eval_init_cash = real_invested_principal if real_invested_principal > 0 else float(total_cash)
+                    res_fw = quant.run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    if res_fw:
+                        real_ret_pct = (rd['pnl'] / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
+                        col_fw1, col_fw2 = st.columns(2)
+                        with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                        with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {rd['eval']:,.0f} 원"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
     st.subheader("🎯 Test 2. 관심종목 대상 장기 검증")
     c1, c2, c3 = st.columns([3,3,4])
     with c1: start_d = st.date_input("시작일", datetime.date(2023,1,1))
@@ -265,7 +305,7 @@ with tab4:
                 if res:
                     st.success("완료!")
                     r1, r2 = st.columns(2)
-                    r1.markdown(mts_metric_html("기기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                    r1.markdown(mts_metric_html("초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
                     r2.markdown(mts_metric_html("기말 자산", f"{res['final_asset']:,.0f} 원", f"{res['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
                     st.dataframe(pd.DataFrame(res['summary_rows']))
 
@@ -333,5 +373,6 @@ with tab5:
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 웹 애플리케이션의 코드를 업데이트하거나 수정할 때, <b>위 Part 1~4에 기록된 '대원칙, 계산 공식, API 구조(SQLite 단방향 통신, bot.py 단독 Writer), 백테스트 규칙(익일 시가/장중 저가), 3대 고급 안전장치 논리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 사용자가 특정 기능을 업데이트해 달라고 요청할 경우, <b>반드시 이 백서에 기록된 원칙들과 상충하는 부분이 없는지 선행 검토해야 하며, 만약 원칙을 수정해야만 하는 상황이라면 코드를 출력하기 전에 사용자에게 명확히 보고하고 승인을 얻어야만 합니다.</b></p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~4에 기록된 <b>'대원칙, 계산 공식, API 구조(SQLite 단방향 통신, bot.py 단독 Writer), 백테스트 규칙(익일 시가/장중 저가), 3대 고급 안전장치 논리'를 단 하나라도 임의로 훼손해서는 안 됩니다.</b> 
+    원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
