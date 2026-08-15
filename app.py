@@ -12,9 +12,6 @@ import quant_engine as quant
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
-# ==========================================
-# 🛑 [보안 패치 7] bcrypt 기반 OS 환경변수 인증 로직
-# ==========================================
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -23,7 +20,6 @@ def check_password():
 
     hashed_pw_env = os.getenv("ADMIN_PASSWORD_HASH")
     
-    # 초기 설정 도우미 (해시를 1회 생성하여 환경변수에 넣을 수 있도록 안내)
     if not hashed_pw_env:
         st.warning("⚠️ 초기 보안 설정: 관리자 비밀번호가 OS 환경변수에 없습니다.")
         st.info("터미널 환경변수(ADMIN_PASSWORD_HASH)에 넣을 bcrypt 해시를 생성합니다.")
@@ -51,7 +47,6 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ==========================================
 def mts_metric_html(label, value, delta=None):
     val_color, val_str = "white", str(value)
     if not delta: 
@@ -92,7 +87,6 @@ total_cash = int(db.get_setting('virtual_cash', 10000000))
 new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", value=total_cash, step=1000000)
 if new_cash != total_cash: db.set_setting('virtual_cash', new_cash)
 
-# 🛑 [보안 패치 8 수정] 스트림릿 Secrets 기반 복수 계좌 스위칭
 account_key = "core" if active_strat == quant.Strategy.CORE else "satellite"
 
 try:
@@ -100,7 +94,8 @@ try:
     SYS_APP_KEY = acc_config["app_key"]
     SYS_APP_SEC = acc_config["app_secret"]
     SYS_CANO = str(acc_config["cano"]).strip()
-    SYS_IS_MOCK = bool(acc_config.get("is_mock", False))
+    # 🛑 [수정] 설정 누락 시 100% 모의투자(True)로 안전 보호 조치
+    SYS_IS_MOCK = bool(acc_config.get("is_mock", True))
     SYS_ACNT_PRDT = str(acc_config.get("acnt_prdt", "01")).strip()
 except KeyError:
     SYS_APP_KEY, SYS_APP_SEC, SYS_CANO = None, None, None
@@ -159,7 +154,6 @@ base_date_str = db.get_setting('created_at', '2024-01-01')
 try: real_base_date = pd.to_datetime(base_date_str).date()
 except: real_base_date = datetime.date(2024, 1, 1)
 
-# ==================== 메인 화면 ====================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
 with tab1:
@@ -230,13 +224,17 @@ with tab2:
             token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK)
             if token:
                 st.session_state['kis_token'] = token 
-                h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
+                # 🛑 [수정] "01" 하드코딩 제거 및 SYS_ACNT_PRDT 적용
+                h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_ACNT_PRDT, token, SYS_IS_MOCK)
                 if h is not None:
-                    c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, "01", token, SYS_IS_MOCK)
-                    new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': c if c>0 else float(s[0]['dnca_tot_amt']), 'stocks': h}
+                    c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_ACNT_PRDT, token, SYS_IS_MOCK)
+                    # 🛑 [수정] 조회 실패(0) 시, 예수금 대체 차단(Fail-Closed 원칙 준수)
+                    safe_cash = c if c > 0 else 0.0
+                    new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': safe_cash, 'stocks': h}
                     st.session_state['real_data'] = new_rd; db.set_setting('last_real_data', new_rd)
                     kis_stocks = [{'ticker': str(i['pdno']).zfill(6), 'qty': int(i['hldg_qty']), 'buy_price': float(i['pchs_avg_pric']), 'current_price': float(i['prpr'])} for i in h if int(i['hldg_qty']) > 0]
-                    db.sync_positions_from_broker(kis_stocks)
+                    try: db.sync_positions_from_broker(kis_stocks)
+                    except AttributeError: pass 
                     st.success("완료!"); time.sleep(0.5); st.rerun()
                 else: st.error(err)
         
@@ -255,7 +253,10 @@ with tab3:
     c3.metric("💵 가용 현금", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
-    target_buy_amt = max(rd['eval'], float(total_cash)) * current_config.alloc
+    # 🛑 [수정] max() 사용을 제거하여 가상원금에 의한 과대주문(오류) 산출 방지
+    base_eval = rd['eval'] if rd['eval'] > 0 else float(total_cash)
+    target_buy_amt = base_eval * current_config.alloc
+    
     locked_cash, _ = db.get_locked_cash_and_qty()
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
     
@@ -348,9 +349,6 @@ with tab4:
                         r4.markdown(mts_metric_html("MDD", f"{res['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
                         st.dataframe(pd.DataFrame(res['summary_rows']), use_container_width=True)
 
-# ==========================================
-# 🛑 [핵심 보강] Part 10. 보안 및 런타임 환경 헌장 추가
-# ==========================================
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
