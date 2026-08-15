@@ -138,8 +138,6 @@ rd = st.session_state.get('real_data', db.get_setting('last_real_data', default_
 st.session_state['real_data'] = rd 
 
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
-
-# 🛑 [에러 픽스] 누락되었던 시뮬레이션 기준 날짜(real_base_date) 초기화 코드 복구
 base_date_str = db.get_setting('created_at', '2024-01-01')
 try: real_base_date = pd.to_datetime(base_date_str).date()
 except: real_base_date = datetime.date(2024, 1, 1)
@@ -314,9 +312,22 @@ with tab3:
         st.table(q_df[['종목명', '구분', '점수', '단가', '수량']])
         
         if st.button("⚡ 대기열 일괄 주문 DB 기록", type="primary"):
+            success_count = 0
             for _, r in q_df.iterrows():
-                db.add_order_intent(r['티커'], r['구분'], r['수량'], r['단가'])
-            st.success("✅ 주문 의도(INTENT_CREATED) 생성 완료! 봇이 체결을 담당합니다.")
+                tk, side = r['티커'], "BUY" if "매수" in r['구분'] else "SELL"
+                
+                # 🛑 [핵심 패치 7] 열린 주문 중복 차단 및 Idempotency Key 
+                if db.has_open_order(tk, side):
+                    st.warning(f"⚠️ {r['종목명']} - 이미 진행 중인 {side} 주문이 있어 중복 생성하지 않습니다.")
+                    continue
+                
+                event_id = datetime.datetime.now(KST).strftime('%Y%m%d')
+                idem_key = f"{SYS_CANO}_{active_strat.value}_{tk}_{side}_V1.0_{event_id}"
+                
+                if db.add_order_intent(tk, r['구분'], r['수량'], r['단가'], idem_key):
+                    success_count += 1
+            if success_count > 0:
+                st.success(f"✅ {success_count}건의 주문 의도(INTENT_CREATED) 안전 생성 완료! 봇이 체결을 담당합니다.")
     else: st.info("대기 중인 시그널이 없습니다.")
     
     st.markdown("### 📊 실시간 체결 대사 (Reconciliation) 현황")
@@ -389,6 +400,9 @@ with tab4:
                     r3.markdown(mts_metric_html("체결 횟수 / 승률", f"{len(logs)} 회", f"승률 {rate:.1f}%"), unsafe_allow_html=True)
                     if logs: st.dataframe(pd.DataFrame(logs))
 
+# ==========================================
+# 🛑 [핵심 보강] Part 7. 중복주문 방지 및 동시성 제어 헌장 추가
+# ==========================================
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
@@ -448,7 +462,16 @@ with tab5:
         <li><b>멱등성 보장 (Idempotency):</b> 체결 내역은 <code>fill_id</code> 단위로 UNIQUE하게 저장되며, 이전 체결량과의 델타(Delta) 값만을 산출하여 포지션(수량, 평단가) 및 현금(가상 원장)에 정확히 1회만 반영한다. 부분 매도 시에도 남은 수량(managed_qty)은 안전하게 유지된다.</li>
     </ul>
 
+    <h3>🔒 7. 중복주문 방지 및 동시성 제어 (Concurrency & Idempotency)</h3>
+    <ul>
+        <li><b>Idempotency Key 구조:</b> <code>account_id + portfolio_id + ticker + side + strategy_version + signal_event_id</code>로 구성된 고유 키를 생성하여 DB UNIQUE 제약을 적용, 사용자의 중복 클릭이나 시스템 재시작 시 발생하는 동일 주문을 원천 차단한다.</li>
+        <li><b>원자적 큐 점유 (Atomic Claim):</b> 봇이 대기열에서 주문을 가져올 때 <code>BEGIN IMMEDIATE</code> 트랜잭션을 사용하여 동시성 충돌을 방지한다. SQLite WAL 모드와 <code>busy_timeout=5000</code>을 적용해 병목을 완화한다.</li>
+        <li><b>단일 워커 락 (Single Worker Lease):</b> 계좌별로 오직 단 하나의 <code>bot.py</code> 인스턴스만이 주문 제어권을 갖도록 <code>worker_leases</code> 테이블을 통해 Lease 락을 획득하고 갱신한다.</li>
+        <li><b>열린 주문(Open Order) 차단:</b> 이미 진행 중인(INTENT_CREATED ~ PARTIALLY_FILLED) 동일 방향의 주문이 존재할 경우 새로운 주문 의도(Intent) 생성을 무시한다.</li>
+        <li><b>대사 선행 (Reconciliation First):</b> 봇 재시작 시, 새로운 신호(Intent)를 처리하기 전에 브로커 주문·체결·잔고 대사를 최우선으로 선행하여 원장을 맞춘다.</li>
+    </ul>
+
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~6에 기록된 <b>'대원칙, 계산 공식, API 구조, 백테스트 규칙, 고급 안전장치, 무결성 계약, 주문 상태 머신 대사 원칙'을 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~7에 기록된 <b>'대원칙, 계산 공식, API 구조, 백테스트 규칙, 고급 안전장치, 무결성 계약, 주문 상태 머신 대사 원칙, 중복주문 방지 및 동시성 제어 원리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
