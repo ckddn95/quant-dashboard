@@ -9,6 +9,44 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def migrate_db():
+    with get_connection() as conn:
+        c = conn.cursor()
+        try:
+            # 1. 전략 Enum 마이그레이션
+            c.execute("SELECT value FROM settings WHERE key='strategy'")
+            row = c.fetchone()
+            if row:
+                val = row['value'].strip('"')
+                if val == '대형주 (Core)':
+                    c.execute("UPDATE settings SET value='\"CORE\"' WHERE key='strategy'")
+                elif val == '중소형주 (Satellite)':
+                    c.execute("UPDATE settings SET value='\"SATELLITE\"' WHERE key='strategy'")
+        except: pass
+
+        # 2. 파라미터 소수점 체계 마이그레이션
+        for old_s, new_s in [('대형주 (Core)', 'CORE'), ('중소형주 (Satellite)', 'SATELLITE')]:
+            try:
+                c.execute("SELECT value FROM settings WHERE key=?", (f'params_{old_s}',))
+                r = c.fetchone()
+                if r:
+                    p = json.loads(r['value'])
+                    new_p = {
+                        'ma200': bool(p.get('ma200', True)),
+                        'buf': float(p.get('buf', 1.5)) / 100.0 if float(p.get('buf', 1.5)) > 1 else float(p.get('buf', 0.015)),
+                        'sl': float(p.get('sl', -15)) / 100.0 if float(p.get('sl', -15)) < -1 else float(p.get('sl', -0.15)),
+                        'alloc': float(p.get('alloc', 35)) / 100.0 if float(p.get('alloc', 35)) > 1 else float(p.get('alloc', 0.35)),
+                        'ts_tgt': float(p.get('ts_tgt', 30)) / 100.0 if float(p.get('ts_tgt', 30)) > 1 else float(p.get('ts_tgt', 0.30)),
+                        'ts_drp': float(p.get('ts_drp', -10)) / 100.0 if float(p.get('ts_drp', -10)) < -1 else float(p.get('ts_drp', -0.10)),
+                        'cd': int(p.get('cd', 60)),
+                        'min_h': int(p.get('min_h', 5)),
+                        'boost': bool(p.get('boost', True))
+                    }
+                    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f'params_{new_s}', json.dumps(new_p)))
+                    c.execute("DELETE FROM settings WHERE key=?", (f'params_{old_s}',))
+            except: pass
+        conn.commit()
+
 def init_db():
     with get_connection() as conn:
         c = conn.cursor()
@@ -20,6 +58,7 @@ def init_db():
                         status TEXT DEFAULT 'PENDING', created_at TIMESTAMP
                      )''')
         conn.commit()
+    migrate_db()
 
 def get_setting(key, default=None):
     with get_connection() as conn:
@@ -37,6 +76,11 @@ def set_setting(key, value):
         val_str = json.dumps(value) if isinstance(value, (dict, list, bool, int, float)) else str(value)
         c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, val_str))
         conn.commit()
+
+def get_system_status():
+    if get_setting('halted_config_error', False): return "HALTED_CONFIG_ERROR"
+    if get_setting('kill_switch', False): return "KILL_SWITCH"
+    return "OK"
 
 def get_watchlist():
     with get_connection() as conn:
