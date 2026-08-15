@@ -1,5 +1,7 @@
+import sqlite3 # 🛑 [보안/런타임] sqlite3를 상단에 명시적 임포트
 import time
 import uuid
+import os      # 🛑 [보안] 환경변수 연동
 from datetime import datetime
 import database as db
 import broker.kis_client as kis
@@ -21,8 +23,12 @@ def main_loop():
     print(f"🤖 퀀트 오토파일럿 리스크 방어 봇 가동 시작... (Worker ID: {WORKER_ID})")
     while True:
         try:
-            api_key, api_sec, cano = db.get_setting('manual_app_key'), db.get_setting('manual_app_secret'), db.get_setting('manual_cano')
-            is_mock = bool(db.get_setting('manual_is_mock', True))
+            # 🛑 [보안 패치 3] 평문 DB 호출을 제거하고 OS 환경변수(OS secret store)에서 직접 주입
+            api_key = os.getenv('KIS_APP_KEY')
+            api_sec = os.getenv('KIS_APP_SECRET')
+            cano = os.getenv('KIS_CANO')
+            is_mock = os.getenv('KIS_IS_MOCK', 'True').lower() == 'true'
+            
             token = None
             if api_key and api_sec and cano:
                 token, _ = kis.get_kis_access_token(api_key, api_sec, is_mock)
@@ -35,7 +41,7 @@ def main_loop():
                 time.sleep(10); continue
             
             if not bool(db.get_setting('auto_trade_enabled', False)): time.sleep(5); continue
-            if not token: time.sleep(10); continue
+            if not token: print("⚠️ OS 환경변수에 KIS_APP_KEY 등이 설정되지 않았습니다."); time.sleep(10); continue
             if not db.acquire_worker_lease(cano, WORKER_ID): time.sleep(10); continue
 
             rd = db.get_setting('last_real_data', {'eval': 0, 'pnl': 0, 'cash': 0})
@@ -74,7 +80,6 @@ def main_loop():
 
                 if not db.transition_order_status(oid, 'CLAIMED', 'SUBMITTING'): continue
                 
-                # 🛑 [핵심 패치 5] KIS에서 가져온 신선한 데이터로 스냅샷 구성 후 Pre-flight
                 cur_p, high_p, low_p, is_halted = kis.fetch_kis_current_price_ext(api_key, api_sec, tk, token, is_mock)
                 snap = quant.StockSnapshot(
                     ticker=tk, current_price=cur_p, high_price=high_p, low_price=low_p,
@@ -98,5 +103,6 @@ def main_loop():
             time.sleep(3) 
         except Exception as e: print(f"봇 에러: {e}"); time.sleep(10)
 
+# 🛑 [런타임 패치 4] 올바른 footer 검증
 if __name__ == "__main__":
     main_loop()
