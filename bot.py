@@ -6,20 +6,20 @@ def main_loop():
     print("🤖 퀀트 오토파일럿 봇 가동 시작...")
     while True:
         try:
-            kill_switch = db.get_setting('kill_switch', False)
+            kill_switch = bool(db.get_setting('kill_switch', False))
             if kill_switch:
                 print("🚨 킬 스위치 작동 중! 대기...")
                 time.sleep(10)
                 continue
             
-            auto_trade = db.get_setting('auto_trade_enabled', False)
+            auto_trade = bool(db.get_setting('auto_trade_enabled', False))
             if auto_trade:
                 pending_orders = db.get_pending_orders()
                 if pending_orders:
                     api_key = db.get_setting('manual_app_key')
                     api_sec = db.get_setting('manual_app_secret')
                     cano = db.get_setting('manual_cano')
-                    is_mock = db.get_setting('manual_is_mock', True)
+                    is_mock = bool(db.get_setting('manual_is_mock', True))
                     
                     if api_key and api_sec and cano:
                         token, _ = kis.get_kis_access_token(api_key, api_sec, is_mock)
@@ -39,7 +39,7 @@ def main_loop():
                                     db.update_order_status(order['id'], 'FAILED')
                     else:
                         print("⚠️ API 설정 누락.")
-            time.sleep(5) # 5초 폴링
+            time.sleep(5) 
         except Exception as e:
             print(f"봇 에러: {e}")
             time.sleep(10)
