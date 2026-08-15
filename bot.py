@@ -6,29 +6,42 @@ import broker.kis_client as kis
 import quant_engine as quant
 
 WORKER_ID = str(uuid.uuid4())
+INTENT_TTL_SECONDS = 300 # 5분 TTL
+
+def cancel_all_open_orders(api_key, api_sec, cano, token, is_mock):
+    active_orders = db.get_orders_by_status(['ACKNOWLEDGED', 'PARTIALLY_FILLED'])
+    for order in active_orders:
+        if not order['broker_order_id'] or not order['branch_no']: continue
+        success, msg = kis.cancel_kis_order(api_key, api_sec, cano, "01", token, order['broker_order_id'], order['branch_no'], is_mock)
+        if success:
+            db.transition_order_status(order['id'], order['status'], 'CANCELED', code="KILL_CANCELLED")
+            print(f"🛑 [KILL SWITCH] 미체결 주문 강제 취소 완료: {order['ticker']}")
 
 def main_loop():
     print(f"🤖 퀀트 오토파일럿 리스크 방어 봇 가동 시작... (Worker ID: {WORKER_ID})")
     while True:
         try:
-            status = db.get_system_status()
-            if status == "HALTED_CONFIG_ERROR": time.sleep(10); continue
-            elif status == "KILL_SWITCH": print("🚨 킬 스위치 작동 중!"); time.sleep(10); continue
-            
-            if not bool(db.get_setting('auto_trade_enabled', False)): time.sleep(5); continue
-
             api_key, api_sec, cano = db.get_setting('manual_app_key'), db.get_setting('manual_app_secret'), db.get_setting('manual_cano')
             is_mock = bool(db.get_setting('manual_is_mock', True))
-            if not (api_key and api_sec and cano): time.sleep(10); continue
-            if not db.acquire_worker_lease(cano, WORKER_ID): time.sleep(10); continue
+            token = None
+            if api_key and api_sec and cano:
+                token, _ = kis.get_kis_access_token(api_key, api_sec, is_mock)
 
-            token, _ = kis.get_kis_access_token(api_key, api_sec, is_mock)
+            # 🛑 [핵심 패치 3] 킬 스위치 작동 시 미체결 일괄 취소 및 재시작 방어
+            status = db.get_system_status()
+            if status == "HALTED_CONFIG_ERROR": time.sleep(10); continue
+            elif status == "KILL_SWITCH":
+                print("🚨 킬 스위치 작동 중! 신규 진입 차단 및 미체결 취소 시도...")
+                if token: cancel_all_open_orders(api_key, api_sec, cano, token, is_mock)
+                time.sleep(10); continue
+            
+            if not bool(db.get_setting('auto_trade_enabled', False)): time.sleep(5); continue
             if not token: time.sleep(10); continue
+            if not db.acquire_worker_lease(cano, WORKER_ID): time.sleep(10); continue
 
             rd = db.get_setting('last_real_data', {'eval': 0, 'pnl': 0, 'cash': 0})
             daily_pnl_pct = (rd['pnl'] / rd['eval']) if rd['eval'] > 0 else 0.0
 
-            # 대사(Reconciliation) 수행
             active_orders = db.get_orders_by_status(['ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED'])
             if active_orders:
                 executions = kis.fetch_kis_order_executions(api_key, api_sec, cano, "01", token, is_mock)
@@ -42,20 +55,34 @@ def main_loop():
                     else:
                         if order['status'] == 'UNKNOWN' and datetime.now().hour >= 16: db.transition_order_status(oid, 'UNKNOWN', 'EXPIRED')
 
-            # 🛑 [핵심 패치 4] Pre-flight 검증 후 주문 발송
             while True:
                 order = db.claim_next_order()
                 if not order: break 
                 oid, tk = order['id'], order['ticker']
+                
+                # 🛑 [핵심 패치 4] POST 직전 SQLite 값 재검사 (Double Check)
+                if db.get_setting('kill_switch', False):
+                    db.transition_order_status(oid, 'CLAIMED', 'CANCELED', code="KILL_SWITCH")
+                    break # 내부 루프 탈출, 취소 로직으로 넘어감
+                if not db.get_setting('auto_trade_enabled', False):
+                    db.transition_order_status(oid, 'CLAIMED', 'CANCELED', code="AUTO_TRADE_OFF")
+                    break
+                    
+                # 🛑 [핵심 패치 5] Intent TTL 만료 검사
+                created_at = datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S')
+                if (datetime.now() - created_at).total_seconds() > INTENT_TTL_SECONDS:
+                    db.transition_order_status(oid, 'CLAIMED', 'EXPIRED', code="TTL_EXPIRED")
+                    print(f"⌛ 주문 만료 (TTL 초과 폐기): {tk}")
+                    continue
+
                 if not db.transition_order_status(oid, 'CLAIMED', 'SUBMITTING'): continue
                 
-                # 시세 신선도 및 정지 여부
                 cur_p, is_halted = kis.fetch_kis_current_price_ext(api_key, api_sec, tk, token, is_mock)
                 is_ok, reason = quant.pre_flight_risk_check(order['order_type'], order['price'], cur_p, is_halted, daily_pnl_pct, is_mock)
                 
                 if not is_ok:
                     db.transition_order_status(oid, 'SUBMITTING', 'REJECTED', code=reason)
-                    print(f"🛑 주문 차단 (리스크 관리): {tk} - {reason}")
+                    print(f"🛑 주문 차단 (리스크): {tk} - {reason}")
                     continue
 
                 is_buy = "매수" in order['order_type']
