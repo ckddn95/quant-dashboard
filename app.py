@@ -286,7 +286,7 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
     res = []
     def process(row):
         tc = str(row['Code']).strip().zfill(6)
-        cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct/100.0, 0.3, -0.1, -0.15)
+        cp, action, score, reason = evaluate_stock_for_ui(tc, strat, 0.0, 0.0, use_ma200, buf_pct, 0.3, -0.1, -0.15)
         if "매수 시그널" in action: 
             return {'종목명': row['Name'], '티커': tc, '현재가': cp, 'AI 스코어': score, '진단 근거': reason}
         return None
@@ -298,7 +298,7 @@ def run_scanner_safe(strat, use_ma200, buf_pct):
     return pd.DataFrame(res).sort_values('AI 스코어', ascending=False)
 
 @st.cache_data(ttl=1800)
-def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, min_h, ts_tgt, ts_drp, b_boost, cd_days):
+def run_quant_simulation(sim_stocks, strat, init_cash, start_date, end_date, use_ma200, w_buf, sl, max_alloc_pct, ts_tgt, ts_drp):
     if sim_stocks.empty: return None
     f_start = pd.to_datetime(start_date) - datetime.timedelta(days=400)
     sim_data = {}
@@ -784,17 +784,46 @@ if p_data:
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
-use_ma200_filter = st.sidebar.checkbox("🛡️ 200일 추세선 필터 적용", value=True)
-whipsaw_buffer = st.sidebar.slider("골든크로스 휩소 방지 버퍼 (%)", 0.0, 5.0, 1.5, 0.5)
-sat_stop_loss = st.sidebar.slider("긴급 손절 컷 (%)", -25, -5, -15 if active_strat == '대형주 (Core)' else -12, 1)
 
-with st.sidebar.expander("🧪 시뮬레이션 상세 설정"):
-    cooldown_days = st.slider("연속 2회 손실 시 쿨다운(일)", 0, 90, 60, 15)
-    max_alloc_pct = st.slider("기본 종목당 투입 한도 (%)", 10, 60, 35 if active_strat == '대형주 (Core)' else 20, 5)
-    min_hold_days = st.slider("최소 보유 기간(일)", 0, 20, 5, 1)
-    ts_target_pct = st.slider("트레일링 스탑 목표수익 (%)", 10, 100, 30 if active_strat == '대형주 (Core)' else 15, 5)
-    ts_drop_pct = st.slider("트레일링 스탑 하락허용 (%)", -20, -5, -10 if active_strat == '대형주 (Core)' else -5, 1)
-    bull_market_boost = st.checkbox("🔥 강세장 자금 풀 부스터", value=True)
+# 🛑 [핵심 패치 1] 전략별 기본값 분리 및 상태 유지
+default_params = {
+    '대형주 (Core)': {'ma200': True, 'buf': 1.5, 'sl': -15, 'alloc': 35, 'ts_tgt': 30, 'ts_drp': -10},
+    '중소형주 (Satellite)': {'ma200': True, 'buf': 1.0, 'sl': -12, 'alloc': 20, 'ts_tgt': 20, 'ts_drp': -7}
+}
+curr_def = default_params.get(active_strat, default_params['대형주 (Core)'])
+
+if 'params' not in st.session_state or st.session_state.get('last_strat') != active_strat:
+    st.session_state.params = curr_def.copy()
+    st.session_state.last_strat = active_strat
+
+is_custom = False
+for k, v in curr_def.items():
+    if st.session_state.params[k] != v:
+        is_custom = True
+        break
+
+if is_custom:
+    st.sidebar.warning("⚠️ 사용자 맞춤 파라미터 적용 중 (시뮬레이션/실전 공통)")
+    if st.sidebar.button("🔄 기본값으로 복구", use_container_width=True):
+        st.session_state.params = curr_def.copy()
+        st.rerun()
+else:
+    st.sidebar.success("✅ 기본 최적화 파라미터 운용 중")
+
+st.session_state.params['ma200'] = st.sidebar.checkbox("🛡️ 200일 추세선 필터 적용", value=st.session_state.params['ma200'])
+st.session_state.params['buf'] = st.sidebar.slider("진입 버퍼 (%)", 0.0, 5.0, float(st.session_state.params['buf']), 0.1)
+st.session_state.params['sl'] = st.sidebar.slider("긴급 손절 컷 (%)", -30, -5, int(st.session_state.params['sl']), 1)
+st.session_state.params['alloc'] = st.sidebar.slider("종목당 투입 한도 (%)", 10, 100, int(st.session_state.params['alloc']), 5)
+st.session_state.params['ts_tgt'] = st.sidebar.slider("트레일링 목표수익 (%)", 5, 100, int(st.session_state.params['ts_tgt']), 5)
+st.session_state.params['ts_drp'] = st.sidebar.slider("트레일링 하락허용 (%)", -30, -1, int(st.session_state.params['ts_drp']), 1)
+
+# 전역 변수로 할당하여 하위 엔진에서 공통 사용
+use_ma200_filter = st.session_state.params['ma200']
+whipsaw_buffer = st.session_state.params['buf'] / 100.0
+sat_stop_loss = st.session_state.params['sl'] / 100.0
+max_alloc_pct = float(st.session_state.params['alloc'])
+ts_target_pct = st.session_state.params['ts_tgt'] / 100.0
+ts_drop_pct = st.session_state.params['ts_drp'] / 100.0
 
 # ==========================================
 # 4. 메인 화면 구성
@@ -873,7 +902,7 @@ with tab1:
         def process_watchlist_row(row):
             ticker = str(row.get('티커', '')).strip().zfill(6)
             c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
-            cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer/100.0, ts_target_pct/100.0, ts_drop_pct/100.0, sat_stop_loss/100.0, c_price)
+            cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, 0.0, 0.0, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, c_price)
             return {'🗑️ 삭제': False, '종목명': row.get('종목명'), '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 매력도 점수': score, '🤖 AI 액션 플랜': action, '📊 근거': reason}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
@@ -941,7 +970,7 @@ with tab3:
         c_price = fetch_kis_current_price(SYS_APP_KEY, SYS_APP_SECRET, ticker, kis_token_global, SYS_IS_MOCK) if SYS_APP_KEY and kis_token_global else 0.0
         if live_c_price <= 0: live_c_price = c_price
 
-        cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, buy_price, buy_price, use_ma200_filter, whipsaw_buffer/100.0, ts_target_pct/100.0, ts_drop_pct/100.0, sat_stop_loss/100.0, live_c_price)
+        cp, action, score, reason = evaluate_stock_for_ui(ticker, active_strat, buy_price, buy_price, use_ma200_filter, whipsaw_buffer, ts_target_pct, ts_drop_pct, sat_stop_loss, live_c_price)
         
         if "매도" in action or "청산" in action or "익절" in action:
             if qty_num > 0:
@@ -1005,7 +1034,7 @@ with tab4:
             else:
                 with st.spinner("포워드 테스트 구동 중..."):
                     eval_init_cash = real_invested_principal if real_invested_principal > 0 else total_cash
-                    res_fw = run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    res_fw = run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, 0, ts_target_pct, ts_drop_pct, False, 0)
                     if res_fw:
                         real_ret_pct = (real_eval_pnl / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
                         col_fw1, col_fw2 = st.columns(2)
@@ -1028,7 +1057,7 @@ with tab4:
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
                 with st.spinner("장기 백테스트 구동 중..."):
-                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss/100.0, max_alloc_pct, min_hold_days, ts_target_pct, ts_drop_pct, bull_market_boost, cooldown_days)
+                    bt_result = run_quant_simulation(stocks_df, active_strat, total_cash, start_date, end_date, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, 0, ts_target_pct, ts_drop_pct, False, 0)
                     if bt_result:
                         st.success("✅ 장기 백테스트 완료!")
                         col_r1, col_r2 = st.columns(2)
@@ -1050,7 +1079,7 @@ with tab4:
 
         if run_test3:
             with st.spinner(f"주간 스캔 및 {selected_year}년도 자율매매 시뮬레이션 구동 중 (약 15초 소요)..."):
-                pipeline_res = run_yearly_realistic_backtest(active_strat, total_cash, selected_year, use_ma200_filter, whipsaw_buffer/100.0, sat_stop_loss/100.0, max_alloc_pct, ts_target_pct/100.0, ts_drop_pct/100.0)
+                pipeline_res = run_yearly_realistic_backtest(active_strat, total_cash, selected_year, use_ma200_filter, whipsaw_buffer, sat_stop_loss, max_alloc_pct, ts_target_pct, ts_drop_pct)
                 if pipeline_res:
                     st.success(f"✅ {selected_year}년도 실전 동일 조건 자율매매 백테스트 완료!")
                     logs = pipeline_res['trade_logs']
@@ -1072,83 +1101,51 @@ with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
     <hr>
-    <p>본 백서는 사용자를 위한 <b>시스템 상세 매뉴얼</b>이자, 향후 시스템 업데이트 시 AI가 절대적으로 준수해야 할 <b>불변의 알고리즘 헌장(System Prompt)</b>입니다.</p>
+    
+    <h3>📌 1. 대원칙 (Grand Principles)</h3>
+    <ul>
+        <li><b>100% 실전 동일 환경 구축:</b> 모든 백테스트와 시뮬레이션 엔진은 실제 라이브 자동매매 봇이 작동하는 환경(복리 비중 공식, 수수료, 슬리피지 등)과 완벽하게 동일한 조건으로 동작해야 한다.</li>
+        <li><b>미래 참조 및 생존자 편향 완벽 차단:</b> 백테스트 시 '미래의 시가총액 데이터'를 끌어와 과거에 적용하는 치팅(Cheating) 행위를 금지한다.</li>
+    </ul>
+
+    <h3>🔎 2. 종목 발굴 메커니즘 (AI 스캐너 & 유니버스)</h3>
+    <p>AI 스캐너는 다음 4단계 다중 필터링을 거쳐 관심종목을 스캔한다.</p>
+    <ul>
+        <li><b>Step 1 (시장/시총 필터):</b> KOSPI(Core 전략) 상위 200개 또는 KOSDAQ(Satellite 전략) 상위 150개 우량주를 1차 후보군으로 선정 (잡주 차단). (Test 3 시뮬레이션 시에는 서버 부하를 고려하여 코스피 50 + 코스닥 50 = 총 100개로 압축 진행).</li>
+        <li><b>Step 2 (200일선 추세 필터):</b> 현재가가 과거 200일 이동평균선 위에 위치한 대세 상승 국면 종목만 통과.</li>
+        <li><b>Step 3 (전략별 타점 필터):</b>
+            <ul>
+                <li><b>Core (추세추종):</b> 60일선이 우상향 중이며, 20일선이 60일선을 상향 돌파(버퍼 이상) 시 매수.</li>
+                <li><b>Satellite (눌림목):</b> 현재가와 20일선의 이격도가 -5% ~ +3% 사이에 위치할 시 매수.</li>
+            </ul>
+        </li>
+        <li><b>Step 4 (AI 매력도 점수):</b> 타점 강도 산출식에 의해 85점~99점으로 점수화. (Core: 이격도가 클수록 고득점 / Satellite: 이격도가 낮을수록 고득점).</li>
+    </ul>
+
+    <h3>💳 3. 매매 체결 및 자금 관리 (Trade Execution & Money Management)</h3>
+    <ul>
+        <li><b>복리 기반 동적 비중 분할 매수:</b> 종목당 목표 매수 금액은 <code>(현재 가용 예수금 + 주식 평가금) * (max_alloc_pct / 100)</code> 공식을 엄격히 따른다. 수익 시 비중이 증가하고 손실 시 축소된다.</li>
+        <li><b>매수 수량 산출:</b> 수수료로 인해 예수금이 마이너스가 되는 것을 방지하기 위해 <code>매수 가능 수량 = 할당 예수금 / (현재가 * 1.0025)</code> 공식을 따른다.</li>
+        <li><b>익일 시가 체결 (Test 3):</b> 시뮬레이션에서 매수 시그널은 장 마감 시점에 확정되며, 실제 체결은 다음 날 아침 <b>시가(Open)</b>로 처리하여 슬리피지를 100% 반영한다.</li>
+        <li><b>수수료:</b> 매수 0.25%, 매도 0.25% (왕복 0.5%)가 매 거래 시마다 정확히 차감된다.</li>
+    </ul>
+
+    <h3>🛡️ 4. 리스크 관리 및 청산 (Risk Management & Exit)</h3>
+    <p>청산 우선순위에 따라 다음 세 가지 조건 중 하나라도 만족 시 전량 매도 및 예수금으로 즉각 회수된다.</p>
+    <ul>
+        <li><b>장중 저가 칼손절 (Intraday Stop Loss):</b> 하루 종가(Close)가 아닌 당일의 <b>저가(Low)</b>가 매수가 대비 손절선(기본 -15%)을 터치하면 그 즉시 시장가 매도 청산된다.</li>
+        <li><b>트레일링 익절 (Trailing Stop):</b> 보유 기간 중 주가가 목표 수익률(기본 +30%)을 돌파한 시점부터 역대 최고가(Highest Price)를 갱신하며, 이 최고가 대비 설정 하락폭(기본 -10%)이 발생하면 즉시 이익 실현(청산)한다.</li>
+        <li><b>추세선 이탈:</b> 장 마감 종가 기준으로 Core 전략은 60일선, Satellite 전략은 20일선을 하향 이탈할 경우 다음 날 즉시 청산한다.</li>
+    </ul>
+
+    <h3>⚙️ 6. 시스템 기본 파라미터 (System Default Parameters)</h3>
+    <p>시스템은 전략의 특성에 맞춘 최적화된 기본값을 사용하며, 사용자가 이를 변경할 경우 UI의 실전/시뮬레이션 전 영역에 <b>100% 동기화</b>되어 적용된다.</p>
+    <ul>
+        <li><b>대형주 (Core) 기본값:</b> 200일선 적용, 버퍼 1.5%, 한도 35%, 손절 -15%, 트레일링 익절 30% 상승 시 -10% 허용</li>
+        <li><b>중소형주 (Satellite) 기본값:</b> 200일선 적용, 버퍼 1.0%, 한도 20%, 손절 -12%, 트레일링 익절 20% 상승 시 -7% 허용</li>
+    </ul>
+
+    <hr>
+    <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 웹 애플리케이션의 코드를 업데이트하거나 수정할 때, 위 내용에 기록된 <b>'대원칙, 계산 공식, 레이아웃 정렬, API 호출 규칙, 백테스트 체결 규칙(익일 시가/장중 저가), 기본 파라미터'</b>를 단 하나라도 임의로 훼손하거나 삭제해서는 안 된다. 사용자가 특정 기능을 업데이트해 달라고 요청할 경우, <b>반드시 이 백서에 기록된 원칙들과 상충하는 부분이 없는지 선행 검토해야 하며, 만약 원칙을 수정해야만 하는 상황이라면 코드를 출력하기 전에 사용자에게 명확히 보고하고 승인을 얻어야만 한다.</b></p>
     """, unsafe_allow_html=True)
-
-    st.header("📌 Part 1. 시스템 아키텍처 및 대원칙 (Grand Principles)")
-    st.info("""
-    * **100% 실전 동일 환경 구축:** 모든 백테스트와 시뮬레이션 엔진은 실제 라이브 자동매매 봇이 작동하는 환경(복리 비중 공식, 수수료, 슬리피지 등)과 완벽하게 동일한 조건으로 동작해야 합니다.
-    * **미래 참조 및 생존자 편향 완벽 차단:** 백테스트 시 '미래의 시가총액 데이터'를 끌어와 과거에 적용하는 치팅(Cheating) 행위를 금지합니다.
-    """)
-
-    st.header("📖 Part 2. 사용자 매뉴얼 및 UI 가이드")
-    st.markdown("""
-    * **좌측 사이드바 (설정 & 파라미터):** 
-        * 🔑 `KIS API 설정`: 한국투자증권 실계좌/모의투자 API 키를 안전하게 입력하고 숨길 수 있습니다.
-        * 💰 `가상 자산 및 전략`: 전체 운용 자금을 설정하고 리스크 관리 수치(손절선, 트레일링 익절, 비중 등)를 조절합니다.
-        * 🚨 `자동매매 제어`: 오토파일럿 작동 및 킬 스위치(긴급 정지)를 제어합니다.
-    * **Tab 1 (관심종목 유니버스):** AI 스캐너가 발굴한 종목이나 수동 검색 종목을 등록하고, 실시간 AI 타점 점수(50~99점)를 모니터링합니다.
-    * **Tab 2 (실전 계좌):** API 연동을 통해 나의 실제 계좌 총 평가금, 투자 원금, 누적 수익금, **'주문가능 원화'**를 확인합니다.
-    * **Tab 3 (자동매매 큐):** 현재 가용 예수금 대비 종목별 매수/매도 수량 및 필요 자금을 자동 계산하여 보여주는 관제탑입니다.
-    * **Tab 4 (시뮬레이터 3종):**
-        * `Test 1`: 현재 내 관심종목의 가상 성과 vs 실제 계좌 성과 1:1 비교
-        * `Test 2`: 현재 등록된 관심종목 대상 장기간 백테스트 (전략 적합도 판별)
-        * `Test 3`: 특정 연도 고정, 주간 스캐너 발굴부터 매수/청산까지 100% 실전 동일 자율매매 시뮬레이션
-    """)
-
-    st.header("🧠 Part 3. 핵심 알고리즘: 종목 발굴 및 타점 분석")
-    st.markdown("AI 스캐너는 다음 4단계 다중 필터링을 거쳐 시장의 주도주를 스캔합니다.")
-    
-    st.markdown("#### 1단계: 시장 및 시가총액 필터 (안전성 & 유동성 확보)")
-    st.markdown("> **Core 전략 (대형주):** KOSPI 상위 200개 우량주 스캔\n>\n> **Satellite 전략 (중소형주):** KOSDAQ 상위 150개 주도주 스캔\n> \n> *(Test 3 시뮬레이션 시에는 서버 부하 방지를 위해 코스피 50 + 코스닥 50 = 총 100개로 압축)*")
-
-    st.markdown("#### 2단계: 200일 장기 추세선 필터 (대세 우상향 검증)")
-    st.markdown("대세 하락 종목을 원천 배제하기 위해 주가가 200일선 위에 안착해 있어야 합니다.")
-    st.latex(r"Price \ge MA200")
-
-    st.markdown("#### 3단계: 전략별 정밀 타점 필터 (진입 시그널)")
-    st.markdown("* **Core (추세추종):** 60일선이 우상향 중이며, 20일선이 60일선을 설정 버퍼 이상 상향 돌파(골든크로스)")
-    st.latex(r"MA60_{t} > MA60_{t-10} \quad \land \quad MA20 \ge MA60 \times (1 + Whipsaw\_Buffer)")
-    st.markdown("* **Satellite (눌림목):** 주가와 20일선의 이격도가 -5.0% ~ +3.0% 사이에 위치 (안전한 숨고르기 국면)")
-    st.latex(r"-5.0\% \le \left( \frac{Price - MA20}{MA20} \right) \times 100 \le +3.0\%")
-
-    st.markdown("#### 4단계: 🔥 AI 매력도 점수 (Score) 산출식")
-    st.markdown("위 조건을 통과한 종목에 기본 85점을 부여하고, 타점 강도에 따라 최대 99점까지 가산점을 부여합니다.")
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        st.markdown("**Core 전략 매력도 점수** (이격도가 클수록 고득점)")
-        st.latex(r"Score = \min\left(85.0 + \max\left(0, \left(\frac{MA20}{MA60} - 1\right) \times 100\right), 99.0\right)")
-    with col_s2:
-        st.markdown("**Satellite 전략 매력도 점수** (20일선에 딱 붙을수록 고득점)")
-        st.latex(r"Score = \min\left(85.0 + \max\left(0, 3.0 - \left(\frac{Price}{MA20} - 1\right) \times 100\right), 99.0\right)")
-
-    st.header("💳 Part 4. 자금 관리 및 체결 로직 (Money Management)")
-    st.markdown("실전 라이브 봇과 백테스트 엔진에 동일하게 적용된 **복리 기반 동적 비중 분할 매수 공식**입니다.")
-    st.latex(r"Target\_Fund = Total\_Equity \times \left( \frac{Max\_Alloc\_Pct}{100} \right)")
-    st.latex(r"Allocatable\_Cash = \min(Cash, \ Target\_Fund - Existing\_Position\_Value)")
-    st.markdown("수수료(0.25%)로 인해 예수금이 마이너스가 되는 것을 방지하는 정밀 매수 수량 계산식입니다.")
-    st.latex(r"Order\_Qty = \left\lfloor \frac{Allocatable\_Cash}{Price \times 1.0025} \right\rfloor")
-    st.info("**💡 체결 시점의 현실성 보강 (Test 3):** 시뮬레이션에서 매수 시그널은 장 마감 시점에 확정되며, 실제 매수 체결은 다음 날 아침 **시가(Open)**로 처리하여 슬리피지를 완벽히 반영합니다.")
-
-    st.header("🛡️ Part 5. 리스크 관리 및 청산 알고리즘 (Exit Strategies)")
-    st.markdown("청산 우선순위에 따라 다음 조건 중 하나라도 만족 시 전량 매도 및 예수금으로 즉각 회수됩니다.")
-    
-    st.markdown("#### 1. 장중 저가 칼손절 (Intraday Stop Loss)")
-    st.markdown("하루 종가(Close)가 아닌 당일 장중 **저가(Low)**가 손절선을 터치하면 그 즉시 시장가 매도 처리합니다.")
-    st.latex(r"Low\_Price \le Buy\_Price \times (1 - Stop\_Loss\_Pct)")
-    
-    st.markdown("#### 2. 트레일링 익절 (Trailing Stop)")
-    st.markdown("수익률이 목표(Target)를 돌파한 시점부터 역대 최고가를 갱신하며, 이 최고가 대비 설정 하락폭(Drop) 발생 시 이익을 확정합니다.")
-    st.latex(r"Trigger: Highest\_Price \ge Buy\_Price \times (1 + Target\_Pct)")
-    st.latex(r"Exit: Low\_Price \le Highest\_Price \times (1 - Drop\_Pct)")
-
-    st.markdown("#### 3. 추세 이탈 (Trend Breakdown)")
-    st.markdown("장 마감 종가 기준으로 Core 전략은 60일선, Satellite 전략은 20일선을 하향 이탈할 경우 다음 날 즉시 청산합니다.")
-
-    st.markdown("---")
-    st.markdown("<h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>", unsafe_allow_html=True)
-    st.warning("""
-    이 문서를 읽은 AI는 향후 웹 애플리케이션의 코드를 업데이트하거나 수정할 때, **위 Part 1~5에 기록된 '대원칙, 계산 공식, 레이아웃 정렬, API 호출 규칙, 백테스트 체결 규칙(익일 시가/장중 저가)'을 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.** 
-    
-    사용자가 특정 기능을 업데이트해 달라고 요청할 경우, **반드시 이 백서에 기록된 원칙들과 상충하는 부분이 없는지 선행 검토해야 하며, 만약 원칙을 수정해야만 하는 상황이라면 코드를 출력하기 전에 사용자에게 명확히 보고하고 승인을 얻어야만 합니다.**
-    """)
