@@ -99,7 +99,7 @@ try:
     SYS_APP_KEY = acc_config["app_key"]
     SYS_APP_SEC = acc_config["app_secret"]
     SYS_CANO = str(acc_config["cano"]).strip()
-    # 🛑 설정 누락 시 100% 모의투자(True)로 안전 보호 조치
+    # 🛑 설정 누락 시 100% 모의투자(True)로 안전 보호 조치 (Fail-Closed)
     SYS_IS_MOCK = bool(acc_config.get("is_mock", True))
     SYS_ACNT_PRDT = str(acc_config.get("acnt_prdt", "01")).strip()
 except KeyError:
@@ -336,7 +336,7 @@ with tab4:
     today_date = datetime.datetime.now(KST).date()
     
     # ==========================================
-    # 🎯 Test 1. 단일 종목 정밀 분석 (복원 완료)
+    # 🎯 Test 1. 단일 종목 정밀 분석
     # ==========================================
     st.subheader("🎯 Test 1. 단일 종목 정밀 분석")
     t1_c1, t1_c2, t1_c3, t1_c4 = st.columns([2, 2, 2, 2])
@@ -362,7 +362,7 @@ with tab4:
     st.markdown("---")
 
     # ==========================================
-    # 🎯 Test 2. 관심종목 대상 장기 검증 (유지)
+    # 🎯 Test 2. 관심종목 대상 장기 검증
     # ==========================================
     st.subheader("🎯 Test 2. 관심종목 대상 장기 검증")
     c1, c2, c3 = st.columns([3,3,4])
@@ -389,7 +389,7 @@ with tab4:
     st.markdown("---")
 
     # ==========================================
-    # 🎯 Test 3. 연도별 실전 검증 (복원 완료)
+    # 🎯 Test 3. 연도별 실전 검증 (Yearly Walk-Forward)
     # ==========================================
     st.subheader("🎯 Test 3. 연도별 실전 검증 (Yearly Walk-Forward)")
     t3_c1, t3_c2 = st.columns([3, 7])
@@ -410,7 +410,65 @@ with tab5:
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
     <hr>
     
-    *(Part 1~9 시스템 용량상 기존 내용 축약 보존됨)*
+    <h3>🎯 1. 투자 대원칙 (Core Investment Principles)</h3>
+    <ul>
+        <li><b>전략의 이원화 (Bifurcation):</b> 포트폴리오는 시장 주도주를 추종하는 <b>대형주(Core)</b> 전략과 단기 모멘텀/눌림목을 공략하는 <b>중소형주(Satellite)</b> 전략으로 완전히 분리되어 각각 독립된 워커(Worker)와 계좌에서 운용된다.</li>
+        <li><b>손실 최소화 우선 (Capital Preservation):</b> 수익 창출보다 원금 보존을 최우선으로 하며, 시장 폭락 시 기계적인 장중 손절 및 트레일링 스탑을 통해 포트폴리오의 MDD(Maximum Drawdown)를 엄격히 통제한다.</li>
+    </ul>
+
+    <h3>🧮 2. 전략별 매력도 계산 공식 (Strategy Scoring & Entry Logic)</h3>
+    <ul>
+        <li><b>공통 조건:</b> KIS 또는 FDR 시세 기준, 가격 유효성 검증(NaN, Inf, 0원 차단), 거래 정지 종목 제외. <code>MA200</code> 장기 추세선 상회 종목만 필터링.</li>
+        <li><b>Core (대형주):</b> KOSPI 시가총액 상위 200개 종목 대상. <code>MA60</code> 상승 추세 유지 시, <code>MA20</code>과 <code>MA60</code> 간의 이격도(골든크로스 버퍼 적용)를 기반으로 진입점 산출. <br>
+        <i>매력도 점수(Score) = 85.0 + max(0, 이격도 * 100) (최대 99점)</i></li>
+        <li><b>Satellite (중소형주):</b> KOSDAQ 시가총액 상위 150개 종목 대상. <code>MA20</code> 기준 -5% ~ +3% 사이의 눌림목 발생 시 진입점 산출. <br>
+        <i>매력도 점수(Score) = 85.0 + max(0, (0.03 - 이격도) * 100) (최대 99점)</i></li>
+    </ul>
+
+    <h3>⚙️ 3. 전략별 기본 파라미터 및 포지션 사이징 (Parameters & Sizing)</h3>
+    <ul>
+        <li><b>Core:</b> 버퍼 1.5%, 손절 -15%, 종목당 투입 한도 35%, 익절목표 30%, 하락허용 -10%, 쿨다운 60일, 최소보유 5일.</li>
+        <li><b>Satellite:</b> 버퍼 1.0%, 손절 -12%, 종목당 투입 한도 20%, 익절목표 20%, 하락허용 -7%, 쿨다운 30일, 최소보유 3일.</li>
+    </ul>
+
+    <h3>🛡️ 4. 3대 고급 안전장치 및 장중 손절/트레일링 규칙</h3>
+    <ul>
+        <li><b>장중 보수적 청산:</b> 종가(Close)를 기다리지 않고 장중 저가(Low)가 손절선(sl_target) 또는 트레일링 컷(ts_target)에 터치하면 즉각 <b>가장 보수적인 가격(min)</b>으로 청산 시그널을 발생시킨다. 손절과 익절이 동시 터치 시 <b>손절컷(보수적)을 우선 반영</b>한다.</li>
+        <li><b>종가 추세 이탈:</b> 최소 보유일 경과 후, Core는 MA60을, Satellite는 MA20을 하향 이탈(-버퍼/2.0) 시 종가 기준으로 전량 청산한다.</li>
+        <li><b>일일 손실 컷 차단:</b> 계좌의 일일 손익(Daily PnL)이 -5%를 초과할 경우 당일 신규 매수(BUY) 진입을 전면 차단한다.</li>
+        <li><b>가격 괴리율 방어:</b> 주문 생성 시점의 Intent Price와 실제 제출 직전의 Current Price 괴리가 3%를 초과하면 이상 급등락으로 간주하고 주문을 REJECTED 처리한다.</li>
+    </ul>
+
+    <h3>🔄 5. API 호출 규칙 및 주문 상태 머신 (API & State Machine)</h3>
+    <ul>
+        <li><b>단방향 전이 원칙:</b> UI는 API를 직접 호출하지 않는다. <code>INTENT_CREATED</code> ➔ <code>CLAIMED</code> ➔ <code>SUBMITTING</code> ➔ <code>ACKNOWLEDGED</code>의 단방향 Dureble 상태 전이만을 허용한다.</li>
+        <li><b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향, 티커가 조합된 Idempotency Key를 통해 다중 브라우저 또는 다중 워커에 의한 중복 제출(Double POST)을 원천 차단한다.</li>
+        <li><b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행(Single-flight)으로 갱신된다.</li>
+    </ul>
+
+    <h3>⏱️ 6. 백테스트 체결 규칙 (Backtest Execution Rules)</h3>
+    <ul>
+        <li><b>T+1 체결 반영 완료:</b> 신호 발생 당일(T일)의 종가로 체결되는 룩어헤드 편향(Look-ahead Bias)을 제거한다. 모든 신호는 다음 영업일(T+1)의 시가(Open)로 체결된다.</li>
+        <li>휴장일, 거래정지일에는 가짜 체결이나 거래량 Forward-fill을 금지한다.</li>
+    </ul>
+
+    <h3>🖥️ 7. UI 레이아웃과 정렬 (UI Layout & Alignment)</h3>
+    <ul>
+        <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
+        <li>주문가능금액 조회 실패 시 가용 현금을 0으로 강제 인식하여(Fail-closed) 미수금을 원천 차단한다.</li>
+    </ul>
+
+    <h3>🗄️ 8. 데이터베이스 스키마 (Database & Integrity)</h3>
+    <ul>
+        <li>SQLite 기반 WAL 모드를 적용하여 다중 프로세스(UI/Bot) 간의 동시 접근 락(Lock)을 방지한다.</li>
+        <li>주문(<code>order_intents</code>), 보유(<code>positions</code>), 워커 리스(<code>worker_leases</code>)를 분리 관리하여 계좌 간 스코프를 완벽히 격리한다.</li>
+    </ul>
+
+    <h3>💡 9. 장애 복구 및 프로세스 제어 (Disaster Recovery & Fencing)</h3>
+    <ul>
+        <li><b>Worker Lease & Fencing:</b> 다중 봇 실행 시 <code>worker_leases</code> 테이블을 통해 Lease 획득자만 주문을 POST 할 수 있으며, 뺏긴 워커는 즉시 권한을 상실한다.</li>
+        <li><b>Crash Window 방어:</b> 프로세스가 어느 시점(claim, submit, ack 직전)에 강제 종료되더라도 UNIQUE 제약과 상태 대사를 통해 동일 주문의 2회 발송을 구조적으로 차단한다.</li>
+    </ul>
 
     <h3>🔐 10. 보안 및 런타임 환경 (Security & Runtime Environment)</h3>
     <ul>
@@ -422,5 +480,5 @@ with tab5:
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~10에 기록된 <b>'MSA 구조, 무결성 계약, 주문 상태 대사 원칙, 동시성 제어, 킬 스위치, 리스크 통제, 실시간 스냅샷, t+1 체결, Bcrypt 보안 및 API Key OS 격리 원리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~10 전체 내용(투자 대원칙, 전략 공식, 기본 파라미터, UI 구조, 백테스트 체결 규칙, 보안 헌장 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b> 어떤 이유로든 원칙을 수정하거나 코드가 길어져 축약해야만 하는 상황이 발생하면, 반드시 코드를 수정하기 전 사용자에게 명확히 보고하고 <b>명시적 승인</b>을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
