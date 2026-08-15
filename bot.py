@@ -38,6 +38,7 @@ def main_loop():
                                 if success:
                                     print(f"✅ 주문 성공: {ticker} {order['order_type']} {qty}주")
                                     db.update_order_status(order['id'], 'COMPLETED')
+                                    db.add_execution(ticker, order['order_type'], qty, price)
                                 else:
                                     print(f"❌ 주문 실패 ({ticker}): {msg}")
                                     db.update_order_status(order['id'], 'FAILED')
