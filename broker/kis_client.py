@@ -14,17 +14,22 @@ def get_kis_access_token(app_key, app_secret, is_mock=True):
         return None, f"토큰 발급 실패: {res.text}"
     except Exception as e: return None, str(e)
 
-def fetch_kis_current_price(app_key, app_secret, ticker, token, is_mock=True):
-    if not token: return 0.0
+# 🛑 [핵심 패치 2] 가격 외에 거래정지(is_halted) 여부 반환
+def fetch_kis_current_price_ext(app_key, app_secret, ticker, token, is_mock=True):
+    if not token: return 0.0, False
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST01010100"}
     params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).strip().zfill(6)}
     try:
         res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200 and res.json().get('rt_cd') == '0': return float(res.json()['output']['stck_prpr'])
+        if res.status_code == 200 and res.json().get('rt_cd') == '0':
+            out = res.json()['output']
+            # 51: 매매거래정지, 57: 매매정지
+            is_halted = out.get('iscd_stat_cls_code') in ['51', '57'] 
+            return float(out['stck_prpr']), is_halted
     except: pass
-    return 0.0
+    return 0.0, False
 
 def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     if not token: return None, None, "토큰 누락"
@@ -55,7 +60,6 @@ def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_
     except: pass
     return 0.0
 
-# 🛑 [핵심 패치 1] 주문 시 ODNO(주문번호)와 지점번호 반환
 def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is_buy, qty, price=0, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash"
@@ -75,31 +79,21 @@ def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is
         return False, rj.get('msg1', '에러'), None, None, rj.get('rt_cd')
     except Exception as e: return False, str(e), None, None, "EXCEPTION"
 
-# 🛑 [핵심 패치 2] 체결 대사 (Reconciliation) API 연동
 def fetch_kis_order_executions(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
     tr_id = "VTTC8001R" if is_mock else "TTTC8001R"
     headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
-    
     today = datetime.now().strftime("%Y%m%d")
     params = {"CANO": str(cano).strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "INQR_STRT_DT": today, "INQR_END_DT": today, "SLL_BUY_DVSN": "00", "INQR_DVSN": "00", "PDNO": "", "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_FIID_COND": "", "INQR_FIID_DATA": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
     
     try:
         res = requests.get(url, headers=headers, params=params, timeout=10)
-        if res.status_code == 200:
-            rj = res.json()
-            if rj.get('rt_cd') == '0':
-                exec_dict = {}
-                for order in rj.get('output1', []):
-                    odno = order.get('odno')
-                    if odno:
-                        exec_dict[odno] = {
-                            'cum_qty': int(order.get('tot_ccld_qty', 0)),
-                            'avg_price': float(order.get('avg_prvs', 0)),
-                            'rem_qty': int(order.get('rmn_qty', 0)),
-                            'status_name': order.get('ord_tmd_cd_name', '')
-                        }
-                return exec_dict
+        if res.status_code == 200 and res.json().get('rt_cd') == '0':
+            exec_dict = {}
+            for order in res.json().get('output1', []):
+                odno = order.get('odno')
+                if odno: exec_dict[odno] = {'cum_qty': int(order.get('tot_ccld_qty', 0)), 'avg_price': float(order.get('avg_prvs', 0))}
+            return exec_dict
     except: pass
     return {}
