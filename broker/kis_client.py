@@ -1,5 +1,6 @@
 import requests
 import json
+from datetime import datetime
 
 def get_kis_access_token(app_key, app_secret, is_mock=True):
     if not app_key or not app_secret: return None, "키 누락"
@@ -54,6 +55,7 @@ def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_
     except: pass
     return 0.0
 
+# 🛑 [핵심 패치 1] 주문 시 ODNO(주문번호)와 지점번호 반환
 def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is_buy, qty, price=0, is_mock=True):
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash"
@@ -67,5 +69,37 @@ def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is
     body = {"CANO": str(cano).strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "PDNO": str(ticker).zfill(6), "ORD_DVSN": ord_dvsn, "ORD_QTY": str(int(qty)), "ORD_UNPR": unpr}
     try:
         res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
-        return res.status_code == 200 and res.json().get('rt_cd') == '0', res.json().get('msg1', '에러')
-    except Exception as e: return False, str(e)
+        rj = res.json()
+        if res.status_code == 200 and rj.get('rt_cd') == '0':
+            return True, "OK", rj['output']['ODNO'], rj['output']['KRX_FWDG_ORD_ORGNO'], rj.get('rt_cd')
+        return False, rj.get('msg1', '에러'), None, None, rj.get('rt_cd')
+    except Exception as e: return False, str(e), None, None, "EXCEPTION"
+
+# 🛑 [핵심 패치 2] 체결 대사 (Reconciliation) API 연동
+def fetch_kis_order_executions(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True):
+    domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+    tr_id = "VTTC8001R" if is_mock else "TTTC8001R"
+    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
+    
+    today = datetime.now().strftime("%Y%m%d")
+    params = {"CANO": str(cano).strip()[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).strip().zfill(2), "INQR_STRT_DT": today, "INQR_END_DT": today, "SLL_BUY_DVSN": "00", "INQR_DVSN": "00", "PDNO": "", "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_FIID_COND": "", "INQR_FIID_DATA": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
+    
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        if res.status_code == 200:
+            rj = res.json()
+            if rj.get('rt_cd') == '0':
+                exec_dict = {}
+                for order in rj.get('output1', []):
+                    odno = order.get('odno')
+                    if odno:
+                        exec_dict[odno] = {
+                            'cum_qty': int(order.get('tot_ccld_qty', 0)),
+                            'avg_price': float(order.get('avg_prvs', 0)),
+                            'rem_qty': int(order.get('rmn_qty', 0)),
+                            'status_name': order.get('ord_tmd_cd_name', '')
+                        }
+                return exec_dict
+    except: pass
+    return {}
