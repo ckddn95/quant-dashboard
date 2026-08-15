@@ -12,6 +12,9 @@ import quant_engine as quant
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
+# ==========================================
+# 🛑 [보안 패치 7] bcrypt 기반 OS 환경변수 인증 로직
+# ==========================================
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -47,6 +50,7 @@ def check_password():
 if not check_password():
     st.stop()
 
+# ==========================================
 def mts_metric_html(label, value, delta=None):
     val_color, val_str = "white", str(value)
     if not delta: 
@@ -87,6 +91,7 @@ total_cash = int(db.get_setting('virtual_cash', 10000000))
 new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", value=total_cash, step=1000000)
 if new_cash != total_cash: db.set_setting('virtual_cash', new_cash)
 
+# 🛑 [보안 패치 8 수정] 스트림릿 Secrets 기반 복수 계좌 스위칭
 account_key = "core" if active_strat == quant.Strategy.CORE else "satellite"
 
 try:
@@ -94,7 +99,7 @@ try:
     SYS_APP_KEY = acc_config["app_key"]
     SYS_APP_SEC = acc_config["app_secret"]
     SYS_CANO = str(acc_config["cano"]).strip()
-    # 🛑 [수정] 설정 누락 시 100% 모의투자(True)로 안전 보호 조치
+    # 🛑 설정 누락 시 100% 모의투자(True)로 안전 보호 조치
     SYS_IS_MOCK = bool(acc_config.get("is_mock", True))
     SYS_ACNT_PRDT = str(acc_config.get("acnt_prdt", "01")).strip()
 except KeyError:
@@ -154,6 +159,7 @@ base_date_str = db.get_setting('created_at', '2024-01-01')
 try: real_base_date = pd.to_datetime(base_date_str).date()
 except: real_base_date = datetime.date(2024, 1, 1)
 
+# ==================== 메인 화면 ====================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
 with tab1:
@@ -224,11 +230,11 @@ with tab2:
             token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK)
             if token:
                 st.session_state['kis_token'] = token 
-                # 🛑 [수정] "01" 하드코딩 제거 및 SYS_ACNT_PRDT 적용
+                # 🛑 "01" 하드코딩 제거 및 SYS_ACNT_PRDT 적용
                 h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_ACNT_PRDT, token, SYS_IS_MOCK)
                 if h is not None:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_ACNT_PRDT, token, SYS_IS_MOCK)
-                    # 🛑 [수정] 조회 실패(0) 시, 예수금 대체 차단(Fail-Closed 원칙 준수)
+                    # 🛑 조회 실패(0) 시, 예수금 대체 차단(Fail-Closed 원칙 준수)
                     safe_cash = c if c > 0 else 0.0
                     new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': safe_cash, 'stocks': h}
                     st.session_state['real_data'] = new_rd; db.set_setting('last_real_data', new_rd)
@@ -253,7 +259,7 @@ with tab3:
     c3.metric("💵 가용 현금", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
-    # 🛑 [수정] max() 사용을 제거하여 가상원금에 의한 과대주문(오류) 산출 방지
+    # 🛑 max() 사용을 제거하여 가상원금에 의한 과대주문(오류) 산출 방지
     base_eval = rd['eval'] if rd['eval'] > 0 else float(total_cash)
     target_buy_amt = base_eval * current_config.alloc
     
@@ -329,16 +335,45 @@ with tab4:
     stocks_df = pd.DataFrame(db.get_watchlist())
     today_date = datetime.datetime.now(KST).date()
     
+    # ==========================================
+    # 🎯 Test 1. 단일 종목 정밀 분석 (복원 완료)
+    # ==========================================
+    st.subheader("🎯 Test 1. 단일 종목 정밀 분석")
+    t1_c1, t1_c2, t1_c3, t1_c4 = st.columns([2, 2, 2, 2])
+    with t1_c1: test_ticker = st.text_input("종목코드 (6자리)", "005930", key="t1_ticker")
+    with t1_c2: start_d1 = st.date_input("시작일", datetime.date(2023, 1, 1), key="t1_start")
+    with t1_c3: end_d1 = st.date_input("종료일", today_date, key="t1_end")
+    with t1_c4:
+        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+        if st.button("단일 종목 Backtest 실행", type="primary", use_container_width=True):
+            with st.spinner("단일 종목 엔진 구동 중..."):
+                single_df = pd.DataFrame([{'티커': test_ticker.zfill(6), '종목명': '테스트종목'}])
+                res1 = quant.run_quant_simulation(single_df, active_strat, total_cash, start_d1, end_d1, current_config)
+                if res1:
+                    st.success("완료!")
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.markdown(mts_metric_html("기말 자산", f"{res1['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                    r2.markdown(mts_metric_html("누적 수익률", f"{res1['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                    r3.markdown(mts_metric_html("CAGR", f"{res1['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
+                    r4.markdown(mts_metric_html("MDD", f"{res1['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
+                else:
+                    st.warning("⚠️ 현재 백테스트 엔진 원본이 제공되지 않아 실행이 보류되었습니다.")
+    
+    st.markdown("---")
+
+    # ==========================================
+    # 🎯 Test 2. 관심종목 대상 장기 검증 (유지)
+    # ==========================================
     st.subheader("🎯 Test 2. 관심종목 대상 장기 검증")
     c1, c2, c3 = st.columns([3,3,4])
-    with c1: start_d = st.date_input("시작일", datetime.date(2023,1,1))
-    with c2: end_d = st.date_input("종료일", today_date)
+    with c1: start_d = st.date_input("시작일", datetime.date(2023,1,1), key="t2_start")
+    with c2: end_d = st.date_input("종료일", today_date, key="t2_end")
     with c3:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
         if st.button("장기 고급 Backtest 실행", type="primary", use_container_width=True):
             if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
             else:
-                with st.spinner("엔진 구동 중..."):
+                with st.spinner("다중 종목 엔진 구동 중..."):
                     res = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d, end_d, current_config)
                     if res:
                         st.success("완료!")
@@ -348,6 +383,27 @@ with tab4:
                         r3.markdown(mts_metric_html("CAGR", f"{res['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
                         r4.markdown(mts_metric_html("MDD", f"{res['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
                         st.dataframe(pd.DataFrame(res['summary_rows']), use_container_width=True)
+                    else:
+                        st.warning("⚠️ 현재 백테스트 엔진 원본이 제공되지 않아 실행이 보류되었습니다.")
+
+    st.markdown("---")
+
+    # ==========================================
+    # 🎯 Test 3. 연도별 실전 검증 (복원 완료)
+    # ==========================================
+    st.subheader("🎯 Test 3. 연도별 실전 검증 (Yearly Walk-Forward)")
+    t3_c1, t3_c2 = st.columns([3, 7])
+    with t3_c1: 
+        test_year = st.selectbox("검증 연도 선택", [2022, 2023, 2024, 2025, 2026], index=4)
+    with t3_c2:
+        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+        if st.button(f"{test_year}년 연도별 Backtest 실행", type="primary"):
+            with st.spinner(f"{test_year}년도 시뮬레이션 구동 중..."):
+                res3 = quant.run_yearly_realistic_backtest(active_strat, total_cash, test_year, current_config)
+                if res3:
+                    st.success(f"{test_year}년 검증 완료!")
+                else:
+                    st.warning(f"⚠️ `{test_year}년` 연도별 백테스트 엔진이 아직 구현되지 않았습니다. 백서 및 원본 코드를 확인해 주세요.")
 
 with tab5:
     st.markdown("""
