@@ -6,7 +6,7 @@ import broker.kis_client as kis
 import quant_engine as quant
 
 WORKER_ID = str(uuid.uuid4())
-INTENT_TTL_SECONDS = 300 # 5분 TTL
+INTENT_TTL_SECONDS = 300 
 
 def cancel_all_open_orders(api_key, api_sec, cano, token, is_mock):
     active_orders = db.get_orders_by_status(['ACKNOWLEDGED', 'PARTIALLY_FILLED'])
@@ -27,7 +27,6 @@ def main_loop():
             if api_key and api_sec and cano:
                 token, _ = kis.get_kis_access_token(api_key, api_sec, is_mock)
 
-            # 🛑 [핵심 패치 3] 킬 스위치 작동 시 미체결 일괄 취소 및 재시작 방어
             status = db.get_system_status()
             if status == "HALTED_CONFIG_ERROR": time.sleep(10); continue
             elif status == "KILL_SWITCH":
@@ -60,15 +59,13 @@ def main_loop():
                 if not order: break 
                 oid, tk = order['id'], order['ticker']
                 
-                # 🛑 [핵심 패치 4] POST 직전 SQLite 값 재검사 (Double Check)
                 if db.get_setting('kill_switch', False):
                     db.transition_order_status(oid, 'CLAIMED', 'CANCELED', code="KILL_SWITCH")
-                    break # 내부 루프 탈출, 취소 로직으로 넘어감
+                    break 
                 if not db.get_setting('auto_trade_enabled', False):
                     db.transition_order_status(oid, 'CLAIMED', 'CANCELED', code="AUTO_TRADE_OFF")
                     break
                     
-                # 🛑 [핵심 패치 5] Intent TTL 만료 검사
                 created_at = datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S')
                 if (datetime.now() - created_at).total_seconds() > INTENT_TTL_SECONDS:
                     db.transition_order_status(oid, 'CLAIMED', 'EXPIRED', code="TTL_EXPIRED")
@@ -77,12 +74,19 @@ def main_loop():
 
                 if not db.transition_order_status(oid, 'CLAIMED', 'SUBMITTING'): continue
                 
-                cur_p, is_halted = kis.fetch_kis_current_price_ext(api_key, api_sec, tk, token, is_mock)
-                is_ok, reason = quant.pre_flight_risk_check(order['order_type'], order['price'], cur_p, is_halted, daily_pnl_pct, is_mock)
+                # 🛑 [핵심 패치 5] KIS에서 가져온 신선한 데이터로 스냅샷 구성 후 Pre-flight
+                cur_p, high_p, low_p, is_halted = kis.fetch_kis_current_price_ext(api_key, api_sec, tk, token, is_mock)
+                snap = quant.StockSnapshot(
+                    ticker=tk, current_price=cur_p, high_price=high_p, low_price=low_p,
+                    ma20=0, ma60=0, ma200=0, m60_up=False,
+                    as_of=datetime.now(), source="KIS", is_valid=True, is_complete_bar=False, reason="OK"
+                )
+                snap.validate(is_halted)
                 
+                is_ok, reason = quant.pre_flight_risk_check(order['order_type'], order['price'], snap, daily_pnl_pct, is_mock)
                 if not is_ok:
                     db.transition_order_status(oid, 'SUBMITTING', 'REJECTED', code=reason)
-                    print(f"🛑 주문 차단 (리스크): {tk} - {reason}")
+                    print(f"🛑 주문 차단 (리스크 관리): {tk} - {reason}")
                     continue
 
                 is_buy = "매수" in order['order_type']
