@@ -139,6 +139,11 @@ st.session_state['real_data'] = rd
 
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
 
+# 🛑 [에러 픽스] 누락되었던 시뮬레이션 기준 날짜(real_base_date) 초기화 코드 복구
+base_date_str = db.get_setting('created_at', '2024-01-01')
+try: real_base_date = pd.to_datetime(base_date_str).date()
+except: real_base_date = datetime.date(2024, 1, 1)
+
 # ==================== 메인 화면 ====================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
@@ -308,7 +313,6 @@ with tab3:
         q_df = q_df.sort_values(by=['분류', '점수'], ascending=[True, False]).reset_index(drop=True)
         st.table(q_df[['종목명', '구분', '점수', '단가', '수량']])
         
-        # 🛑 버튼 클릭 시 'INTENT_CREATED' 상태로 기록 (봇이 이후 처리)
         if st.button("⚡ 대기열 일괄 주문 DB 기록", type="primary"):
             for _, r in q_df.iterrows():
                 db.add_order_intent(r['티커'], r['구분'], r['수량'], r['단가'])
@@ -385,9 +389,6 @@ with tab4:
                     r3.markdown(mts_metric_html("체결 횟수 / 승률", f"{len(logs)} 회", f"승률 {rate:.1f}%"), unsafe_allow_html=True)
                     if logs: st.dataframe(pd.DataFrame(logs))
 
-# ==========================================
-# 🛑 [핵심 보강] Part 6. 주문 상태 머신 및 대사 원칙 추가
-# ==========================================
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
