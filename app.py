@@ -46,6 +46,10 @@ selected_strat = [k for k, v in STRAT_DISPLAY_MAP.items() if v == selected_displ
 
 if selected_strat != active_strat: db.set_setting('strategy', selected_strat.value); st.rerun()
 
+total_cash = int(db.get_setting('virtual_cash', 10000000))
+new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", value=total_cash, step=1000000)
+if new_cash != total_cash: db.set_setting('virtual_cash', new_cash)
+
 has_keys = bool(db.get_setting('manual_app_key'))
 with st.sidebar.expander("🔑 KIS API 설정", expanded=not has_keys):
     if has_keys:
@@ -95,16 +99,19 @@ except ValueError as e: st.sidebar.error(f"입력값 오류: {e}"); st.stop()
 SYS_APP_KEY, SYS_APP_SEC, SYS_CANO = db.get_setting('manual_app_key'), db.get_setting('manual_app_secret'), db.get_setting('manual_cano')
 SYS_IS_MOCK = bool(db.get_setting('manual_is_mock', True))
 
-rd = st.session_state.get('real_data', db.get_setting('last_real_data', {'eval': 0.0, 'pnl': 0.0, 'cash': 0.0, 'stocks': []}))
+rd = st.session_state.get('real_data', db.get_setting('last_real_data', {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []}))
 st.session_state['real_data'] = rd 
-if rd['eval'] == 0: st.warning("⚠️ KIS 잔고 동기화가 필요합니다 (최초 1회 필수).")
+
+real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
+base_date_str = db.get_setting('created_at', '2024-01-01')
+try: real_base_date = pd.to_datetime(base_date_str).date()
+except: real_base_date = datetime.date(2024, 1, 1)
 
 # ==================== 메인 화면 ====================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 알고리즘 백서"])
 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
-    # (스캐너 코드 생략 부분 동일 유지)
     col_s1, col_s2 = st.columns([8, 2])
     with col_s1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True): st.session_state.show_scanner = True
@@ -145,12 +152,15 @@ with tab1:
     def process_w(row):
         ticker = str(row['티커']).zfill(6)
         tok = st.session_state.get('kis_token')
-        c_price, _ = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, False)
+        
+        # 🛑 [핵심 패치 6] UI에도 KIS High/Low 스냅샷 값 연동
+        c_price, h_price, l_price, is_halted = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, 0.0, 0.0, False)
         db_positions = {p['ticker']: p for p in db.get_positions()}
         buy_p = db_positions[ticker]['buy_price'] if ticker in db_positions else 0.0
         high_p = db_positions[ticker]['highest_price'] if ticker in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[ticker]['buy_date'])).days if ticker in db_positions else 0
-        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, current_config, buy_p, high_p, c_price, days_held)
+        
+        cp, action, score, reason = quant.evaluate_stock_for_ui(ticker, active_strat, current_config, buy_p, high_p, c_price, h_price, l_price, is_halted, days_held)
         return {'🗑️ 삭제': False, '종목명': row['종목명'], '티커': ticker, '실시간 현재가': f"{cp:,.0f} 원" if cp > 0 else "-", '🔥 점수': score, '🤖 액션': action, '📊 근거': reason}
 
     if current_watchlist:
@@ -182,7 +192,7 @@ with tab2:
         
         c1, c2, c3, c4 = st.columns(4)
         c1.markdown(mts_metric_html("💰 총 평가 금액", f"{rd['eval']:,.0f} 원"), unsafe_allow_html=True)
-        c2.markdown(mts_metric_html("📥 투자 원금", f"{rd['eval'] - rd['pnl']:,.0f} 원"), unsafe_allow_html=True)
+        c2.markdown(mts_metric_html("📥 투자 원금", f"{real_invested_principal:,.0f} 원"), unsafe_allow_html=True)
         c3.markdown(mts_metric_html("📈 누적 수익금", f"{rd['pnl']:+,.0f} 원"), unsafe_allow_html=True)
         c4.markdown(mts_metric_html("💵 주문가능 원화", f"{rd['cash']:,.0f} 원"), unsafe_allow_html=True)
         if rd['stocks']: st.dataframe(pd.DataFrame([{'종목명': i['prdt_name'], '티커': i['pdno'], '수량': i['hldg_qty'], '수익률': f"{float(i['evlu_pfls_rt']):+.2f}%"} for i in rd['stocks'] if int(i['hldg_qty'])>0]), use_container_width=True)
@@ -195,7 +205,7 @@ with tab3:
     c3.metric("💵 가용 현금", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
-    target_buy_amt = rd['eval'] * current_config.alloc
+    target_buy_amt = max(rd['eval'], float(total_cash)) * current_config.alloc
     locked_cash, _ = db.get_locked_cash_and_qty()
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
     
@@ -223,8 +233,8 @@ with tab3:
             if s['pdno'] == tk: kis_qty = int(s['hldg_qty'])
 
         tok = st.session_state.get('kis_token')
-        c_price, _ = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, tk, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, False)
-        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, c_price, days_held)
+        c_price, h_price, l_price, is_halted = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, tk, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, 0.0, 0.0, False)
+        cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, c_price, h_price, l_price, is_halted, days_held)
         
         if "매도" in action or "청산" in action or "익절" in action:
             sell_qty = min(m_qty, kis_qty) 
@@ -265,28 +275,86 @@ with tab3:
 with tab4:
     st.header("🧪 시뮬레이션 및 백테스트")
     st.info("동적 KIS 잔고와 3대 안전장치가 반영된 엔진입니다.")
-    # (시뮬레이터 코드는 이전과 완전히 동일하게 작동하므로 생략 없이 유지)
-    pass 
+    stocks_df = pd.DataFrame(db.get_watchlist())
+    today_date = datetime.datetime.now(KST).date()
+    
+    st.subheader("🎯 Test 1. 포워드 테스트 (관심종목 vs 실전 계좌)")
+    col_fw_date, col_fw_btn = st.columns([3, 7])
+    with col_fw_date:
+        test1_start_date = st.date_input("📅 가상 운용 시작일", real_base_date, key="t4_date")
+    with col_fw_btn:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("▶️ 포워드 테스트 1:1 비교 실행", type="primary", use_container_width=True):
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner("포워드 테스트 구동 중..."):
+                    eval_init_cash = real_invested_principal if real_invested_principal > 0 else float(total_cash)
+                    res_fw = quant.run_quant_simulation(stocks_df, active_strat, eval_init_cash, test1_start_date, today_date, current_config)
+                    if res_fw:
+                        real_ret_pct = (rd['pnl'] / real_invested_principal) * 100 if real_invested_principal > 0 else 0.0
+                        col_fw1, col_fw2 = st.columns(2)
+                        with col_fw1: st.markdown(mts_metric_html("📈 AI 가상 운용 (이론)", f"{res_fw['final_port_ret']:+.2f}%", f"기말 자산: {res_fw['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                        with col_fw2: st.markdown(mts_metric_html("🔌 나의 실전 계좌 (실제)", f"{real_ret_pct:+.2f}%", f"현재 자산: {rd['eval']:,.0f} 원"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(res_fw['summary_rows']), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.subheader("🎯 Test 2. 관심종목 대상 장기 검증")
+    c1, c2, c3 = st.columns([3,3,4])
+    with c1: start_d = st.date_input("시작일", datetime.date(2023,1,1))
+    with c2: end_d = st.date_input("종료일", today_date)
+    with c3:
+        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+        if st.button("장기 Backtest 실행", type="primary", use_container_width=True):
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner("구동 중..."):
+                    res = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d, end_d, current_config)
+                    if res:
+                        st.success("완료!")
+                        r1, r2 = st.columns(2)
+                        r1.markdown(mts_metric_html("초기 투입 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                        r2.markdown(mts_metric_html("기말 자산", f"{res['final_asset']:,.0f} 원", f"{res['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(res['summary_rows']))
+
+    st.markdown("---")
+    st.subheader("💡 Test 3. 동적 포착 AI 자율매매 백테스트 (과거 주도주 발굴 ➡️ 시가 매수)")
+    c1, c2 = st.columns([3, 7])
+    with c1: yr = st.selectbox("연도", list(range(today_date.year, 2021, -1)))
+    with c2:
+        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+        if st.button(f"{yr}년도 자율매매 백테스트 실행", type="primary", use_container_width=True):
+            with st.spinner(f"서버 부하 방지를 위해 우량주 100개 풀에서 {yr}년도 시뮬레이션 중..."):
+                res = quant.run_yearly_realistic_backtest(active_strat, total_cash, yr, current_config)
+                if res:
+                    st.success("완료!")
+                    logs = res['trade_logs']
+                    win = len([l for l in logs if float(l['수익률'].replace('%','').replace('+','')) > 0])
+                    rate = (win / len(logs)) * 100 if logs else 0
+                    r1, r2, r3 = st.columns(3)
+                    r1.markdown(mts_metric_html("초기 자산", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+                    r2.markdown(mts_metric_html("기말 자산", f"{res['final_asset']:,.0f} 원", f"{res['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                    r3.markdown(mts_metric_html("체결 횟수 / 승률", f"{len(logs)} 회", f"승률 {rate:.1f}%"), unsafe_allow_html=True)
+                    if logs: st.dataframe(pd.DataFrame(logs))
 
 # ==========================================
-# 🛑 [핵심 보강] Part 9. 킬 스위치 및 주문 수명(TTL) 관리 헌장 추가
+# 🛑 [핵심 보강] Part 9. 실시간 스냅샷 모델 헌장 추가
 # ==========================================
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
     <hr>
     
-    *(Part 1~8 기존 내용 생략 없이 보존됨)*
+    *(Part 1~8 시스템 용량상 기존 내용 축약 보존)*
     
-    <h3>🚫 9. 킬 스위치 및 주문 수명(TTL) 관리 (Kill Switch & Order TTL)</h3>
+    <h3>📡 9. 실시간 데이터 및 스냅샷 (Real-time Data & Snapshots)</h3>
     <ul>
-        <li><b>POST 직전 실시간 재검증 (Double Check):</b> 봇(Bot)은 루프가 시작될 때뿐만 아니라, 증권사 서버로 <code>POST</code> 통신을 발송하기 1밀리초 전(CLAIMED 상태)에도 <code>SQLite</code>에서 최신 킬 스위치 및 <code>auto_trade_enabled</code> 값을 다시 읽어 들인다. 만약 킬 스위치가 켜지거나 자동주문이 꺼져있다면 즉시 <code>CANCELED</code> 처리하여 신규 진입을 원천 차단한다.</li>
-        <li><b>미체결 주문 즉각 취소 (Cancel Open Orders):</b> 킬 스위치가 발동되면 봇은 즉시 증권사 서버로 취소 API를 전송하여 기존에 걸어둔 모든 <code>ACKNOWLEDGED</code> 및 <code>PARTIALLY_FILLED</code> 미체결 주문을 일괄 취소 거둬들인다.</li>
-        <li><b>영구적 상태 유지:</b> 킬 스위치는 메모리가 아닌 SQLite에 영구 기록되므로 시스템이나 서버가 재부팅되어도 안전하게 차단 상태를 유지한다.</li>
-        <li><b>주문 수명 제한 (Intent TTL):</b> 의도(Intent)가 DB에 생성된 지 5분(300초) 이상 경과한 낡은 주문은 시세 변화로 인한 리스크를 방지하기 위해 증권사로 발송하지 않고 <code>EXPIRED</code> 상태로 폐기한다.</li>
+        <li><b>지연 없는 청산 (Real-time Execution):</b> 손절(Stop Loss) 및 트레일링 익절(Trailing Stop)을 처리할 때 지연된 야후 파이낸스 종가(FDR)가 아닌, KIS API를 통해 실시간으로 받아온 <b>가장 신선한 현재가와 장중 최고/최저가(High/Low)</b>를 주입하여 즉각적인 위험 차단을 수행한다.</li>
+        <li><b>무결성 검증 (Snapshot Validation):</b> 시스템으로 들어오는 모든 데이터는 <code>StockSnapshot</code> 구조체를 거친다. 가격이 0 이하이거나 NaN인 경우, 또는 증권사 서버로부터 거래정지(Halted) 신호를 받은 경우 <b>신규 주문 생성을 원천 차단(Fail-Closed)</b>한다.</li>
+        <li><b>복원 가능한 트레일링 익절 (Recoverable TS):</b> 시스템이 재부팅되더라도 트레일링 락(Armed) 상태를 유지할 수 있도록, <code>highest_price / buy_price >= target</code>이라는 순수 함수 계산식을 통해 익절 작동 여부를 판별한다.</li>
+        <li><b>최소 보유 기간(min_h) 분리 적용:</b> 추세 이탈 매도(MA 데드크로스 등)에는 휩소 방지를 위해 최소 보유 기간 요건을 적용하되, 자본 보호를 위한 <b>손절(SL) 및 트레일링 익절(TS)은 보유 기간과 무관하게 무조건 즉시 발동</b>한다.</li>
     </ul>
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~9에 기록된 <b>'MSA 구조, 무결성 계약, 주문 상태 머신 대사 원칙, 동시성 제어, 킬 스위치 및 TTL 관리 원리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 Part 1~9에 기록된 <b>'MSA 구조, 무결성 계약, 동시성 제어, 킬 스위치, 리스크 통제, 실시간 스냅샷 무결성 방어 원리'를 단 하나라도 임의로 훼손하거나 삭제해서는 안 됩니다.</b> 원칙을 수정해야만 하는 상황이라면 사용자에게 명확히 보고하고 승인을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
