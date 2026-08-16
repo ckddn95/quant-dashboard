@@ -82,9 +82,6 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
         if dev > 0.03: return False, f"Price Deviation > 3%"
     return True, "PASS"
 
-# ==========================================
-# 🛑 [프롬프트 100% 준수] 실전/UI/백테스트가 완전히 공유하는 순수 전략 공통 함수
-# ==========================================
 def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: float, ma60: float, ma200: float, m60_up: bool) -> tuple[bool, float, str]:
     pass_ma200 = (close_p >= ma200) if cfg.ma200 else True
     if strat == Strategy.CORE:
@@ -106,7 +103,7 @@ def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p
     hit_sl = low_p <= sl_target
     hit_ts = (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (low_p <= ts_target)
     
-    if hit_sl and hit_ts: return True, min(open_p, sl_target), "🔴 장중 손절컷" # Adverse-first
+    if hit_sl and hit_ts: return True, min(open_p, sl_target), "🔴 장중 손절컷"
     elif hit_sl: return True, min(open_p, sl_target), "🔴 장중 손절컷"
     elif hit_ts: return True, min(open_p, ts_target), "🔵 트레일링 익절"
     
@@ -140,7 +137,6 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         snap.validate(is_halted)
         if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, snap.reason
             
-        # 🛑 단일 공통 함수 호출
         if buy_price > 0:
             is_sell, _, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60)
             if is_sell: return snap.current_price, s_reason, 999.0, s_reason
@@ -169,14 +165,14 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
     return pd.DataFrame()
 
 
-# ==========================================
-# 🛑 [시뮬레이션 엔진] 공통 함수 사용 및 일일 손실(-5%) 컷 로직 추가
-# ==========================================
 def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_cash: float, start_date: datetime.date, end_date: datetime.date, cfg: StrategyConfig, is_weekly_scan: bool = False):
     try:
         if target_stocks_df.empty: return {"status": "error", "msg": "분석 대상 종목이 없습니다."}
         
-        tickers = target_stocks_df['티커'].astype(str).str.zfill(6).tolist()
+        # 🛑 [신규 패치] 티커-종목명 맵핑 딕셔너리 생성 (상세 거래내역 용도)
+        ticker_to_name = dict(zip(target_stocks_df['티커'].astype(str).str.zfill(6), target_stocks_df['종목명']))
+        tickers = list(ticker_to_name.keys())
+        
         dfs = {}
         fetch_start = start_date - datetime.timedelta(days=365)
         
@@ -208,8 +204,9 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         nav_history = []
         pending_orders = []
         cooldown_tracker = {} 
-        trade_log = [] 
-        assumed_cost_pct = 0.0025 # 0.25% All-in 추정 비용
+        trade_log = []
+        detailed_trade_log = [] # 🛑 [신규 패치] 상세 거래내역 장부 배열 추가
+        assumed_cost_pct = 0.0025 
         
         for i, current_date in enumerate(calendar):
             # 1. T+1 아침 체결 처리
@@ -236,18 +233,45 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                             positions[tk] = {"qty": new_qty, "buy_price": new_bp, "highest": cost_price, "days": 0}
                         else:
                             positions[tk] = {"qty": executable_qty, "buy_price": cost_price, "highest": cost_price, "days": 0}
+                        
+                        # 🛑 [매수 상세 내역 기록]
+                        detailed_trade_log.append({
+                            "체결일": current_date.strftime('%Y-%m-%d'),
+                            "종목명": ticker_to_name.get(tk, tk),
+                            "구분": "매수",
+                            "체결단가": cost_price,
+                            "수량": executable_qty,
+                            "실현손익": 0.0,
+                            "수익률": "-",
+                            "사유": order.get('reason', '신규/추가 매수')
+                        })
+                        
                 elif order['side'] == 'SELL' and tk in positions:
                     sell_price = open_p * (1.0 - assumed_cost_pct)
                     profit_pct = (sell_price / positions[tk]['buy_price']) - 1.0
+                    profit_amt = (sell_price - positions[tk]['buy_price']) * positions[tk]['qty']
                     trade_log.append(profit_pct)
                     if profit_pct < 0: cooldown_tracker[tk] = current_date 
+                    
+                    # 🛑 [매도 상세 내역 기록 (오버나이트)]
+                    detailed_trade_log.append({
+                        "체결일": current_date.strftime('%Y-%m-%d'),
+                        "종목명": ticker_to_name.get(tk, tk),
+                        "구분": "매도",
+                        "체결단가": sell_price,
+                        "수량": positions[tk]['qty'],
+                        "실현손익": profit_amt,
+                        "수익률": f"{profit_pct*100:+.2f}%",
+                        "사유": order.get('reason', '종가 추세이탈')
+                    })
+                    
                     cash += sell_price * positions[tk]['qty']
                     del positions[tk]
             
             pending_orders = []
             sell_signals = []
             
-            # 2. 장중 보수적 위험 감시 (단일 공통 함수 사용)
+            # 2. 장중 보수적 위험 감시
             for tk, pos in list(positions.items()):
                 if current_date not in dfs[tk].index: continue
                 row = dfs[tk].loc[current_date]
@@ -265,14 +289,28 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     # 장중 실시간 청산
                     real_sell_price = sell_price * (1.0 - assumed_cost_pct)
                     profit_pct = (real_sell_price / pos['buy_price']) - 1.0
+                    profit_amt = (real_sell_price - pos['buy_price']) * pos['qty']
                     trade_log.append(profit_pct)
                     if profit_pct < 0: cooldown_tracker[tk] = current_date
+                    
+                    # 🛑 [매도 상세 내역 기록 (장중 손절/익절)]
+                    detailed_trade_log.append({
+                        "체결일": current_date.strftime('%Y-%m-%d'),
+                        "종목명": ticker_to_name.get(tk, tk),
+                        "구분": "매도",
+                        "체결단가": real_sell_price,
+                        "수량": pos['qty'],
+                        "실현손익": profit_amt,
+                        "수익률": f"{profit_pct*100:+.2f}%",
+                        "사유": reason
+                    })
+                    
                     cash += real_sell_price * pos['qty']
                     del positions[tk]
                     continue
                 elif is_sell and "종가 추세이탈" in reason:
-                    # 종가 판정 시 다음날 시가 청산 예약
-                    sell_signals.append({"ticker": tk, "side": "SELL", "qty": pos['qty']})
+                    # 종가 판정 매도 예약
+                    sell_signals.append({"ticker": tk, "side": "SELL", "qty": pos['qty'], "reason": reason})
             
             pending_orders.extend(sell_signals)
             
@@ -286,7 +324,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     daily_eval += pos['qty'] * pos['buy_price']
             nav_history.append({"Date": current_date, "NAV": daily_eval})
             
-            # 🛑 [프롬프트 준수 패치] 일일 손실 컷 -5% 차단 로직 (당일 폭락 시 신규 매수 전면 금지)
+            # -5% 손실 컷 방어
             daily_pnl_pct = 0.0
             if len(nav_history) >= 2:
                 yesterday_nav = nav_history[-2]["NAV"]
@@ -303,7 +341,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             else:
                 is_weekly_scan_day = True 
                 
-            # 4. 장 마감 후 신규 진입 스캔 (일일 손실 -5% 미만일 때만 가동)
+            # 4. 장 마감 후 신규 진입 스캔
             if is_weekly_scan_day and daily_pnl_pct >= -0.05:
                 alloc_mult = 1.0
                 if cfg.boost and not market_df.empty and current_date in market_df.index:
@@ -322,10 +360,9 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     row = dfs[tk].loc[current_date]
                     if pd.isna(row['MA200']) or row['Close'] <= 0: continue
                     
-                    # 🛑 단일 공통 함수 호출
                     is_buy, score, reason = calc_buy_signal(strat, cfg, row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_UP'])
                     if is_buy:
-                        buy_candidates.append({"ticker": tk, "score": score, "close": row['Close']})
+                        buy_candidates.append({"ticker": tk, "score": score, "close": row['Close'], "reason": reason})
                 
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
                 target_alloc_amt = daily_eval * min(1.0, cfg.alloc * alloc_mult) 
@@ -336,7 +373,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     alloc_amt = min(available_cash, target_alloc_amt)
                     qty = int(alloc_amt // (cand['close'] * (1.0 + assumed_cost_pct)))
                     if qty > 0:
-                        pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty})
+                        pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty, "reason": cand['reason']})
                         available_cash -= qty * cand['close'] * (1.0 + assumed_cost_pct)
 
         if not nav_history: return {"status": "error", "msg": "데이터 부족으로 시뮬레이션을 완료할 수 없습니다."}
@@ -346,7 +383,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         returns = nav_df['NAV'].pct_change().dropna()
         cagr = (final_asset / init_cash) ** (252 / len(nav_df)) - 1 if len(nav_df) > 0 else 0
         mdd = (nav_df['NAV'] / nav_df['NAV'].cummax() - 1).min()
-        
         win_rate = (sum(1 for p in trade_log if p > 0) / len(trade_log) * 100) if trade_log else 0.0
         
         return {
@@ -354,9 +390,10 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             "final_asset": final_asset,
             "final_port_ret": (final_asset / init_cash - 1) * 100,
             "metrics": {"CAGR": cagr, "MDD": mdd},
+            "trade_logs": detailed_trade_log, # 🛑 거래장부 리턴 추가
             "summary_rows": [
                 {"항목": "총 거래일수", "값": f"{len(nav_df)} 일"},
-                {"항목": "총 거래횟수 (청산기준)", "값": f"{len(trade_log)} 회"},
+                {"항목": "총 매도(청산) 횟수", "값": f"{len(trade_log)} 회"},
                 {"항목": "승률 (Win Rate)", "값": f"{win_rate:.1f} %"},
                 {"항목": "가정 수수료율", "값": "0.25% (ALL-IN)"}
             ]
