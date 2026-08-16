@@ -147,7 +147,6 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         return snap.current_price, "🟡 모니터링 유지", 50.0, f"이격도 {((snap.current_price/ma20)-1)*100:+.1f}%"
     except Exception as e: return c_price, "에러", 0.0, str(e)
 
-# 🛑 [스캐너 복원] 이전 버전에서 용량 문제로 pass 되었던 부분 복구 완료
 def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
     krx = load_krx_universe()
     if krx.empty: return pd.DataFrame()
