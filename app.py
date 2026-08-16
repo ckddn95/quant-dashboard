@@ -331,15 +331,11 @@ with tab4:
     today_date = datetime.datetime.now(KST).date()
     stocks_df = pd.DataFrame(db.get_watchlist(SYS_CANO, ENV_STR))
     
-    # ---------------------------------------------------------
-    # 🎯 테스트 1. 관심·보유종목 전략 매매 시뮬레이션
-    # ---------------------------------------------------------
     st.subheader("🎯 테스트 1. 관심·보유종목 전략 매매 시뮬레이션")
     st.info("현재 관심종목 및 보유종목 전체를 과거 기간에 소급 적용하여 매매 결과를 회고하는 시나리오입니다.")
     
     combined_tickers = set()
     combined_data = []
-    
     for w in db.get_watchlist(SYS_CANO, ENV_STR):
         tk = str(w['티커']).zfill(6)
         if tk not in combined_tickers:
@@ -364,13 +360,11 @@ with tab4:
     with t1_c2: start_d1 = st.date_input("시작일", datetime.date(2023, 1, 1), key="t1_start")
     with t1_c3: end_d1 = st.date_input("종료일", today_date, key="t1_end")
     
-    # 🛑 [패치] 컬럼 밖으로 빼서 100% 화면 너비 사용
     st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
     run_t1 = st.button("테스트 1 실행 (통합 포트폴리오)", type="primary", use_container_width=True)
     
     if run_t1:
-        if target_df.empty:
-            st.warning("분석할 관심종목이나 보유종목이 없습니다.")
+        if target_df.empty: st.warning("분석할 관심종목이나 보유종목이 없습니다.")
         else:
             with st.spinner(f"총 {len(combined_data)}개 종목 대상 시뮬레이션 구동 중... (T+1 체결, 0.25% 비용 가정)"):
                 res1 = quant.run_quant_simulation(target_df, active_strat, total_cash, start_d1, end_d1, current_config, is_weekly_scan=False)
@@ -379,19 +373,25 @@ with tab4:
                     r1, r2, r3, r4 = st.columns(4)
                     r1.markdown(mts_metric_html("기말 자산", f"{res1['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                     r2.markdown(mts_metric_html("누적 수익률", f"{res1['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                    r3.markdown(mts_metric_html("CAGR", f"{res1['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
-                    r4.markdown(mts_metric_html("MDD", f"{res1['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
+                    # 🛑 [패치] CAGR, MDD 용어 순화 반영
+                    r3.markdown(mts_metric_html("연평균 수익률(CAGR)", f"{res1['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
+                    r4.markdown(mts_metric_html("최대 낙폭(MDD)", f"{res1['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
                     st.dataframe(pd.DataFrame(res1['summary_rows']), use_container_width=True)
+                    
+                    # 🛑 [패치] 상세 거래 내역(원장) 공개 아코디언 추가
+                    with st.expander("📝 상세 거래 내역 보기 (클릭하여 펼치기)"):
+                        if res1.get('trade_logs'):
+                            tl_df = pd.DataFrame(res1['trade_logs'])
+                            st.dataframe(tl_df.style.map(color_profit_loss, subset=['수익률']).format({
+                                '체결단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
+                            }), use_container_width=True)
+                        else: st.info("해당 기간 동안 발생한 거래 내역이 없습니다.")
                 else: st.error(f"실행 불가: {res1['msg']}")
     st.markdown("---")
 
-    # ---------------------------------------------------------
-    # 🎯 테스트 2. AI 가상운용 vs 실제계좌 성과 비교
-    # ---------------------------------------------------------
     st.subheader("🎯 테스트 2. AI 가상운용 vs 실제계좌 성과 비교")
     st.info("최근 1년 동안 동일한 시작금액(현금)으로 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
     
-    # 기본값 설정: 최근 1년 (프롬프트 요구사항 반영)
     t2_end_default = today_date
     t2_start_default = t2_end_default - datetime.timedelta(days=365)
     
@@ -402,7 +402,6 @@ with tab4:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
         run_t2 = st.button("테스트 2 실행 (주간 스캔)", type="primary", use_container_width=True)
         
-    # 🛑 [패치] 컬럼 밖으로 빼서 100% 화면 너비 사용 및 비교 UI 구현
     if run_t2:
         if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다. 탭 1에서 관심종목을 추가해주세요.")
         else:
@@ -410,12 +409,8 @@ with tab4:
                 res2 = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d2, end_d2, current_config, is_weekly_scan=True)
                 if res2.get('status') == 'success':
                     st.success("테스트 2 시뮬레이션 완료!")
-                    
                     st.markdown("### 🏆 성과 비교: AI 가상운용 vs 실제 계좌 (현재)")
-                    
-                    # 실제 계좌 수익률 계산
                     actual_ret_pct = (rd['pnl'] / real_invested_principal * 100) if real_invested_principal > 0 else 0.0
-                    
                     comp_col1, comp_col2 = st.columns(2)
                     
                     with comp_col1:
@@ -423,6 +418,14 @@ with tab4:
                         st.markdown(mts_metric_html("AI 가상 기말 자산", f"{res2['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                         st.markdown(mts_metric_html("AI 가상 누적 수익률", f"{res2['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
                         st.dataframe(pd.DataFrame(res2['summary_rows']), use_container_width=True)
+                        
+                        # 🛑 [패치] 상세 거래 내역(원장) 추가
+                        with st.expander("📝 상세 거래 내역 보기 (클릭하여 펼치기)"):
+                            if res2.get('trade_logs'):
+                                st.dataframe(pd.DataFrame(res2['trade_logs']).style.map(color_profit_loss, subset=['수익률']).format({
+                                    '체결단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
+                                }), use_container_width=True)
+                            else: st.info("해당 기간 동안 발생한 거래 내역이 없습니다.")
                         
                     with comp_col2:
                         st.markdown("<h4 style='text-align:center; color:#10b981;'>🧑‍💻 실제 계좌 (현재 잔고)</h4>", unsafe_allow_html=True)
@@ -432,9 +435,6 @@ with tab4:
                 else: st.error(f"실행 불가: {res2['msg']}")
     st.markdown("---")
 
-    # ---------------------------------------------------------
-    # 🎯 테스트 3. 과거연도 자동매매 재현 시뮬레이션
-    # ---------------------------------------------------------
     st.subheader("🎯 테스트 3. 과거연도 자동매매 재현 시뮬레이션")
     st.info("선택한 특정 연도의 전체 기간 동안 AI가 주간 단위로 운용했을 때의 결과입니다.")
     t3_c1, t3_c2 = st.columns([3, 7])
@@ -443,7 +443,6 @@ with tab4:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
         run_t3 = st.button(f"테스트 3 실행 ({test_year}년)", type="primary")
         
-    # 🛑 [패치] 컬럼 밖으로 빼서 100% 화면 너비 사용
     if run_t3:
         with st.spinner(f"{test_year}년도 시뮬레이션 구동 중..."):
             res3 = quant.run_yearly_realistic_backtest(active_strat, total_cash, test_year, current_config)
@@ -452,8 +451,18 @@ with tab4:
                 r1, r2, r3, r4 = st.columns(4)
                 r1.markdown(mts_metric_html("기말 자산", f"{res3['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                 r2.markdown(mts_metric_html("누적 수익률", f"{res3['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                r3.markdown(mts_metric_html("CAGR", f"{res3['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
-                r4.markdown(mts_metric_html("MDD", f"{res3['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
+                # 🛑 [패치] CAGR, MDD 용어 순화 반영
+                r3.markdown(mts_metric_html("연평균 수익률(CAGR)", f"{res3['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
+                r4.markdown(mts_metric_html("최대 낙폭(MDD)", f"{res3['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
+                
+                # 🛑 [패치] 상세 거래 내역(원장) 공개 아코디언 추가
+                with st.expander("📝 상세 거래 내역 보기 (클릭하여 펼치기)"):
+                    if res3.get('trade_logs'):
+                        tl_df = pd.DataFrame(res3['trade_logs'])
+                        st.dataframe(tl_df.style.map(color_profit_loss, subset=['수익률']).format({
+                            '체결단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
+                        }), use_container_width=True)
+                    else: st.info("해당 기간 동안 발생한 거래 내역이 없습니다.")
             else: st.error(f"실행 불가: {res3['msg']}")
 
 with tab5:
@@ -510,6 +519,7 @@ with tab5:
         <li><b>[시스템 규칙] 비용 가정 (Cost Assumption):</b> 실제 KIS 브로커 체결 데이터가 없는 시뮬레이션 단계에서는, 매수와 매도 각각 수수료/세금/시장충격을 모두 포함하여 보수적인 <b>All-in 0.25% (왕복 0.50%)</b>의 비용률을 강제 적용한다.</li>
         <li><b>[시스템 규칙] 장중 보수적 손절/익절 (Adverse-first):</b> 과거 일봉 데이터만으로 장중 High/Low 순서를 알 수 없는 경우, 가장 불리한 방향인 <b>손절컷(SL)을 우선 타격</b>한 것으로 가정하여 생존 편향을 억제한다.</li>
         <li><b>[시스템 규칙] 주간 스캔 (Weekly Scan):</b> 연산량 절감 및 현실적 매매 빈도 조절을 위해, 테스트 2와 3의 신규 진입 종목 스캔은 매주 마지막 거래일(금요일) 종가 기준으로 주 1회만 실시하되, 기존 보유 종목에 대한 위험 감시(SL/TS)는 매일 수행한다. 공휴일이 겹친 주간에는 달력 로직 기반으로 '그 주의 마지막 유효 거래일'을 능동적으로 추적하여 스캔을 수행한다.</li>
+        <li><b>[시스템 규칙] 상세 거래 장부(Ledger) 보존 및 공개:</b> 시뮬레이션의 신뢰성 및 투명성 확보를 위해, 퀀트 엔진은 매수/매도 시그널에 따른 모든 개별 종목의 체결일, 단가, 수량, 실현손익, 매매 사유(손절컷, 익절, 추세이탈 등)를 상세 회계 장부(Trade Logs)로 기록하며, 이를 UI 화면에서 엑셀 표와 같은 형태로 100% 공개해야 한다.</li>
     </ul>
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
@@ -523,7 +533,7 @@ with tab5:
         <li><b>[시스템 규칙] 투명한 대기열 및 정렬:</b> 당장 매수/매도 시그널이 발생하지 않더라도 시스템의 판단(현금 부족, 타점 미달 등)을 큐에 모두 표시하여 관측성을 높인다. 큐는 항상 <code>매도(0) ➔ 매수(1) ➔ 관망(2)</code> 순서로 자동 정렬된다.</li>
         <li><b>[시스템 규칙] 대기열 뷰 확장 및 추가 매수 구분:</b> 사용자의 직관적인 판단을 위해 대기열에 종목의 '주문수량'뿐만 아니라 '현재 보유수량'과 '평균단가'를 실시간 대조하여 렌더링한다. 또한 이미 보유 중인 종목에 매수 시그널이 발생할 경우 단순 매수 시그널이 아닌 '추가 매수'로 명확히 구분하여 표기한다.</li>
         <li><b>[시스템 규칙] 예외 처리 충돌 방어:</b> Streamlit의 <code>st.rerun()</code> 동작이 포괄적 <code>except:</code> 구문에 걸려 로직이 멈추는 것을 방지하기 위해, 에러 캐치 시 반드시 <code>ValueError</code> 등 명확한 Exception Class를 지정하여 처리한다.</li>
-        <li><b>[UI/UX 포맷팅 절대 규칙]</b> 데이터 가독성과 직관성을 위해, 계좌 표의 수익률은 양수일 경우 적색(<code>#FF5050</code>), 음수일 경우 청색(<code>#3b82f6</code>)으로 하드코딩 스타일링한다. AI 스코어, 이격도, 평균단가 등 변동성이 있는 지표는 반드시 소수점 둘째 자리(<code>.2f</code>)로 고정 노출하고, 현재가 및 수량은 정수 콤마 포맷(<code>,.0f</code>)을 적용하여 시각적 혼란을 방지한다.</li>
+        <li><b>[UI/UX 포맷팅 절대 규칙]</b> 일반 사용자의 직관성을 위해 성과 지표 용어를 한글로 친절히 순화(예: <code>CAGR ➔ 연평균 수익률(CAGR)</code>, <code>MDD ➔ 최대 낙폭(MDD)</code>)하여 표기한다. 계좌 표의 수익률은 양수일 경우 적색(<code>#FF5050</code>), 음수일 경우 청색(<code>#3b82f6</code>)으로 하드코딩 스타일링한다. AI 스코어, 이격도, 평균단가 등 변동성이 있는 지표는 반드시 소수점 둘째 자리(<code>.2f</code>)로 고정 노출하고, 현재가 및 수량은 정수 콤마 포맷(<code>,.0f</code>)을 적용하여 시각적 혼란을 방지한다.</li>
     </ul>
 
     <h3>🗄️ 8. 데이터베이스 스키마 (Database & Integrity)</h3>
