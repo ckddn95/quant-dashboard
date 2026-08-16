@@ -37,7 +37,6 @@ def check_password():
             if bcrypt.checkpw(pwd_input.encode('utf-8'), hashed_pw_env.encode('utf-8')):
                 st.session_state["password_correct"] = True; st.rerun()
             else: st.error("비밀번호가 일치하지 않습니다.")
-        # ✅ 포괄적 except 대신 ValueError만 잡아 스트림릿 RerunException 충돌 해결 (첫 클릭 즉시 접속)
         except ValueError: st.error("서버 설정 오류: 잘못된 형식의 해시값입니다.")
     return False
 
@@ -269,14 +268,22 @@ with tab3:
         
         if "매도" in action or "청산" in action or "익절" in action:
             sell_qty = min(m_qty, kis_qty) 
-            if sell_qty > 0: return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '구분': action, '단가': cp, '수량': sell_qty}
-        elif "매수 시그널" in action:
+            if sell_qty > 0: 
+                return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '상태': f"🔴 {action}", '단가': cp, '수량': sell_qty}
+            else:
+                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 보유수량 없음 ({action})", '단가': cp, '수량': 0}
+        
+        elif "매수" in action:
             curr_pos_val = m_qty * cp
             needed_amt = max(0.0, target_buy_amt - curr_pos_val)
             allow_amt = min(net_usable_cash, needed_amt)
             add_qty = int(allow_amt // (cp * 1.0025)) if cp > 0 else 0
-            if add_qty > 0: return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '구분': "🛒 매수", '단가': cp, '수량': add_qty}
-        return None
+            if add_qty > 0: 
+                return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '상태': "🛒 매수 시그널 (승인 대기)", '단가': cp, '수량': add_qty}
+            else:
+                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': "🟡 현금 부족 (매수 시그널)", '단가': cp, '수량': 0}
+        
+        return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"👁️ {action}", '단가': cp, '수량': 0}
 
     if eval_list:
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
@@ -286,19 +293,21 @@ with tab3:
     q_df = pd.DataFrame(temp_q)
     if not q_df.empty:
         q_df = q_df.sort_values(by=['분류', '점수'], ascending=[True, False]).reset_index(drop=True)
-        st.table(q_df[['종목명', '구분', '점수', '단가', '수량']])
+        st.table(q_df[['종목명', '상태', '점수', '단가', '수량']])
         
         if st.button("⚡ 대기열 일괄 주문 DB 기록", type="primary"):
             success_count = 0
-            for _, r in q_df.iterrows():
-                tk, side = r['티커'], "BUY" if "매수" in r['구분'] else "SELL"
+            valid_orders = [r for _, r in q_df.iterrows() if r['분류'] in [0, 1] and r['수량'] > 0 and "🟡" not in r['상태'] and "👁️" not in r['상태']]
+            for r in valid_orders:
+                tk, side = r['티커'], "BUY" if "매수" in r['상태'] else "SELL"
                 idem_key = f"{SYS_CANO}_{active_strat.value}_{tk}_{side}_{datetime.datetime.now(KST).strftime('%Y%m%d_%H%M')}"
                 spec = quant.OrderSpec(idempotency_key=idem_key, broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 ok, msg = db.safe_add_order_intent(spec)
                 if ok: success_count += 1
                 else: st.warning(f"⚠️ {r['종목명']} 거절됨: {msg}")
             if success_count > 0: st.success(f"✅ {success_count}건 주문 생성 완료!")
-    else: st.info("대기 중인 시그널이 없습니다.")
+            else: st.info("실행할 수 있는 유효한 주문 시그널(수량 확보)이 없습니다.")
+    else: st.info("대기 중인 종목이 없습니다.")
     
     st.markdown("### 📊 실시간 체결 대사 현황")
     intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED'], SYS_CANO, ENV_STR)
@@ -362,10 +371,11 @@ with tab5:
         <i>매력도 점수(Score) = 85.0 + max(0, (0.03 - 이격도) * 100) (최대 99점)</i></li>
     </ul>
 
-    <h3>⚙️ 3. 전략별 기본 파라미터 및 포지션 사이징 (Parameters & Sizing)</h3>
+    <h3>⚙️ 3. 전략별 기본 파라미터 및 레지스트리 (Parameters & Registry)</h3>
     <ul>
         <li><b>Core:</b> 버퍼 1.5%, 손절 -15%, 종목당 투입 한도 35%, 익절목표 30%, 하락허용 -10%, 쿨다운 60일, 최소보유 5일.</li>
         <li><b>Satellite:</b> 버퍼 1.0%, 손절 -12%, 종목당 투입 한도 20%, 익절목표 20%, 하락허용 -7%, 쿨다운 30일, 최소보유 3일.</li>
+        <li><b>[중요] 파라미터 무결성 경계값 보장:</b> <code>NaN</code>, <code>Inf</code>는 시스템 폭주를 유발하므로 엔진단에서 즉시 차단(에러)한다. 손절컷(<code>sl</code>)과 트레일링 하락허용(<code>ts_drp</code>)은 시스템상 <b>반드시 음수(-)</b>로 설정되어야 하며, 투입 한도(<code>alloc</code>)는 0 초과 1.0 이하의 비율, 쿨다운과 최소보유일은 0 이상의 정수만 허용하여 파라미터 조작으로 인한 오작동을 원천 봉쇄한다.</li>
     </ul>
 
     <h3>🛡️ 4. 3대 고급 안전장치 및 장중 손절/트레일링 규칙</h3>
@@ -389,10 +399,12 @@ with tab5:
         <li>휴장일, 거래정지일에는 가짜 체결이나 거래량 Forward-fill을 금지한다.</li>
     </ul>
 
-    <h3>🖥️ 7. UI 레이아웃과 정렬 (UI Layout & Alignment)</h3>
+    <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
         <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
-        <li>주문가능금액 조회 실패 시 가용 현금을 0으로 강제 인식하여(Fail-closed) 미수금을 원천 차단한다.</li>
+        <li><b>[중요] Fail-closed (안전 우선 차단) 원칙:</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 및 초과 매수 사고를 철저히 차단한다.</li>
+        <li><b>[중요] 투명한 대기열 노출 (Observability):</b> 당장 매수/매도 시그널이 발생하지 않은 관심종목이나 보유종목이라도 대기열 화면에서 임의로 숨기지 않는다. '현금 부족', '보유수량 없음', '관망 유지' 등 현재 상태와 사유를 100% 투명하게 표기하여 알고리즘의 판단 과정을 실시간으로 확인할 수 있도록 보장한다.</li>
+        <li><b>[중요] 정밀한 예외 처리:</b> Streamlit의 화면 새로고침 <code>st.rerun()</code> 시그널과의 충돌을 방지하기 위해 코드 내에 포괄적인 <code>except:</code> 사용을 원천 금지한다. 반드시 <code>ValueError</code> 등 명확한 에러 클래스만을 포착하여, '로그인 두 번 클릭' 버그와 같은 UI 제어 오작동을 차단한다.</li>
     </ul>
 
     <h3>🗄️ 8. 데이터베이스 스키마 (Database & Integrity)</h3>
@@ -417,5 +429,5 @@ with tab5:
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~10 전체 내용(투자 대원칙, 전략 공식, 기본 파라미터, UI 구조, 백테스트 체결 규칙, 보안 헌장 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b> 어떤 이유로든 원칙을 수정하거나 코드가 길어져 축약해야만 하는 상황이 발생하면, 반드시 코드를 수정하기 전 사용자에게 명확히 보고하고 <b>명시적 승인</b>을 얻어야 합니다.</p>
+    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~10 전체 내용(투자 대원칙, 전략 공식, 기본 파라미터 제한, UI 관측성 확보 의무 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b> 어떤 이유로든 원칙을 수정하거나 코드가 길어져 축약해야만 하는 상황이 발생하면, 반드시 코드를 수정하기 전 사용자에게 명확히 보고하고 <b>명시적 승인</b>을 얻어야 합니다.</p>
     """, unsafe_allow_html=True)
