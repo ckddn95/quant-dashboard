@@ -373,12 +373,10 @@ with tab4:
                     r1, r2, r3, r4 = st.columns(4)
                     r1.markdown(mts_metric_html("기말 자산", f"{res1['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                     r2.markdown(mts_metric_html("누적 수익률", f"{res1['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                    # 🛑 [패치] CAGR, MDD 용어 순화 반영
                     r3.markdown(mts_metric_html("연평균 수익률(CAGR)", f"{res1['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
                     r4.markdown(mts_metric_html("최대 낙폭(MDD)", f"{res1['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
                     st.dataframe(pd.DataFrame(res1['summary_rows']), use_container_width=True)
                     
-                    # 🛑 [패치] 상세 거래 내역(원장) 공개 아코디언 추가
                     with st.expander("📝 상세 거래 내역 보기 (클릭하여 펼치기)"):
                         if res1.get('trade_logs'):
                             tl_df = pd.DataFrame(res1['trade_logs'])
@@ -390,7 +388,7 @@ with tab4:
     st.markdown("---")
 
     st.subheader("🎯 테스트 2. AI 가상운용 vs 실제계좌 성과 비교")
-    st.info("최근 1년 동안 동일한 시작금액(현금)으로 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
+    st.info("선택한 기간 동안 실제 계좌의 투자 원금과 동일한 금액으로 AI가 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
     
     t2_end_default = today_date
     t2_start_default = t2_end_default - datetime.timedelta(days=365)
@@ -406,7 +404,8 @@ with tab4:
         if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다. 탭 1에서 관심종목을 추가해주세요.")
         else:
             with st.spinner("주간 유니버스 갱신 및 AI 가상운용 시뮬레이션 구동 중..."):
-                res2 = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d2, end_d2, current_config, is_weekly_scan=True)
+                # 🛑 [패치] 초기 자금을 total_cash가 아닌 real_invested_principal로 동기화
+                res2 = quant.run_quant_simulation(stocks_df, active_strat, real_invested_principal, start_d2, end_d2, current_config, is_weekly_scan=True)
                 if res2.get('status') == 'success':
                     st.success("테스트 2 시뮬레이션 완료!")
                     st.markdown("### 🏆 성과 비교: AI 가상운용 vs 실제 계좌 (현재)")
@@ -414,13 +413,12 @@ with tab4:
                     comp_col1, comp_col2 = st.columns(2)
                     
                     with comp_col1:
-                        st.markdown("<h4 style='text-align:center; color:#3b82f6;'>🤖 AI 가상운용 (최근 1년)</h4>", unsafe_allow_html=True)
+                        st.markdown("<h4 style='text-align:center; color:#3b82f6;'>🤖 AI 가상운용</h4>", unsafe_allow_html=True)
                         st.markdown(mts_metric_html("AI 가상 기말 자산", f"{res2['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                         st.markdown(mts_metric_html("AI 가상 누적 수익률", f"{res2['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
                         st.dataframe(pd.DataFrame(res2['summary_rows']), use_container_width=True)
                         
-                        # 🛑 [패치] 상세 거래 내역(원장) 추가
-                        with st.expander("📝 상세 거래 내역 보기 (클릭하여 펼치기)"):
+                        with st.expander("📝 AI 가상운용 상세 거래 내역 보기"):
                             if res2.get('trade_logs'):
                                 st.dataframe(pd.DataFrame(res2['trade_logs']).style.map(color_profit_loss, subset=['수익률']).format({
                                     '체결단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
@@ -451,11 +449,9 @@ with tab4:
                 r1, r2, r3, r4 = st.columns(4)
                 r1.markdown(mts_metric_html("기말 자산", f"{res3['final_asset']:,.0f} 원"), unsafe_allow_html=True)
                 r2.markdown(mts_metric_html("누적 수익률", f"{res3['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
-                # 🛑 [패치] CAGR, MDD 용어 순화 반영
                 r3.markdown(mts_metric_html("연평균 수익률(CAGR)", f"{res3['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
                 r4.markdown(mts_metric_html("최대 낙폭(MDD)", f"{res3['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
                 
-                # 🛑 [패치] 상세 거래 내역(원장) 공개 아코디언 추가
                 with st.expander("📝 상세 거래 내역 보기 (클릭하여 펼치기)"):
                     if res3.get('trade_logs'):
                         tl_df = pd.DataFrame(res3['trade_logs'])
@@ -525,7 +521,7 @@ with tab5:
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
         <li><b>[시스템 규칙] 테스트 1 포트폴리오 분석:</b> 테스트 1은 기존의 단일 종목 입력 방식을 전면 폐기하고, 시스템 내에 등록된 <b>'현재 관심종목'과 '실제 보유종목' 전체를 하나의 포트폴리오로 취합</b>하여 과거 기간의 성과를 회고하는 UI로 개편되었다. 분석 결과는 화면 전체(Full-width)를 활용하여 사용자 가독성을 극대화한다.</li>
-        <li><b>[시스템 규칙] 테스트 2 비교 UI 강제:</b> 테스트 2의 비교 기간은 <b>최근 1년</b>을 기본값으로 자동 설정하며, AI 가상 운용 성과와 현재 사용자의 실제 계좌 성과를 화면에 <b>Side-by-side (나란히 비교)</b> 배치하여 직관적인 성과 대조를 강제한다.</li>
+        <li><b>[시스템 규칙] 테스트 2 완벽한 1:1 비교 강제:</b> AI 가상 운용 시뮬레이션(테스트 2) 수행 시, 임의의 가상 원금이 아닌 <b>실제 계좌의 현재 투자 원금(Eval - PnL)</b>을 시뮬레이션의 초기 자금(Init Cash)으로 강제 동기화하여 진정한 의미의 성과 비교(Apples-to-apples)를 제공한다. 테스트 2의 비교 기간은 <b>최근 1년</b>을 기본값으로 자동 설정하며, AI 가상 운용 성과와 현재 사용자의 실제 계좌 성과를 화면에 <b>Side-by-side (나란히 비교)</b> 배치하여 직관적인 성과 대조를 강제한다.</li>
         <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
         <li><b>[시스템 규칙] 다중 계좌 스위칭:</b> Core와 Satellite 전략은 Streamlit Secrets에 저장된 완전히 다른 계좌 정보를 바라본다. 설정에 <code>is_mock</code> 항목이 누락될 경우, 실전(False)이 아닌 모의투자(True)로 강제 지정되어 사고를 막는다.</li>
         <li><b>[시스템 규칙] 가상원금 기반 과대 매수 차단:</b> 주문 수량 산출 시 <code>max(실제평가금, 가상원금)</code>을 사용하지 않는다. 실제 잔고가 0보다 크면 무조건 실제 평가금만을 베이스로 계산하여 계좌 잔고를 초과하는 주문 생성 자체를 막는다.</li>
