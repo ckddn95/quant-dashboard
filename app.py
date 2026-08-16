@@ -12,13 +12,9 @@ import quant_engine as quant
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
-# ==========================================
-# 🛑 [보안 패치 7 & 로그인 버그 픽스] bcrypt 기반 인증
-# ==========================================
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     if st.session_state["password_correct"]: return True
-
     hashed_pw_env = os.getenv("ADMIN_PASSWORD_HASH")
     if not hashed_pw_env:
         st.warning("⚠️ 초기 보안 설정: 관리자 비밀번호가 OS 환경변수에 없습니다.")
@@ -29,7 +25,6 @@ def check_password():
             st.code(f"export ADMIN_PASSWORD_HASH='{bcrypt.hashpw(new_pw.encode('utf-8'), salt).decode('utf-8')}'", language="bash")
             st.success("위 명령어를 서버 터미널에 입력하거나 .env 파일에 저장한 뒤 시스템을 재시작하세요.")
         st.stop()
-
     st.markdown("### 🔒 관리자 인증")
     pwd_input = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
@@ -79,7 +74,6 @@ display_options = list(STRAT_DISPLAY_MAP.values())
 current_display = STRAT_DISPLAY_MAP[active_strat]
 selected_display = st.sidebar.selectbox("운용 전략", display_options, index=display_options.index(current_display))
 selected_strat = [k for k, v in STRAT_DISPLAY_MAP.items() if v == selected_display][0]
-
 if selected_strat != active_strat: db.set_setting('strategy', selected_strat.value); st.rerun()
 
 total_cash = int(db.get_setting('virtual_cash', 10000000))
@@ -109,7 +103,6 @@ init_ks, init_at, init_ap = bool(db.get_setting('kill_switch', False)), bool(db.
 kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=init_ks)
 auto_trade = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at)
 auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기", value=init_ap)
-
 if kill_switch != init_ks: db.set_setting('kill_switch', kill_switch)
 if auto_trade != init_at: db.set_setting('auto_trade_enabled', auto_trade)
 if auto_pilot != init_ap: db.set_setting('auto_pilot', auto_pilot)
@@ -205,9 +198,6 @@ with tab1:
         display_df = pd.DataFrame(display_records)
         if not display_df.empty:
             st.data_editor(display_df.sort_values('🔥 점수', ascending=False).reset_index(drop=True).style.format({'🔥 점수': '{:.2f}'}), use_container_width=True)
-            if st.button("💾 변경된 내용 반영", type="primary"):
-                # 변경분 적용
-                pass 
 
 with tab2:
     st.header("🔌 실전 계좌 모니터링")
@@ -219,13 +209,10 @@ with tab2:
                 h, s, err = kis.fetch_kis_account_balance(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_ACNT_PRDT, token, SYS_IS_MOCK)
                 if err == "OK" and s:
                     c = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_ACNT_PRDT, token, SYS_IS_MOCK)
-                    safe_cash = c if c > 0 else 0.0 
+                    safe_cash = c if c > 0 else 0.0
                     new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': safe_cash, 'stocks': h}
                     st.session_state['real_data'] = new_rd; db.set_setting('last_real_data', new_rd)
-                    kis_stocks = [{'ticker': str(i['pdno']).zfill(6), 'qty': int(i['hldg_qty']), 'buy_price': float(i['pchs_avg_pric']), 'current_price': float(i['prpr'])} for i in h if int(i['hldg_qty']) > 0]
-                    try: db.sync_positions_from_broker(kis_stocks)
-                    except AttributeError: pass 
-                    st.success("잔고 동기화 완료! (자동매매 수량은 자체 원장을 따릅니다)"); time.sleep(0.5); st.rerun()
+                    st.success("잔고 동기화 완료!"); time.sleep(0.5); st.rerun()
                 else: st.error(err)
         
         c1, c2, c3, c4 = st.columns(4)
@@ -270,13 +257,10 @@ with tab3:
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[tk]['buy_date'])).days if tk in db_positions else 0
         
-        kis_qty = 0
-        kis_buy_p = 0.0
+        kis_qty, kis_buy_p = 0, 0.0
         for s in rd.get('stocks', []):
             if str(s.get('pdno', '')).zfill(6) == tk: 
-                kis_qty = int(s['hldg_qty'])
-                kis_buy_p = float(s['pchs_avg_pric'])
-                break
+                kis_qty, kis_buy_p = int(s['hldg_qty']), float(s['pchs_avg_pric']); break
                 
         display_qty = kis_qty if kis_qty > 0 else m_qty
         display_buy_p = kis_buy_p if kis_qty > 0 else buy_p
@@ -289,19 +273,15 @@ with tab3:
         buy_str = "추가 매수" if is_holding else "신규 매수"
         
         if "매도" in action or "청산" in action or "익절" in action:
-            if m_qty > 0: 
-                return {'분류': 0, '점수': score, '종목명': nm, '티커': tk, '상태': f"🔴 {action}", '현재가': cp, '주문수량': m_qty, '보유수량': display_qty, '평균단가': display_buy_p}
-            else: 
-                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 Managed 수량 없음 ({action})", '현재가': cp, '주문수량': 0, '보유수량': display_qty, '평균단가': display_buy_p}
+            if m_qty > 0: return {'분류': 0, '점수': score, '종목명': nm, '티커': tk, '상태': f"🔴 {action}", '현재가': cp, '주문수량': m_qty, '보유수량': display_qty, '평균단가': display_buy_p}
+            else: return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 Managed 수량 없음 ({action})", '현재가': cp, '주문수량': 0, '보유수량': display_qty, '평균단가': display_buy_p}
         elif "매수" in action:
             curr_pos_val = display_qty * cp
             needed_amt = max(0.0, target_buy_amt - curr_pos_val)
             allow_amt = min(net_usable_cash, needed_amt)
             add_qty = int(allow_amt // (cp * 1.0025)) if cp > 0 else 0
-            if add_qty > 0: 
-                return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '상태': f"🛒 {buy_str} 시그널 (승인 대기)", '현재가': cp, '주문수량': add_qty, '보유수량': display_qty, '평균단가': display_buy_p}
-            else: 
-                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 현금/한도 부족 ({buy_str} 시그널)", '현재가': cp, '주문수량': 0, '보유수량': display_qty, '평균단가': display_buy_p}
+            if add_qty > 0: return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '상태': f"🛒 {buy_str} 시그널 (승인 대기)", '현재가': cp, '주문수량': add_qty, '보유수량': display_qty, '평균단가': display_buy_p}
+            else: return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 현금/한도 부족 ({buy_str} 시그널)", '현재가': cp, '주문수량': 0, '보유수량': display_qty, '평균단가': display_buy_p}
         
         return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"👁️ {action}", '현재가': cp, '주문수량': 0, '보유수량': display_qty, '평균단가': display_buy_p}
 
@@ -316,11 +296,7 @@ with tab3:
         display_df = q_df[['종목명', '상태', '점수', '현재가', '주문수량', '보유수량', '평균단가']].copy()
         
         st.dataframe(display_df.style.format({
-            '점수': '{:.2f}',
-            '현재가': '{:,.0f}',
-            '주문수량': '{:,}',
-            '보유수량': '{:,}',
-            '평균단가': '{:,.2f}'
+            '점수': '{:.2f}', '현재가': '{:,.0f}', '주문수량': '{:,}', '보유수량': '{:,}', '평균단가': '{:,.2f}'
         }), use_container_width=True)
         
         if st.button("⚡ 대기열 일괄 주문 DB 기록", type="primary"):
@@ -334,50 +310,84 @@ with tab3:
                 if ok: success_count += 1
                 else: st.warning(f"⚠️ {r['종목명']} 거절됨: {msg}")
             if success_count > 0: st.success(f"✅ {success_count}건 주문 생성 완료!")
-            else: st.info("실행할 수 있는 유효한 주문 시그널(수량 확보)이 없습니다.")
+            else: st.info("실행할 수 있는 유효한 주문 시그널이 없습니다.")
     else: st.info("대기 중인 종목이 없습니다.")
     
     st.markdown("### 📊 실시간 체결 대사 현황")
     intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED', 'QUARANTINED'], SYS_CANO, ENV_STR)
     if intents: st.dataframe(pd.DataFrame(intents)[['ticker', 'order_type', 'qty', 'status', 'cum_filled_qty', 'resp_code']], use_container_width=True)
 
+# 🛑 [시뮬레이션 UI 패치] 미구현 엔진의 작동 차단 및 경고 강화
 with tab4:
     st.header("🧪 고급 백테스트 엔진")
-    st.warning("⚠️ [검증 상태: 미검증] 현재 백테스트 엔진 원본 코드가 제공되지 않아 기능이 보류되었습니다. LIVE 판단 및 실제 운용에 사용할 수 없습니다.")
+    st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
+    
     stocks_df = pd.DataFrame(db.get_watchlist(SYS_CANO, ENV_STR))
     today_date = datetime.datetime.now(KST).date()
     
-    st.subheader("🎯 Test 1. 단일 종목 정밀 분석")
+    st.subheader("🎯 테스트 1. 관심·보유종목 전략 매매 시뮬레이션")
+    st.info("현재 관심종목 및 보유종목을 과거 기간에 소급 적용하여 매매 결과를 회고하는 시나리오입니다.")
     t1_c1, t1_c2, t1_c3, t1_c4 = st.columns([2, 2, 2, 2])
-    with t1_c1: test_ticker = st.text_input("종목코드 (6자리)", "005930", key="t1_ticker")
+    with t1_c1: test_ticker = st.text_input("분석 대상 종목코드", "005930", key="t1_ticker")
     with t1_c2: start_d1 = st.date_input("시작일", datetime.date(2023, 1, 1), key="t1_start")
     with t1_c3: end_d1 = st.date_input("종료일", today_date, key="t1_end")
     with t1_c4:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        if st.button("단일 종목 Backtest 실행", type="primary", use_container_width=True):
-            res1 = quant.run_quant_simulation()
-            st.error(f"실행 불가: {res1['msg']}")
+        if st.button("테스트 1 실행", type="primary", use_container_width=True):
+            with st.spinner("단일/보유종목 시뮬레이션 구동 중... (T+1 체결, 0.25% All-in 비용 가정)"):
+                single_df = pd.DataFrame([{'티커': test_ticker.zfill(6), '종목명': '분석종목'}])
+                res1 = quant.run_quant_simulation(single_df, active_strat, total_cash, start_d1, end_d1, current_config, is_weekly_scan=False)
+                if res1.get('status') == 'success':
+                    st.success("시뮬레이션 완료!")
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.markdown(mts_metric_html("기말 자산", f"{res1['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                    r2.markdown(mts_metric_html("누적 수익률", f"{res1['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                    r3.markdown(mts_metric_html("CAGR", f"{res1['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
+                    r4.markdown(mts_metric_html("MDD", f"{res1['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res1['summary_rows']), use_container_width=True)
+                else: st.error(f"실행 불가: {res1['msg']}")
     st.markdown("---")
 
-    st.subheader("🎯 Test 2. 관심종목 대상 장기 검증")
+    st.subheader("🎯 테스트 2. AI 가상운용 vs 실제계좌 성과 비교")
+    st.info("최근 1년 동안 동일한 시작금액(현금)으로 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과입니다.")
     c1, c2, c3 = st.columns([3,3,4])
     with c1: start_d = st.date_input("시작일", datetime.date(2023,1,1), key="t2_start")
     with c2: end_d = st.date_input("종료일", today_date, key="t2_end")
     with c3:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        if st.button("장기 고급 Backtest 실행", type="primary", use_container_width=True):
-            res2 = quant.run_quant_simulation()
-            st.error(f"실행 불가: {res2['msg']}")
+        if st.button("테스트 2 실행 (주간 스캔)", type="primary", use_container_width=True):
+            if stocks_df.empty: st.error("관심종목 리스트에 종목이 없습니다.")
+            else:
+                with st.spinner("주간 유니버스 갱신 및 시뮬레이션 구동 중..."):
+                    res2 = quant.run_quant_simulation(stocks_df, active_strat, total_cash, start_d, end_d, current_config, is_weekly_scan=True)
+                    if res2.get('status') == 'success':
+                        st.success("완료!")
+                        r1, r2, r3, r4 = st.columns(4)
+                        r1.markdown(mts_metric_html("기말 자산", f"{res2['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                        r2.markdown(mts_metric_html("누적 수익률", f"{res2['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                        r3.markdown(mts_metric_html("CAGR", f"{res2['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
+                        r4.markdown(mts_metric_html("MDD", f"{res2['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
+                        st.dataframe(pd.DataFrame(res2['summary_rows']), use_container_width=True)
+                    else: st.error(f"실행 불가: {res2['msg']}")
     st.markdown("---")
 
-    st.subheader("🎯 Test 3. 연도별 실전 검증 (Yearly Walk-Forward)")
+    st.subheader("🎯 테스트 3. 과거연도 자동매매 재현 시뮬레이션")
+    st.info("선택한 특정 연도의 전체 기간 동안 AI가 주간 단위로 운용했을 때의 결과입니다.")
     t3_c1, t3_c2 = st.columns([3, 7])
     with t3_c1: test_year = st.selectbox("검증 연도 선택", [2022, 2023, 2024, 2025, 2026], index=4)
     with t3_c2:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        if st.button(f"{test_year}년 연도별 Backtest 실행", type="primary"):
-            res3 = quant.run_yearly_realistic_backtest()
-            st.error(f"실행 불가: {res3['msg']}")
+        if st.button(f"테스트 3 실행 ({test_year}년)", type="primary"):
+            with st.spinner(f"{test_year}년도 시뮬레이션 구동 중..."):
+                res3 = quant.run_yearly_realistic_backtest(active_strat, total_cash, test_year, current_config)
+                if res3.get('status') == 'success':
+                    st.success(f"{test_year}년 검증 완료!")
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.markdown(mts_metric_html("기말 자산", f"{res3['final_asset']:,.0f} 원"), unsafe_allow_html=True)
+                    r2.markdown(mts_metric_html("누적 수익률", f"{res3['final_port_ret']:+.2f}%"), unsafe_allow_html=True)
+                    r3.markdown(mts_metric_html("CAGR", f"{res3['metrics']['CAGR']*100:+.2f}%"), unsafe_allow_html=True)
+                    r4.markdown(mts_metric_html("MDD", f"{res3['metrics']['MDD']*100:.2f}%"), unsafe_allow_html=True)
+                else: st.error(f"실행 불가: {res3['msg']}")
 
 with tab5:
     st.markdown("""
@@ -421,9 +431,12 @@ with tab5:
         <li><b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행(Single-flight)으로 갱신된다.</li>
     </ul>
 
-    <h3>⏱️ 6. 백테스트 체결 규칙 (Backtest Execution Rules)</h3>
+    <h3>⏱️ 6. 시뮬레이션 및 백테스트 실행 규칙 (Simulation Execution Rules)</h3>
     <ul>
-        <li><b>T+1 체결 반영 완료:</b> 신호 발생 당일(T일)의 종가로 체결되는 룩어헤드 편향(Look-ahead Bias)을 제거한다. 모든 신호는 다음 영업일(T+1)의 시가(Open)로 체결된다. (현재 엔진 미구현)</li>
+        <li><b>[시스템 규칙] 시뮬레이션 T+1 체결 반영 완료:</b> 신호 발생 당일(T일)의 종가로 체결되는 룩어헤드 편향(Look-ahead Bias)을 제거한다. 모든 신호는 다음 유효 영업일(T+1)의 시가(Open)로 정확하게 체결된다.</li>
+        <li><b>[시스템 규칙] 비용 가정 (Cost Assumption):</b> 실제 KIS 브로커 체결 데이터가 없는 시뮬레이션 단계에서는, 매수와 매도 각각 수수료/세금/시장충격을 모두 포함하여 보수적인 <b>All-in 0.25% (왕복 0.50%)</b>의 비용률을 강제 적용한다.</li>
+        <li><b>[시스템 규칙] 장중 보수적 손절/익절 (Adverse-first):</b> 과거 일봉 데이터만으로 장중 High/Low 순서를 알 수 없는 경우, 가장 불리한 방향인 <b>손절컷(SL)을 우선 타격</b>한 것으로 가정하여 생존 편향을 억제한다.</li>
+        <li><b>[시스템 규칙] 주간 스캔 (Weekly Scan):</b> 연산량 절감 및 현실적 매매 빈도 조절을 위해, 테스트 2와 3의 신규 진입 종목 스캔은 매주 마지막 거래일(금요일) 종가 기준으로 주 1회만 실시하되, 기존 보유 종목에 대한 위험 감시(SL/TS)는 매일 수행한다.</li>
         <li>휴장일, 거래정지일에는 가짜 체결이나 거래량 Forward-fill을 금지한다.</li>
     </ul>
 
@@ -431,12 +444,8 @@ with tab5:
     <ul>
         <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
         <li><b>[시스템 규칙] 다중 계좌 스위칭:</b> Core와 Satellite 전략은 Streamlit Secrets에 저장된 완전히 다른 계좌 정보를 바라본다. 설정에 <code>is_mock</code> 항목이 누락될 경우, 실전(False)이 아닌 모의투자(True)로 강제 지정되어 사고를 막는다.</li>
-        <li><b>[시스템 규칙] 가상원금 기반 과대 매수 차단:</b> 주문 수량 산출 시 <code>max(실제평가금, 가상원금)</code>을 사용하지 않는다. 실제 잔고가 0보다 크면 무조건 실제 평가금만을 베이스로 계산하여 계좌 잔고를 초과하는 주문 생성 자체를 막는다.</li>
         <li><b>[시스템 규칙] Fail-closed (안전 우선 차단):</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 발생을 방어한다.</li>
-        <li><b>[시스템 규칙] 투명한 대기열 및 정렬:</b> 당장 매수/매도 시그널이 발생하지 않더라도 시스템의 판단(현금 부족, 타점 미달 등)을 큐에 모두 표시하여 관측성을 높인다. 큐는 항상 <code>매도(0) ➔ 매수(1) ➔ 관망(2)</code> 순서로 자동 정렬된다.</li>
         <li><b>[시스템 규칙] 대기열 뷰 확장 및 추가 매수 구분:</b> 사용자의 직관적인 판단을 위해 대기열에 종목의 '주문수량'뿐만 아니라 '현재 보유수량'과 '평균단가'를 실시간 대조하여 렌더링한다. 또한 이미 보유 중인 종목에 매수 시그널이 발생할 경우 단순 매수 시그널이 아닌 '추가 매수'로 명확히 구분하여 표기한다.</li>
-        <li><b>[시스템 규칙] 예외 처리 충돌 방어:</b> Streamlit의 <code>st.rerun()</code> 동작이 포괄적 <code>except:</code> 구문에 걸려 로직이 멈추는 것을 방지하기 위해, 에러 캐치 시 반드시 <code>ValueError</code> 등 명확한 Exception Class를 지정하여 처리한다.</li>
-        <li><b>[시스템 규칙] 백테스트 허위 표시 금지:</b> 백테스트 엔진(수학 로직)이 아직 시스템에 구현되지 않았을 때는, UI 화면에 반드시 "미검증 / LIVE 판단 사용 금지"라는 경고 문구를 띄워 사용자에게 거짓된 정보를 주지 않아야 한다.</li>
         <li><b>[UI/UX 포맷팅 절대 규칙]</b> 데이터 가독성과 직관성을 위해, 계좌 표의 수익률은 양수일 경우 적색(<code>#FF5050</code>), 음수일 경우 청색(<code>#3b82f6</code>)으로 하드코딩 스타일링한다. AI 스코어, 이격도, 평균단가 등 변동성이 있는 지표는 반드시 소수점 둘째 자리(<code>.2f</code>)로 고정 노출하고, 현재가 및 수량은 정수 콤마 포맷(<code>,.0f</code>)을 적용하여 시각적 혼란을 방지한다.</li>
     </ul>
 
