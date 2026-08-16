@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from quant_engine import OrderSpec
 
-DB_PATH = os.path.abspath("quant_system.db") # 절대경로 강제 (동기화 폴더 회피)
+DB_PATH = os.path.abspath("quant_system.db")
 
 ALLOWED_TRANSITIONS = {
     'INTENT_CREATED': ['CLAIMED', 'CANCELED', 'QUARANTINED'],
@@ -48,17 +48,14 @@ def migrate_db():
         if v < 2:
             c = conn.cursor()
             try:
-                # 🛑 [핵심 패치] 계좌/포트폴리오 스코프 강제 주입
                 c.execute("ALTER TABLE order_intents ADD COLUMN account_id TEXT DEFAULT 'UNKNOWN'")
                 c.execute("ALTER TABLE order_intents ADD COLUMN environment TEXT DEFAULT 'UNKNOWN'")
                 c.execute("ALTER TABLE order_intents ADD COLUMN portfolio_id TEXT DEFAULT 'DEFAULT'")
                 c.execute("ALTER TABLE order_intents ADD COLUMN strategy_id TEXT DEFAULT 'UNKNOWN'")
                 c.execute("ALTER TABLE positions ADD COLUMN managed_qty INTEGER DEFAULT 0")
                 c.execute("ALTER TABLE positions ADD COLUMN manual_qty INTEGER DEFAULT 0")
-                # 레거시 인텐트 영구 격리
                 c.execute("UPDATE order_intents SET status='QUARANTINED' WHERE status IN ('INTENT_CREATED', 'CLAIMED') AND account_id='UNKNOWN'")
             except: pass
-            # 보안 패치
             c.execute("DELETE FROM settings WHERE key IN ('manual_app_key', 'manual_app_secret', 'manual_cano', 'manual_is_mock')")
             conn.execute("PRAGMA user_version = 2")
         conn.commit()
@@ -101,12 +98,6 @@ def safe_add_order_intent(spec: OrderSpec) -> tuple[bool, str]:
     try:
         with get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if spec.side == "BUY":
-                open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED')"
-                r = conn.execute(f"SELECT SUM((qty - cum_filled_qty) * price) as locked FROM order_intents WHERE account_id=? AND environment=? AND order_type LIKE '%BUY%' AND status IN {open_states}", (spec.account_id, spec.environment)).fetchone()
-                locked_cash = float(r['locked']) if r['locked'] else 0.0
-                # 현금 초과 여부는 preflight에서 2차 검증하므로 여기선 Insert 시도
-            
             conn.execute("""INSERT INTO order_intents 
                 (correlation_id, idempotency_key, account_id, environment, portfolio_id, strategy_id, ticker, order_type, qty, price, status, created_at, updated_at) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'INTENT_CREATED', ?, ?)""", 
@@ -114,7 +105,7 @@ def safe_add_order_intent(spec: OrderSpec) -> tuple[bool, str]:
                  str(spec.ticker).zfill(6), spec.side, spec.quantity, spec.limit_price, spec.intent_created_at, spec.intent_created_at))
             conn.commit()
             return True, "OK"
-    except sqlite3.IntegrityError: return False, "Idempotency 차단 (중복 주문)"
+    except sqlite3.IntegrityError: return False, "Idempotency 차단 (중복 주문 방어)"
     except Exception as e: return False, str(e)
 
 def claim_next_order(account_id, env):
@@ -142,7 +133,6 @@ def transition_order_status(order_id, current_status, new_status, broker_id=None
         conn.commit()
         return conn.total_changes > 0
 
-# 🛑 [핵심 패치] 누적 체결 Exactly-once 반영 및 Managed Qty 델타 연산
 def apply_fill_delta_exactly_once(order_id, ticker, order_type, new_cum_qty, new_cum_avg_price):
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -150,15 +140,12 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, new_cum_qty, new
         if not o_row: return False
         
         delta_qty = new_cum_qty - o_row['cum_filled_qty']
-        if delta_qty <= 0: return False # 중복 처리 방어
+        if delta_qty <= 0: return False 
         
-        # 1. 누적 데이터 갱신
         new_status = 'FILLED' if new_cum_qty >= o_row['qty'] else 'PARTIALLY_FILLED'
-        # 취소된 주문의 늦은 체결 처리
         if o_row['status'] in ['CANCEL_REQUESTED', 'CANCEL_ACKNOWLEDGED', 'CANCELED']: new_status = o_row['status'] 
         conn.execute("UPDATE order_intents SET cum_filled_qty=?, avg_fill_price=?, status=?, updated_at=? WHERE id=?", (new_cum_qty, new_cum_avg_price, new_status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), order_id))
 
-        # 2. Managed Position Delta 반영
         p_row = conn.execute("SELECT managed_qty, buy_price FROM positions WHERE ticker=?", (ticker,)).fetchone()
         p_qty, p_buy = p_row['managed_qty'] if p_row else 0, p_row['buy_price'] if p_row else 0.0
 
@@ -199,3 +186,6 @@ def get_locked_cash_and_qty(account_id, env, ticker=None):
             r2 = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as locked_qty FROM order_intents WHERE account_id=? AND environment=? AND ticker=? AND order_type='SELL' AND status IN {open_states}", (account_id, env, ticker)).fetchone()
             locked_sell_qty = int(r2['locked_qty']) if r2['locked_qty'] else 0
         return locked_cash, locked_sell_qty
+
+def sync_positions_from_broker(kis_stocks):
+    pass # 백서 9조에 따라 전용 reconciler 개발 시점까지 보류 (수동 보유분 승격 차단)
