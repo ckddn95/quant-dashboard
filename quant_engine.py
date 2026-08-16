@@ -84,9 +84,21 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
         
     return True, "PASS"
 
+# 🛑 [스캐너 고속화 패치] FDR 무한 대기 방지 메모리 캐싱 
+_fdr_cache = {}
+
 def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy_price: float=0, highest_price: float=0, c_price: float=0, high_p: float=0, low_p: float=0, is_halted: bool=False, days_held: int=0):
     try:
-        df = fdr.DataReader(str(ticker).zfill(6), start=(datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'))
+        start_d = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
+        cache_key = f"{ticker}_{start_d}"
+        
+        # 캐싱 로직으로 스캐너 속도 대폭 상향
+        if cache_key in _fdr_cache:
+            df = _fdr_cache[cache_key]
+        else:
+            df = fdr.DataReader(str(ticker).zfill(6), start=start_d)
+            _fdr_cache[cache_key] = df
+            
         if df.empty: return c_price, "분석 불가", 0.0, "과거 데이터 없음"
         
         fdr_close, fdr_high, fdr_low = float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
@@ -102,22 +114,23 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         snap.validate(is_halted)
         if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, snap.reason
             
+        # 🛑 [용어 복구] 백서에 명시된 엄격한 한글 단어로 100% 롤백
         if buy_price > 0:
             sl_target = buy_price * (1.0 + cfg.sl)
             ts_target = max(highest_price, snap.high_price) * (1.0 + cfg.ts_drp)
-            if snap.low_price <= sl_target: return snap.current_price, "🔴 장중 손절컷", 999.0, "SL Hit"
-            if max(highest_price, snap.high_price) >= buy_price * (1.0 + cfg.ts_tgt) and snap.low_price <= ts_target: return snap.current_price, "🔵 트레일링 익절", 999.0, "TS Hit"
-            if days_held >= cfg.min_h and snap.current_price < (snap.ma60 if strat == Strategy.CORE else snap.ma20) * (1.0 - cfg.buf/2.0): return snap.current_price, "🔴 종가 추세이탈", 999.0, "Trend Breakdown"
+            if snap.low_price <= sl_target: return snap.current_price, "🔴 장중 손절컷", 999.0, "장중 손절컷 터치"
+            if max(highest_price, snap.high_price) >= buy_price * (1.0 + cfg.ts_tgt) and snap.low_price <= ts_target: return snap.current_price, "🔵 트레일링 익절", 999.0, "트레일링 익절 터치"
+            if days_held >= cfg.min_h and snap.current_price < (snap.ma60 if strat == Strategy.CORE else snap.ma20) * (1.0 - cfg.buf/2.0): return snap.current_price, "🔴 종가 추세이탈", 999.0, "종가 추세이탈"
             
         pass_ma200 = (snap.current_price >= snap.ma200) if cfg.ma200 else True
         if strat == Strategy.CORE:
             dist = (snap.ma20 / snap.ma60) - 1.0 if snap.ma60 > 0 else 0.0
-            if pass_ma200 and dist >= cfg.buf and snap.m60_up: return snap.current_price, "🟢 매수 시그널 발생", min(85.0 + max(0.0, dist * 100.0), 99.0), "GC"
+            if pass_ma200 and dist >= cfg.buf and snap.m60_up: return snap.current_price, "🟢 매수 시그널 발생", min(85.0 + max(0.0, dist * 100.0), 99.0), f"골든크로스 (이격도 {dist*100:+.1f}%)"
         else:
             dist = (snap.current_price / snap.ma20) - 1.0 if snap.ma20 > 0 else 0.0
-            if pass_ma200 and -0.05 <= dist <= 0.03: return snap.current_price, "🟢 매수 시그널 발생", min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), "Pullback"
+            if pass_ma200 and -0.05 <= dist <= 0.03: return snap.current_price, "🟢 매수 시그널 발생", min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), f"눌림목 (이격도 {dist*100:+.1f}%)"
         
-        return snap.current_price, "🟡 모니터링 유지", 50.0, "대기"
+        return snap.current_price, "🟡 모니터링 유지", 50.0, "관망 대기"
     except Exception as e: return c_price, "에러", 0.0, str(e)
 
 def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
