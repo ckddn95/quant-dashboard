@@ -12,6 +12,9 @@ import quant_engine as quant
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
+# ==========================================
+# 🛑 [보안 패치 7 & 로그인 버그 픽스] bcrypt 기반 인증
+# ==========================================
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     if st.session_state["password_correct"]: return True
@@ -34,7 +37,8 @@ def check_password():
             if bcrypt.checkpw(pwd_input.encode('utf-8'), hashed_pw_env.encode('utf-8')):
                 st.session_state["password_correct"] = True; st.rerun()
             else: st.error("비밀번호가 일치하지 않습니다.")
-        except: st.error("서버 설정 오류: 잘못된 형식의 해시값입니다.")
+        # ✅ 포괄적 except 대신 ValueError만 잡아 스트림릿 RerunException 충돌 해결 (첫 클릭 즉시 접속)
+        except ValueError: st.error("서버 설정 오류: 잘못된 형식의 해시값입니다.")
     return False
 
 if not check_password(): st.stop()
@@ -158,7 +162,6 @@ with tab1:
                 c1.markdown(f"`{m_code}` **{m_name}**")
                 if m_code not in current_tickers and c2.button("➕ 등록", key=f"add_{m_code}"): db.add_to_watchlist(m_code, m_name); st.rerun()
 
-    # 🛑 [스캐너 복원] UI 연결 정상화 (pass 제거)
     if st.session_state.get('show_scanner'):
         with st.spinner("AI 검색 중..."):
             scan_res = quant.run_scanner_safe(active_strat, current_config)
@@ -339,7 +342,6 @@ with tab4:
             res3 = quant.run_yearly_realistic_backtest()
             st.error(f"실행 불가: {res3['msg']}")
 
-# 🛑 [백서 복원] 어떠한 축약도 없이 원문 100% 보존
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
