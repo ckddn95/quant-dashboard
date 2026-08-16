@@ -234,6 +234,7 @@ with tab3:
     c3.metric("💵 가용 현금", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
+    # 가상원금 과대산정 방어 (max 제거)
     base_eval = rd['eval'] if rd['eval'] > 0 else float(total_cash)
     target_buy_amt = base_eval * current_config.alloc
     locked_cash, _ = db.get_locked_cash_and_qty(SYS_CANO, ENV_STR)
@@ -375,7 +376,7 @@ with tab5:
     <ul>
         <li><b>Core:</b> 버퍼 1.5%, 손절 -15%, 종목당 투입 한도 35%, 익절목표 30%, 하락허용 -10%, 쿨다운 60일, 최소보유 5일.</li>
         <li><b>Satellite:</b> 버퍼 1.0%, 손절 -12%, 종목당 투입 한도 20%, 익절목표 20%, 하락허용 -7%, 쿨다운 30일, 최소보유 3일.</li>
-        <li><b>[중요] 파라미터 무결성 경계값 보장:</b> <code>NaN</code>, <code>Inf</code>는 시스템 폭주를 유발하므로 엔진단에서 즉시 차단(에러)한다. 손절컷(<code>sl</code>)과 트레일링 하락허용(<code>ts_drp</code>)은 시스템상 <b>반드시 음수(-)</b>로 설정되어야 하며, 투입 한도(<code>alloc</code>)는 0 초과 1.0 이하의 비율, 쿨다운과 최소보유일은 0 이상의 정수만 허용하여 파라미터 조작으로 인한 오작동을 원천 봉쇄한다.</li>
+        <li><b>[시스템 규칙] 파라미터 무결성 경계값 보장:</b> <code>NaN</code>, <code>Inf</code>는 시스템 폭주를 유발하므로 엔진단에서 즉시 차단(에러)한다. 손절컷(<code>sl</code>)과 트레일링 하락허용(<code>ts_drp</code>)은 시스템상 <b>반드시 음수(-)</b>로 설정되어야 하며, 투입 한도(<code>alloc</code>)는 0 초과 1.0 이하의 비율, 쿨다운과 최소보유일은 0 이상의 정수만 허용하여 파라미터 조작으로 인한 오작동을 원천 봉쇄한다.</li>
     </ul>
 
     <h3>🛡️ 4. 3대 고급 안전장치 및 장중 손절/트레일링 규칙</h3>
@@ -389,7 +390,7 @@ with tab5:
     <h3>🔄 5. API 호출 규칙 및 주문 상태 머신 (API & State Machine)</h3>
     <ul>
         <li><b>단방향 전이 원칙:</b> UI는 API를 직접 호출하지 않는다. <code>INTENT_CREATED</code> ➔ <code>CLAIMED</code> ➔ <code>SUBMITTING</code> ➔ <code>ACKNOWLEDGED</code>의 단방향 Dureble 상태 전이만을 허용한다.</li>
-        <li><b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향, 티커가 조합된 Idempotency Key를 통해 다중 브라우저 또는 다중 워커에 의한 중복 제출(Double POST)을 원천 차단한다.</li>
+        <li><b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향, 티커가 조합된 Idempotency Key를 통해 다중 브라우저 또는 다중 워커에 의한 중복 제출(Double POST)을 원천 차단한다. UI에서 '일괄 주문' 클릭 시에도 관망 상태인 종목은 DB에 삽입되지 않도록 사전 필터링된다.</li>
         <li><b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행(Single-flight)으로 갱신된다.</li>
     </ul>
 
@@ -401,10 +402,12 @@ with tab5:
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
-        <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
-        <li><b>[중요] Fail-closed (안전 우선 차단) 원칙:</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 및 초과 매수 사고를 철저히 차단한다.</li>
-        <li><b>[중요] 투명한 대기열 노출 (Observability):</b> 당장 매수/매도 시그널이 발생하지 않은 관심종목이나 보유종목이라도 대기열 화면에서 임의로 숨기지 않는다. '현금 부족', '보유수량 없음', '관망 유지' 등 현재 상태와 사유를 100% 투명하게 표기하여 알고리즘의 판단 과정을 실시간으로 확인할 수 있도록 보장한다.</li>
-        <li><b>[중요] 정밀한 예외 처리:</b> Streamlit의 화면 새로고침 <code>st.rerun()</code> 시그널과의 충돌을 방지하기 위해 코드 내에 포괄적인 <code>except:</code> 사용을 원천 금지한다. 반드시 <code>ValueError</code> 등 명확한 에러 클래스만을 포착하여, '로그인 두 번 클릭' 버그와 같은 UI 제어 오작동을 차단한다.</li>
+        <li><b>[시스템 규칙] 다중 계좌 스위칭:</b> Core와 Satellite 전략은 Streamlit Secrets에 저장된 완전히 다른 계좌 정보를 바라본다. 설정에 <code>is_mock</code> 항목이 누락될 경우, 실전(False)이 아닌 모의투자(True)로 강제 지정되어 사고를 막는다.</li>
+        <li><b>[시스템 규칙] 가상원금 기반 과대 매수 차단:</b> 주문 수량 산출 시 <code>max(실제평가금, 가상원금)</code>을 사용하지 않는다. 실제 잔고가 0보다 크면 무조건 실제 평가금만을 베이스로 계산하여 계좌 잔고를 초과하는 주문 생성 자체를 막는다.</li>
+        <li><b>[시스템 규칙] Fail-closed (안전 우선 차단):</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 발생을 방어한다.</li>
+        <li><b>[시스템 규칙] 투명한 대기열 및 정렬:</b> 당장 매수/매도 시그널이 발생하지 않더라도 시스템의 판단(현금 부족, 타점 미달 등)을 큐에 모두 표시하여 관측성을 높인다. 큐는 항상 <code>매도(0) ➔ 매수(1) ➔ 관망(2)</code> 순서로 자동 정렬된다.</li>
+        <li><b>[시스템 규칙] 예외 처리 충돌 방어:</b> Streamlit의 <code>st.rerun()</code> 동작이 포괄적 <code>except:</code> 구문에 걸려 로직이 멈추는 것을 방지하기 위해, 에러 캐치 시 반드시 <code>ValueError</code> 등 명확한 Exception Class를 지정하여 처리한다.</li>
+        <li><b>[시스템 규칙] 백테스트 허위 표시 금지:</b> 백테스트 엔진(수학 로직)이 아직 시스템에 구현되지 않았을 때는, UI 화면에 반드시 "미검증 / LIVE 판단 사용 금지"라는 경고 문구를 띄워 사용자에게 거짓된 정보를 주지 않아야 한다.</li>
     </ul>
 
     <h3>🗄️ 8. 데이터베이스 스키마 (Database & Integrity)</h3>
@@ -424,10 +427,12 @@ with tab5:
         <li><b>API Key 물리적 격리 (Zero Plaintext):</b> 증권사 <code>APP_KEY</code>, <code>APP_SECRET</code>, <code>CANO</code> 등의 민감한 정보는 절대 Google Sheets나 SQLite, 애플리케이션 로그에 평문으로 저장하지 않는다. 오직 OS가 제공하는 <b>환경변수(Environment Variables)</b> 또는 Streamlit의 <code>Secret Store</code> 메모리 영역에서만 동적으로 바인딩하여 사용한다.</li>
         <li><b>강력한 해시 인증 (Bcrypt Authentication):</b> 시스템 로그인에 사용되는 기본 비밀번호 0000이나 URL 쿼리 파라미터 인증을 전면 폐기하고, Salt가 포함된 <b>Argon2id 또는 Bcrypt 해시 알고리즘</b>을 통해서만 검증을 수행한다. 관리자 비밀번호 해시값 역시 OS 환경변수(<code>ADMIN_PASSWORD_HASH</code>)에 보관된다.</li>
         <li><b>안전한 기본값 보장 (Safe Defaults):</b> DB가 훼손되거나 데이터가 초기화된 엣지 케이스 상황에서도, 시스템의 <code>kill_switch</code>, <code>auto_trade</code>, <code>auto_pilot</code> 등 봇을 제어하는 핵심 변수들은 항상 <code>False</code> 상태의 안전한 기본값을 반환하여 오작동 폭주를 차단한다.</li>
-        <li><b>런타임 무결성 (Runtime Stability):</b> 데몬 프로세스인 <code>bot.py</code>는 메모리 누수를 막기 위해 필수 모듈인 <code>sqlite3</code>를 파일 최상단에 명시적으로 임포트하며, 표준 실행 블록인 <code>if __name__ == "__main__":</code> 환경 내에서만 격리되어 실행된다.</li>
     </ul>
 
     <hr>
-    <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 (절대 원칙)</h3>
-    <p style='color: #DC2626;'>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~10 전체 내용(투자 대원칙, 전략 공식, 기본 파라미터 제한, UI 관측성 확보 의무 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b> 어떤 이유로든 원칙을 수정하거나 코드가 길어져 축약해야만 하는 상황이 발생하면, 반드시 코드를 수정하기 전 사용자에게 명확히 보고하고 <b>명시적 승인</b>을 얻어야 합니다.</p>
+    <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 및 자동 문서화 (절대 원칙)</h3>
+    <ul style='color: #DC2626;'>
+        <li>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~10 전체 내용(투자 대원칙, 전략 공식, UI 규칙, 방어 로직 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b></li>
+        <li><b>[자동 문서화 헌장]:</b> 향후 시스템의 로직, 파라미터, UI/UX 규칙을 새롭게 추가하거나 변경할 경우(단순 오타 수정 제외), <b>사용자가 따로 요청하지 않더라도 AI는 반드시 그 변경 사항과 사유를 이 백서(해당하는 Part)에 자동으로 업데이트하여 기록해야 합니다.</b> 이 백서는 시스템의 단일 진실 공급원(Single Source of Truth)으로 취급되어야 합니다.</li>
+    </ul>
     """, unsafe_allow_html=True)
