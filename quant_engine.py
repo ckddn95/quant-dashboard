@@ -3,7 +3,6 @@ import numpy as np
 import FinanceDataReader as fdr
 import datetime
 import math
-import uuid
 import concurrent.futures
 from enum import Enum
 from dataclasses import dataclass
@@ -81,7 +80,6 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
     if order_spec.limit_price > 0 and snap.current_price > 0:
         dev = abs((snap.current_price / order_spec.limit_price) - 1.0)
         if dev > 0.03: return False, f"Price Deviation > 3%"
-        
     return True, "PASS"
 
 _fdr_cache = {}
@@ -90,12 +88,8 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
     try:
         start_d = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
         cache_key = f"{ticker}_{start_d}"
-        
-        if cache_key in _fdr_cache:
-            df = _fdr_cache[cache_key]
-        else:
-            df = fdr.DataReader(str(ticker).zfill(6), start=start_d)
-            _fdr_cache[cache_key] = df
+        if cache_key in _fdr_cache: df = _fdr_cache[cache_key]
+        else: df = fdr.DataReader(str(ticker).zfill(6), start=start_d); _fdr_cache[cache_key] = df
             
         if df.empty: return c_price, "분석 불가", 0.0, "과거 데이터 없음"
         
@@ -122,7 +116,6 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         pass_ma200 = (snap.current_price >= snap.ma200) if cfg.ma200 else True
         if strat == Strategy.CORE:
             dist = (snap.ma20 / snap.ma60) - 1.0 if snap.ma60 > 0 else 0.0
-            # 🛑 [신규 패치] 스코어 및 이격도 소수점 2자리 엄격 제한
             if pass_ma200 and dist >= cfg.buf and snap.m60_up: 
                 return snap.current_price, "🟢 매수 시그널 발생", round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스 (이격도 {dist*100:+.2f}%)"
         else:
@@ -130,7 +123,6 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
             if pass_ma200 and -0.05 <= dist <= 0.03: 
                 return snap.current_price, "🟢 매수 시그널 발생", round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목 (이격도 {dist*100:+.2f}%)"
         
-        # 🛑 [신규 패치] 관망 시 이격도 소수점 2자리 엄격 제한
         dist_eval = (snap.current_price / snap.ma20) - 1.0 if snap.ma20 > 0 else 0.0
         return snap.current_price, "🟡 모니터링 유지", 50.0, f"이격도 {dist_eval*100:+.2f}%"
     except Exception as e: return c_price, "에러", 0.0, str(e)
@@ -152,8 +144,162 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
     if not res_df.empty and 'AI 스코어' in res_df.columns: return res_df.sort_values('AI 스코어', ascending=False)
     return pd.DataFrame()
 
-def run_quant_simulation(*args, **kwargs):
-    return {"error": "NOT_IMPLEMENTED", "msg": "백테스트 원본 미제공. 구현 상태: 미완료."}
+# ==========================================
+# 🛑 [시뮬레이션 엔진] 이벤트 기반 T+1 체결 백테스터
+# ==========================================
+def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_cash: float, start_date: datetime.date, end_date: datetime.date, cfg: StrategyConfig, is_weekly_scan: bool = False):
+    try:
+        if target_stocks_df.empty: return {"status": "error", "msg": "분석 대상 종목이 없습니다."}
+        
+        tickers = target_stocks_df['티커'].astype(str).str.zfill(6).tolist()
+        dfs = {}
+        # Warm-up 데이터 확보를 위해 시작일 1년 전부터 로드
+        fetch_start = start_date - datetime.timedelta(days=365)
+        
+        for tk in tickers:
+            df = fdr.DataReader(tk, start=fetch_start, end=end_date)
+            if not df.empty:
+                df['MA20'] = df['Close'].rolling(20).mean()
+                df['MA60'] = df['Close'].rolling(60).mean()
+                df['MA200'] = df['Close'].rolling(200).mean()
+                df['M60_UP'] = df['MA60'] > df['Close'].rolling(60).mean().shift(10)
+                dfs[tk] = df
+        
+        if not dfs: return {"status": "error", "msg": "POINT_IN_TIME_DATA_UNAVAILABLE: 데이터를 불러올 수 없습니다."}
+        
+        # 시뮬레이션 캘린더 (실제 거래일)
+        calendar = sorted(list(set(dfs[list(dfs.keys())[0]].index)))
+        calendar = [d for d in calendar if d.date() >= start_date and d.date() <= end_date]
+        
+        cash = float(init_cash)
+        positions = {} # {ticker: {"qty": int, "buy_price": float, "highest": float, "days": int}}
+        nav_history = []
+        pending_orders = [] # [{"ticker", "side", "qty"}]
+        
+        assumed_cost_pct = 0.0025 # 0.25% All-in 추정 비용 (수수료+세금+슬리피지)
+        
+        for i, current_date in enumerate(calendar):
+            # 1. T+1 아침: 전일 발생한 pending_orders 체결 (시가 기준)
+            executed_today = []
+            for order in pending_orders:
+                tk = order['ticker']
+                if tk not in dfs or current_date not in dfs[tk].index: continue
+                open_p = dfs[tk].loc[current_date, 'Open']
+                if pd.isna(open_p) or open_p <= 0: continue # 거래정지/데이터누락 차단
+                
+                if order['side'] == 'BUY':
+                    cost_price = open_p * (1.0 + assumed_cost_pct)
+                    if cash >= cost_price * order['qty']:
+                        cash -= cost_price * order['qty']
+                        if tk in positions:
+                            old_qty, old_bp = positions[tk]['qty'], positions[tk]['buy_price']
+                            new_qty = old_qty + order['qty']
+                            new_bp = ((old_qty * old_bp) + (order['qty'] * cost_price)) / new_qty
+                            positions[tk] = {"qty": new_qty, "buy_price": new_bp, "highest": cost_price, "days": 0}
+                        else:
+                            positions[tk] = {"qty": order['qty'], "buy_price": cost_price, "highest": cost_price, "days": 0}
+                elif order['side'] == 'SELL' and tk in positions:
+                    sell_price = open_p * (1.0 - assumed_cost_pct)
+                    cash += sell_price * positions[tk]['qty']
+                    del positions[tk]
+            
+            pending_orders = []
+            
+            # 2. 장중(Intraday) 보수적 위험 감시 (Adverse-first)
+            sell_signals = []
+            for tk, pos in list(positions.items()):
+                if current_date not in dfs[tk].index: continue
+                row = dfs[tk].loc[current_date]
+                pos['days'] += 1
+                pos['highest'] = max(pos['highest'], row['High'])
+                
+                sl_target = pos['buy_price'] * (1.0 + cfg.sl)
+                ts_target = pos['highest'] * (1.0 + cfg.ts_drp)
+                
+                hit_sl = row['Low'] <= sl_target
+                hit_ts = (pos['highest'] >= pos['buy_price'] * (1.0 + cfg.ts_tgt)) and (row['Low'] <= ts_target)
+                
+                sell_price = 0.0
+                if hit_sl and hit_ts: sell_price = min(row['Open'], sl_target) # SL 우선
+                elif hit_sl: sell_price = min(row['Open'], sl_target)
+                elif hit_ts: sell_price = min(row['Open'], ts_target)
+                
+                if sell_price > 0:
+                    cash += sell_price * pos['qty'] * (1.0 - assumed_cost_pct)
+                    del positions[tk]
+                    continue
+                
+                # 종가 추세이탈 판정 (당일 종가 확인 후 익일 시가 매도 주문 생성)
+                if pos['days'] >= cfg.min_h:
+                    if strat == Strategy.CORE and row['Close'] < row['MA60'] * (1.0 - cfg.buf/2.0):
+                        sell_signals.append({"ticker": tk, "side": "SELL", "qty": pos['qty']})
+                    elif strat == Strategy.SATELLITE and row['Close'] < row['MA20'] * (1.0 - cfg.buf/2.0):
+                        sell_signals.append({"ticker": tk, "side": "SELL", "qty": pos['qty']})
+            
+            pending_orders.extend(sell_signals)
+            
+            # 3. 일말 NAV 계산
+            daily_eval = cash
+            for tk, pos in positions.items():
+                if current_date in dfs[tk].index: daily_eval += pos['qty'] * dfs[tk].loc[current_date, 'Close']
+            nav_history.append({"Date": current_date, "NAV": daily_eval})
+            
+            # 4. 장 마감 후 신규 진입 스캔 (Test 1은 매일, Test 2/3은 금요일)
+            is_friday = current_date.weekday() == 4
+            if not is_weekly_scan or is_friday:
+                buy_candidates = []
+                for tk in tickers:
+                    if tk in positions or tk not in dfs or current_date not in dfs[tk].index: continue
+                    row = dfs[tk].loc[current_date]
+                    if pd.isna(row['MA200']): continue # Warm-up 부족
+                    
+                    pass_ma200 = (row['Close'] >= row['MA200']) if cfg.ma200 else True
+                    if strat == Strategy.CORE:
+                        dist = (row['MA20'] / row['MA60']) - 1.0 if row['MA60'] > 0 else 0.0
+                        if pass_ma200 and dist >= cfg.buf and row['M60_UP']: 
+                            buy_candidates.append({"ticker": tk, "score": min(85.0 + max(0.0, dist * 100.0), 99.0), "close": row['Close']})
+                    else:
+                        dist = (row['Close'] / row['MA20']) - 1.0 if row['MA20'] > 0 else 0.0
+                        if pass_ma200 and -0.05 <= dist <= 0.03:
+                            buy_candidates.append({"ticker": tk, "score": min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), "close": row['Close']})
+                
+                # 현금 경합 및 목표 비중 계산
+                buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
+                target_alloc_amt = daily_eval * cfg.alloc
+                
+                for cand in buy_candidates:
+                    if cash <= 0: break
+                    alloc_amt = min(cash, target_alloc_amt)
+                    qty = int(alloc_amt // (cand['close'] * (1.0 + assumed_cost_pct)))
+                    if qty > 0:
+                        pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty})
+                        cash -= qty * cand['close'] * (1.0 + assumed_cost_pct) # 예약금 선차감
 
-def run_yearly_realistic_backtest(*args, **kwargs):
-    return {"error": "NOT_IMPLEMENTED", "msg": "백테스트 원본 미제공. 구현 상태: 미완료."}
+        if not nav_history: return {"status": "error", "msg": "데이터 부족으로 시뮬레이션을 완료할 수 없습니다."}
+        
+        nav_df = pd.DataFrame(nav_history)
+        final_asset = nav_df['NAV'].iloc[-1]
+        returns = nav_df['NAV'].pct_change().dropna()
+        cagr = (final_asset / init_cash) ** (252 / len(nav_df)) - 1 if len(nav_df) > 0 else 0
+        mdd = (nav_df['NAV'] / nav_df['NAV'].cummax() - 1).min()
+        
+        return {
+            "status": "success",
+            "final_asset": final_asset,
+            "final_port_ret": (final_asset / init_cash - 1) * 100,
+            "metrics": {"CAGR": cagr, "MDD": mdd},
+            "summary_rows": [{"항목": "총 거래일수", "값": f"{len(nav_df)} 일"}, {"항목": "가정 수수료율", "값": "0.25% (ALL-IN)"}]
+        }
+    except Exception as e:
+        return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
+
+def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig):
+    # Test 3 Wrapper (Weekly Scan 강제)
+    krx = load_krx_universe()
+    if krx.empty: return {"status": "error", "msg": "유니버스 로드 실패"}
+    cands = krx[krx['Market'].str.contains('KOSPI', case=False, na=False)].head(100) if strat == Strategy.CORE else krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].head(100)
+    target_df = pd.DataFrame([{'티커': str(r['Code']).zfill(6), '종목명': r['Name']} for _, r in cands.iterrows()])
+    
+    start_d = datetime.date(year, 1, 1)
+    end_d = datetime.date(year, 12, 31)
+    return run_quant_simulation(target_df, strat, init_cash, start_d, end_d, cfg, is_weekly_scan=True)
