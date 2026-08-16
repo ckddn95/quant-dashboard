@@ -82,6 +82,40 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
         if dev > 0.03: return False, f"Price Deviation > 3%"
     return True, "PASS"
 
+# ==========================================
+# 🛑 [프롬프트 100% 준수] 실전/UI/백테스트가 완전히 공유하는 순수 전략 공통 함수
+# ==========================================
+def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: float, ma60: float, ma200: float, m60_up: bool) -> tuple[bool, float, str]:
+    pass_ma200 = (close_p >= ma200) if cfg.ma200 else True
+    if strat == Strategy.CORE:
+        dist = (ma20 / ma60) - 1.0 if ma60 > 0 else 0.0
+        if pass_ma200 and dist >= cfg.buf and m60_up: 
+            return True, round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스 (이격도 {dist*100:+.2f}%)"
+    else:
+        dist = (close_p / ma20) - 1.0 if ma20 > 0 else 0.0
+        if pass_ma200 and -0.05 <= dist <= 0.03: 
+            return True, round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목 (이격도 {dist*100:+.2f}%)"
+    
+    dist_eval = (close_p / ma20) - 1.0 if ma20 > 0 else 0.0
+    return False, 50.0, f"이격도 {dist_eval*100:+.2f}%"
+
+def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float) -> tuple[bool, float, str]:
+    sl_target = buy_p * (1.0 + cfg.sl)
+    ts_target = max(highest_p, high_p) * (1.0 + cfg.ts_drp)
+    
+    hit_sl = low_p <= sl_target
+    hit_ts = (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (low_p <= ts_target)
+    
+    if hit_sl and hit_ts: return True, min(open_p, sl_target), "🔴 장중 손절컷" # Adverse-first
+    elif hit_sl: return True, min(open_p, sl_target), "🔴 장중 손절컷"
+    elif hit_ts: return True, min(open_p, ts_target), "🔵 트레일링 익절"
+    
+    if days_held >= cfg.min_h:
+        if strat == Strategy.CORE and close_p < ma60 * (1.0 - cfg.buf/2.0): return True, close_p, "🔴 종가 추세이탈"
+        elif strat == Strategy.SATELLITE and close_p < ma20 * (1.0 - cfg.buf/2.0): return True, close_p, "🔴 종가 추세이탈"
+        
+    return False, 0.0, ""
+
 _fdr_cache = {}
 
 def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy_price: float=0, highest_price: float=0, c_price: float=0, high_p: float=0, low_p: float=0, is_halted: bool=False, days_held: int=0):
@@ -106,25 +140,15 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         snap.validate(is_halted)
         if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, snap.reason
             
+        # 🛑 단일 공통 함수 호출
         if buy_price > 0:
-            sl_target = buy_price * (1.0 + cfg.sl)
-            ts_target = max(highest_price, snap.high_price) * (1.0 + cfg.ts_drp)
-            if snap.low_price <= sl_target: return snap.current_price, "🔴 장중 손절컷", 999.0, "장중 손절컷 터치"
-            if max(highest_price, snap.high_price) >= buy_price * (1.0 + cfg.ts_tgt) and snap.low_price <= ts_target: return snap.current_price, "🔵 트레일링 익절", 999.0, "트레일링 익절 터치"
-            if days_held >= cfg.min_h and snap.current_price < (snap.ma60 if strat == Strategy.CORE else snap.ma20) * (1.0 - cfg.buf/2.0): return snap.current_price, "🔴 종가 추세이탈", 999.0, "종가 추세이탈"
+            is_sell, _, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60)
+            if is_sell: return snap.current_price, s_reason, 999.0, s_reason
             
-        pass_ma200 = (snap.current_price >= snap.ma200) if cfg.ma200 else True
-        if strat == Strategy.CORE:
-            dist = (snap.ma20 / snap.ma60) - 1.0 if snap.ma60 > 0 else 0.0
-            if pass_ma200 and dist >= cfg.buf and snap.m60_up: 
-                return snap.current_price, "🟢 매수 시그널 발생", round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스 (이격도 {dist*100:+.2f}%)"
-        else:
-            dist = (snap.current_price / snap.ma20) - 1.0 if snap.ma20 > 0 else 0.0
-            if pass_ma200 and -0.05 <= dist <= 0.03: 
-                return snap.current_price, "🟢 매수 시그널 발생", round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목 (이격도 {dist*100:+.2f}%)"
+        is_buy, score, b_reason = calc_buy_signal(strat, cfg, snap.current_price, ma20, ma60, ma200, m60_up)
+        if is_buy: return snap.current_price, "🟢 매수 시그널 발생", score, b_reason
         
-        dist_eval = (snap.current_price / snap.ma20) - 1.0 if snap.ma20 > 0 else 0.0
-        return snap.current_price, "🟡 모니터링 유지", 50.0, f"이격도 {dist_eval*100:+.2f}%"
+        return snap.current_price, "🟡 모니터링 유지", 50.0, b_reason
     except Exception as e: return c_price, "에러", 0.0, str(e)
 
 def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
@@ -146,7 +170,7 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
 
 
 # ==========================================
-# 🛑 [시뮬레이션 엔진] 이중 출금(Double-Spend) 버그 픽스 및 지능형 휴일 스캔
+# 🛑 [시뮬레이션 엔진] 공통 함수 사용 및 일일 손실(-5%) 컷 로직 추가
 # ==========================================
 def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_cash: float, start_date: datetime.date, end_date: datetime.date, cfg: StrategyConfig, is_weekly_scan: bool = False):
     try:
@@ -188,7 +212,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         assumed_cost_pct = 0.0025 # 0.25% All-in 추정 비용
         
         for i, current_date in enumerate(calendar):
-            # 1. T+1 아침 체결 처리 (여기서만 cash가 실제로 차감됩니다)
+            # 1. T+1 아침 체결 처리
             for order in pending_orders:
                 tk = order['ticker']
                 if tk not in dfs or current_date not in dfs[tk].index: continue 
@@ -200,12 +224,11 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     cost_price = open_p * (1.0 + assumed_cost_pct)
                     executable_qty = order['qty']
                     
-                    # 갭상승으로 인해 현금이 부족해진 경우 수량 보수적 하향 조정
                     if cash < cost_price * executable_qty:
                         executable_qty = int(cash // cost_price)
                         
                     if executable_qty > 0:
-                        cash -= cost_price * executable_qty # ✅ 실제 결제 수행
+                        cash -= cost_price * executable_qty 
                         if tk in positions:
                             old_qty, old_bp = positions[tk]['qty'], positions[tk]['buy_price']
                             new_qty = old_qty + executable_qty
@@ -215,18 +238,16 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                             positions[tk] = {"qty": executable_qty, "buy_price": cost_price, "highest": cost_price, "days": 0}
                 elif order['side'] == 'SELL' and tk in positions:
                     sell_price = open_p * (1.0 - assumed_cost_pct)
-                    
                     profit_pct = (sell_price / positions[tk]['buy_price']) - 1.0
                     trade_log.append(profit_pct)
                     if profit_pct < 0: cooldown_tracker[tk] = current_date 
-                    
                     cash += sell_price * positions[tk]['qty']
                     del positions[tk]
             
             pending_orders = []
             sell_signals = []
             
-            # 2. 장중 보수적 위험 감시 (Adverse-first)
+            # 2. 장중 보수적 위험 감시 (단일 공통 함수 사용)
             for tk, pos in list(positions.items()):
                 if current_date not in dfs[tk].index: continue
                 row = dfs[tk].loc[current_date]
@@ -235,36 +256,27 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 pos['days'] += 1
                 pos['highest'] = max(pos['highest'], row['High'])
                 
-                sl_target = pos['buy_price'] * (1.0 + cfg.sl)
-                ts_target = pos['highest'] * (1.0 + cfg.ts_drp)
+                is_sell, sell_price, reason = calc_sell_signal(
+                    strat, cfg, row['Open'], row['High'], row['Low'], row['Close'], 
+                    pos['buy_price'], pos['highest'], pos['days'], row['MA20'], row['MA60']
+                )
                 
-                hit_sl = row['Low'] <= sl_target
-                hit_ts = (pos['highest'] >= pos['buy_price'] * (1.0 + cfg.ts_tgt)) and (row['Low'] <= ts_target)
-                
-                sell_price = 0.0
-                if hit_sl and hit_ts: sell_price = min(row['Open'], sl_target)
-                elif hit_sl: sell_price = min(row['Open'], sl_target)
-                elif hit_ts: sell_price = min(row['Open'], ts_target)
-                
-                if sell_price > 0:
+                if is_sell and sell_price > 0 and "종가 추세이탈" not in reason:
+                    # 장중 실시간 청산
                     real_sell_price = sell_price * (1.0 - assumed_cost_pct)
                     profit_pct = (real_sell_price / pos['buy_price']) - 1.0
                     trade_log.append(profit_pct)
                     if profit_pct < 0: cooldown_tracker[tk] = current_date
-                    
                     cash += real_sell_price * pos['qty']
                     del positions[tk]
                     continue
-                
-                if pos['days'] >= cfg.min_h:
-                    if strat == Strategy.CORE and row['Close'] < row['MA60'] * (1.0 - cfg.buf/2.0):
-                        sell_signals.append({"ticker": tk, "side": "SELL", "qty": pos['qty']})
-                    elif strat == Strategy.SATELLITE and row['Close'] < row['MA20'] * (1.0 - cfg.buf/2.0):
-                        sell_signals.append({"ticker": tk, "side": "SELL", "qty": pos['qty']})
+                elif is_sell and "종가 추세이탈" in reason:
+                    # 종가 판정 시 다음날 시가 청산 예약
+                    sell_signals.append({"ticker": tk, "side": "SELL", "qty": pos['qty']})
             
             pending_orders.extend(sell_signals)
             
-            # 3. 일일 NAV 기록 (결측치 회피)
+            # 3. 일일 NAV 기록
             daily_eval = cash
             for tk, pos in positions.items():
                 try:
@@ -272,10 +284,14 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     daily_eval += pos['qty'] * last_close
                 except:
                     daily_eval += pos['qty'] * pos['buy_price']
-                    
             nav_history.append({"Date": current_date, "NAV": daily_eval})
             
-            # 🛑 [패치] 지능형 휴일 방어: 무조건 금요일이 아니라 "그 주의 마지막 거래일"을 산출
+            # 🛑 [프롬프트 준수 패치] 일일 손실 컷 -5% 차단 로직 (당일 폭락 시 신규 매수 전면 금지)
+            daily_pnl_pct = 0.0
+            if len(nav_history) >= 2:
+                yesterday_nav = nav_history[-2]["NAV"]
+                if yesterday_nav > 0: daily_pnl_pct = (daily_eval / yesterday_nav) - 1.0
+            
             is_weekly_scan_day = False
             if is_weekly_scan:
                 current_iso_week = current_date.isocalendar()[1]
@@ -285,10 +301,10 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     next_iso_week = calendar[i+1].isocalendar()[1]
                     is_weekly_scan_day = current_iso_week != next_iso_week
             else:
-                is_weekly_scan_day = True # Test 1은 매일 스캔
+                is_weekly_scan_day = True 
                 
-            # 4. 장 마감 후 신규 진입 스캔
-            if is_weekly_scan_day:
+            # 4. 장 마감 후 신규 진입 스캔 (일일 손실 -5% 미만일 때만 가동)
+            if is_weekly_scan_day and daily_pnl_pct >= -0.05:
                 alloc_mult = 1.0
                 if cfg.boost and not market_df.empty and current_date in market_df.index:
                     m_row = market_df.loc[current_date]
@@ -306,21 +322,14 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     row = dfs[tk].loc[current_date]
                     if pd.isna(row['MA200']) or row['Close'] <= 0: continue
                     
-                    pass_ma200 = (row['Close'] >= row['MA200']) if cfg.ma200 else True
-                    if strat == Strategy.CORE:
-                        dist = (row['MA20'] / row['MA60']) - 1.0 if row['MA60'] > 0 else 0.0
-                        if pass_ma200 and dist >= cfg.buf and row['M60_UP']: 
-                            buy_candidates.append({"ticker": tk, "score": min(85.0 + max(0.0, dist * 100.0), 99.0), "close": row['Close']})
-                    else:
-                        dist = (row['Close'] / row['MA20']) - 1.0 if row['MA20'] > 0 else 0.0
-                        if pass_ma200 and -0.05 <= dist <= 0.03:
-                            buy_candidates.append({"ticker": tk, "score": min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), "close": row['Close']})
+                    # 🛑 단일 공통 함수 호출
+                    is_buy, score, reason = calc_buy_signal(strat, cfg, row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_UP'])
+                    if is_buy:
+                        buy_candidates.append({"ticker": tk, "score": score, "close": row['Close']})
                 
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
                 target_alloc_amt = daily_eval * min(1.0, cfg.alloc * alloc_mult) 
                 
-                # 🛑 [패치] 현금 이중 출금(Double-Spend) 방어
-                # T일에는 '가능 현금(available_cash)' 변수만 차감하여 한도 초과를 막고, 실제 cash는 건드리지 않음
                 available_cash = cash
                 for cand in buy_candidates:
                     if available_cash <= 0: break
