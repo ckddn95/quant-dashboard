@@ -246,6 +246,7 @@ with tab3:
                 if str(s.get('pdno', '')).zfill(6) == tk: nm = s.get('prdt_name', tk); break
             eval_list.append({'티커': tk, '종목명': nm})
     
+    # 🛑 [UI 패치] 보유수량 및 평균단가 컬럼 추가, '추가 매수' 로직 고도화
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
         db_positions = {p['ticker']: p for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value)}
@@ -258,18 +259,25 @@ with tab3:
         c_price, h_price, l_price, is_halted, _ = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, tk, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, 0.0, 0.0, False, "No Token")
         cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, c_price, h_price, l_price, is_halted, days_held)
         
+        is_holding = m_qty > 0
+        buy_str = "추가 매수" if is_holding else "신규 매수"
+        
         if "매도" in action or "청산" in action or "익절" in action:
-            if m_qty > 0: return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '상태': f"🔴 {action}", '단가': cp, '수량': m_qty}
-            else: return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 Managed 수량 없음 ({action})", '단가': cp, '수량': 0}
+            if m_qty > 0: 
+                return {'분류': 0, '점수': score, '종목명': nm, '티커': tk, '상태': f"🔴 {action}", '현재가': cp, '주문수량': m_qty, '보유수량': m_qty, '평균단가': buy_p}
+            else: 
+                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 보유수량 없음 ({action})", '현재가': cp, '주문수량': 0, '보유수량': m_qty, '평균단가': buy_p}
         elif "매수" in action:
             curr_pos_val = m_qty * cp
             needed_amt = max(0.0, target_buy_amt - curr_pos_val)
             allow_amt = min(net_usable_cash, needed_amt)
             add_qty = int(allow_amt // (cp * 1.0025)) if cp > 0 else 0
-            if add_qty > 0: return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '상태': "🛒 매수 시그널 (승인 대기)", '단가': cp, '수량': add_qty}
-            else: return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': "🟡 현금 부족 (매수 시그널)", '단가': cp, '수량': 0}
+            if add_qty > 0: 
+                return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '상태': f"🛒 {buy_str} 시그널 (승인 대기)", '현재가': cp, '주문수량': add_qty, '보유수량': m_qty, '평균단가': buy_p}
+            else: 
+                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 현금 부족 ({buy_str} 시그널)", '현재가': cp, '주문수량': 0, '보유수량': m_qty, '평균단가': buy_p}
         
-        return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"👁️ {action}", '단가': cp, '수량': 0}
+        return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"👁️ {action}", '현재가': cp, '주문수량': 0, '보유수량': m_qty, '평균단가': buy_p}
 
     if eval_list:
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
@@ -279,15 +287,24 @@ with tab3:
     q_df = pd.DataFrame(temp_q)
     if not q_df.empty:
         q_df = q_df.sort_values(by=['분류', '점수'], ascending=[True, False]).reset_index(drop=True)
-        st.table(q_df[['종목명', '상태', '점수', '단가', '수량']])
+        
+        # UI 표시에 콤마(,) 포맷팅 적용하여 가독성 증대
+        display_df = q_df[['종목명', '상태', '점수', '현재가', '주문수량', '보유수량', '평균단가']].copy()
+        st.dataframe(display_df.style.format({
+            '점수': '{:.1f}',
+            '현재가': '{:,.0f}',
+            '주문수량': '{:,}',
+            '보유수량': '{:,}',
+            '평균단가': '{:,.0f}'
+        }), use_container_width=True)
         
         if st.button("⚡ 대기열 일괄 주문 DB 기록", type="primary"):
             success_count = 0
-            valid_orders = [r for _, r in q_df.iterrows() if r['분류'] in [0, 1] and r['수량'] > 0 and "🟡" not in r['상태'] and "👁️" not in r['상태']]
+            valid_orders = [r for _, r in q_df.iterrows() if r['분류'] in [0, 1] and r['주문수량'] > 0 and "🟡" not in r['상태'] and "👁️" not in r['상태']]
             for r in valid_orders:
                 tk, side = r['티커'], "BUY" if "매수" in r['상태'] else "SELL"
                 idem_key = f"{SYS_CANO}_{ENV_STR}_{active_strat.value}_{tk}_{side}_{datetime.datetime.now(KST).strftime('%Y%m%d_%H%M')}"
-                spec = quant.OrderSpec(correlation_id="", idempotency_key=idem_key, broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                spec = quant.OrderSpec(correlation_id="", idempotency_key=idem_key, broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['주문수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 ok, msg = db.safe_add_order_intent(spec)
                 if ok: success_count += 1
                 else: st.warning(f"⚠️ {r['종목명']} 거절됨: {msg}")
@@ -392,6 +409,7 @@ with tab5:
         <li><b>[시스템 규칙] 가상원금 기반 과대 매수 차단:</b> 주문 수량 산출 시 <code>max(실제평가금, 가상원금)</code>을 사용하지 않는다. 실제 잔고가 0보다 크면 무조건 실제 평가금만을 베이스로 계산하여 계좌 잔고를 초과하는 주문 생성 자체를 막는다.</li>
         <li><b>[시스템 규칙] Fail-closed (안전 우선 차단):</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 발생을 방어한다.</li>
         <li><b>[시스템 규칙] 투명한 대기열 및 정렬:</b> 당장 매수/매도 시그널이 발생하지 않더라도 시스템의 판단(현금 부족, 타점 미달 등)을 큐에 모두 표시하여 관측성을 높인다. 큐는 항상 <code>매도(0) ➔ 매수(1) ➔ 관망(2)</code> 순서로 자동 정렬된다.</li>
+        <li><b>[시스템 규칙] 대기열 뷰 확장 및 추가 매수 구분:</b> 사용자의 직관적인 판단을 위해 대기열에 종목의 '주문수량'뿐만 아니라 '현재 보유수량'과 '평균단가'를 실시간 대조하여 렌더링한다. 또한 이미 보유 중인 종목에 매수 시그널이 발생할 경우 단순 매수 시그널이 아닌 '추가 매수'로 명확히 구분하여 표기한다.</li>
         <li><b>[시스템 규칙] 예외 처리 충돌 방어:</b> Streamlit의 <code>st.rerun()</code> 동작이 포괄적 <code>except:</code> 구문에 걸려 로직이 멈추는 것을 방지하기 위해, 에러 캐치 시 반드시 <code>ValueError</code> 등 명확한 Exception Class를 지정하여 처리한다.</li>
         <li><b>[시스템 규칙] 백테스트 허위 표시 금지:</b> 백테스트 엔진(수학 로직)이 아직 시스템에 구현되지 않았을 때는, UI 화면에 반드시 "미검증 / LIVE 판단 사용 금지"라는 경고 문구를 띄워 사용자에게 거짓된 정보를 주지 않아야 한다.</li>
     </ul>
