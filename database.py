@@ -1,7 +1,9 @@
 import sqlite3
 import json
+import uuid
 import os
 from datetime import datetime
+from quant_engine import OrderSpec
 
 DB_PATH = os.path.abspath("quant_system.db")
 
@@ -51,8 +53,6 @@ def migrate_db():
             conn.execute("PRAGMA user_version = 1")
             
         if v < 2:
-            # 🛑 구버전 DB에 격리 스코프 컬럼 병합 및 QUARANTINE 처리
-            # (기존 테이블 마이그레이션이 필요한 경우의 안전 롤백 보장)
             conn.execute("UPDATE order_intents SET status='QUARANTINED' WHERE account_id IS NULL OR account_id='UNKNOWN'")
             conn.execute("PRAGMA user_version = 2")
             
@@ -191,7 +191,7 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, account_id, env,
                 new_p_qty = p_qty - delta_qty
                 if new_p_qty < 0: 
                     conn.execute("UPDATE order_intents SET status='RECONCILIATION_REQUIRED' WHERE id=?", (order_id,))
-                    conn.execute("ROLLBACK"); return False # 수동 보유분 침범 시도 차단
+                    conn.execute("ROLLBACK"); return False 
                 if new_p_qty == 0 and (not p_row or p_row['manual_qty'] == 0): 
                     conn.execute("DELETE FROM positions WHERE account_id=? AND environment=? AND portfolio_id=? AND ticker=?", (account_id, env, portfolio_id, ticker))
                 else: 
@@ -206,8 +206,10 @@ def get_orders_by_status_and_env(statuses, account_id, env):
         query = f"SELECT * FROM order_intents WHERE status IN ({','.join(['?']*len(statuses))}) AND account_id=? AND environment=?"
         return [dict(r) for r in conn.execute(query, statuses + [account_id, env]).fetchall()]
         
+# 🛑 [수정 사항] UI가 뻗지 않도록 무조건 '티커', '종목명' 한글 키값으로 반환
 def get_watchlist(account_id, env):
-    with get_connection() as conn: return [dict(r) for r in conn.execute("SELECT * FROM watchlist WHERE account_id=? AND env=?", (account_id, env)).fetchall()]
+    with get_connection() as conn: 
+        return [{'티커': r['ticker'], '종목명': r['name']} for r in conn.execute("SELECT ticker, name FROM watchlist WHERE account_id=? AND env=?", (account_id, env)).fetchall()]
 
 def get_positions(account_id, env, portfolio_id):
     with get_connection() as conn: return [dict(r) for r in conn.execute("SELECT * FROM positions WHERE account_id=? AND environment=? AND portfolio_id=?", (account_id, env, portfolio_id)).fetchall()]
