@@ -12,9 +12,6 @@ import quant_engine as quant
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
-# ==========================================
-# 🛑 [보안 패치 7 & 로그인 버그 픽스] bcrypt 기반 인증
-# ==========================================
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     if st.session_state["password_correct"]: return True
@@ -148,7 +145,7 @@ with tab1:
         search_query = st.text_input("종목명 또는 종목코드(6자리) 입력")
         if st.form_submit_button("🔍 검색하기"): st.session_state.search_q = search_query
 
-    current_watchlist = db.get_watchlist()
+    current_watchlist = db.get_watchlist(SYS_CANO, ENV_STR)
     current_tickers = [s['티커'] for s in current_watchlist]
     
     if st.session_state.get('search_q'):
@@ -159,7 +156,9 @@ with tab1:
                 m_name, m_code = r['Name'], str(r['Code']).zfill(6)
                 c1, c2 = st.columns([8, 2])
                 c1.markdown(f"`{m_code}` **{m_name}**")
-                if m_code not in current_tickers and c2.button("➕ 등록", key=f"add_{m_code}"): db.add_to_watchlist(m_code, m_name); st.rerun()
+                if m_code not in current_tickers and c2.button("➕ 등록", key=f"add_{m_code}"): 
+                    db.clear_and_update_watchlist(SYS_CANO, ENV_STR, current_watchlist + [{'티커': m_code, '종목명': m_name}])
+                    st.rerun()
 
     if st.session_state.get('show_scanner'):
         with st.spinner("AI 검색 중..."):
@@ -171,9 +170,9 @@ with tab1:
                     c2.markdown(f"**{row['현재가']:,.0f} 원**")
                     c3.markdown(f"🔥 `{row['AI 스코어']}점` | {row['진단 근거']}")
                     if str(row['티커']).zfill(6) not in current_tickers and c4.button("➕ 담기", key=f"scan_{row['티커']}"):
-                        db.add_to_watchlist(row['티커'], row['종목명']); st.rerun()
-            else:
-                st.info("현재 시장에 매수 조건을 만족하는 종목이 없습니다.")
+                        db.clear_and_update_watchlist(SYS_CANO, ENV_STR, current_watchlist + [{'티커': row['티커'], '종목명': row['종목명']}])
+                        st.rerun()
+            else: st.info("현재 시장에 매수 조건을 만족하는 종목이 없습니다.")
 
     st.markdown("---")
     st.markdown("### 📋 현재 감시 리스트")
@@ -182,7 +181,7 @@ with tab1:
         ticker = str(row['티커']).zfill(6)
         tok = st.session_state.get('kis_token')
         c_price, h_price, l_price, is_halted, _ = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, 0.0, 0.0, False, "No Token")
-        db_positions = {p['ticker']: p for p in db.get_positions()}
+        db_positions = {p['ticker']: p for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value)}
         buy_p = db_positions[ticker]['buy_price'] if ticker in db_positions else 0.0
         high_p = db_positions[ticker]['highest_price'] if ticker in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[ticker]['buy_date'])).days if ticker in db_positions else 0
@@ -198,7 +197,7 @@ with tab1:
         if not display_df.empty:
             edited_df = st.data_editor(display_df.sort_values('🔥 점수', ascending=False).reset_index(drop=True), use_container_width=True)
             if st.button("💾 변경된 내용 반영", type="primary"):
-                db.clear_and_update_watchlist(edited_df[edited_df['🗑️ 삭제'] == False].to_dict('records')); st.rerun()
+                db.clear_and_update_watchlist(SYS_CANO, ENV_STR, edited_df[edited_df['🗑️ 삭제'] == False].to_dict('records')); st.rerun()
 
 with tab2:
     st.header("🔌 실전 계좌 모니터링")
@@ -213,10 +212,7 @@ with tab2:
                     safe_cash = c if c > 0 else 0.0 # Fail-closed
                     new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': safe_cash, 'stocks': h}
                     st.session_state['real_data'] = new_rd; db.set_setting('last_real_data', new_rd)
-                    kis_stocks = [{'ticker': str(i['pdno']).zfill(6), 'qty': int(i['hldg_qty']), 'buy_price': float(i['pchs_avg_pric']), 'current_price': float(i['prpr'])} for i in h if int(i['hldg_qty']) > 0]
-                    try: db.sync_positions_from_broker(kis_stocks)
-                    except AttributeError: pass 
-                    st.success("잔고 동기화 완료!"); time.sleep(0.5); st.rerun()
+                    st.success("잔고 동기화 완료! (자동매매 수량은 자체 원장을 따릅니다)"); time.sleep(0.5); st.rerun()
                 else: st.error(err)
         
         c1, c2, c3, c4 = st.columns(4)
@@ -234,16 +230,15 @@ with tab3:
     c3.metric("💵 가용 현금", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
-    # 가상원금 과대산정 방어 (max 제거)
     base_eval = rd['eval'] if rd['eval'] > 0 else float(total_cash)
     target_buy_amt = base_eval * current_config.alloc
-    locked_cash, _ = db.get_locked_cash_and_qty(SYS_CANO, ENV_STR)
+    locked_cash, _ = db.get_locked_cash_and_qty(SYS_CANO, ENV_STR, active_strat.value)
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
     
     temp_q = []
     eval_list, eval_tickers = [], set()
-    for w in db.get_watchlist(): tk = str(w['티커']).zfill(6); eval_tickers.add(tk); eval_list.append({'티커': tk, '종목명': w['종목명']})
-    for p in db.get_positions():
+    for w in db.get_watchlist(SYS_CANO, ENV_STR): tk = str(w['티커']).zfill(6); eval_tickers.add(tk); eval_list.append({'티커': tk, '종목명': w['종목명']})
+    for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value):
         tk = str(p['ticker']).zfill(6)
         if tk not in eval_tickers:
             eval_tickers.add(tk); nm = tk
@@ -253,36 +248,26 @@ with tab3:
     
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
-        db_positions = {p['ticker']: p for p in db.get_positions()}
-        m_qty = db_positions[tk]['qty'] if tk in db_positions else 0
+        db_positions = {p['ticker']: p for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value)}
+        m_qty = db_positions[tk]['managed_qty'] if tk in db_positions else 0
         buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[tk]['buy_date'])).days if tk in db_positions else 0
         
-        kis_qty = 0
-        for s in rd['stocks']:
-            if s['pdno'] == tk: kis_qty = int(s['hldg_qty'])
-
         tok = st.session_state.get('kis_token')
         c_price, h_price, l_price, is_halted, _ = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, tk, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, 0.0, 0.0, False, "No Token")
         cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, c_price, h_price, l_price, is_halted, days_held)
         
         if "매도" in action or "청산" in action or "익절" in action:
-            sell_qty = min(m_qty, kis_qty) 
-            if sell_qty > 0: 
-                return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '상태': f"🔴 {action}", '단가': cp, '수량': sell_qty}
-            else:
-                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 보유수량 없음 ({action})", '단가': cp, '수량': 0}
-        
+            if m_qty > 0: return {'분류': 0, '점수': 999, '종목명': nm, '티커': tk, '상태': f"🔴 {action}", '단가': cp, '수량': m_qty}
+            else: return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"🟡 Managed 수량 없음 ({action})", '단가': cp, '수량': 0}
         elif "매수" in action:
             curr_pos_val = m_qty * cp
             needed_amt = max(0.0, target_buy_amt - curr_pos_val)
             allow_amt = min(net_usable_cash, needed_amt)
             add_qty = int(allow_amt // (cp * 1.0025)) if cp > 0 else 0
-            if add_qty > 0: 
-                return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '상태': "🛒 매수 시그널 (승인 대기)", '단가': cp, '수량': add_qty}
-            else:
-                return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': "🟡 현금 부족 (매수 시그널)", '단가': cp, '수량': 0}
+            if add_qty > 0: return {'분류': 1, '점수': score, '종목명': nm, '티커': tk, '상태': "🛒 매수 시그널 (승인 대기)", '단가': cp, '수량': add_qty}
+            else: return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': "🟡 현금 부족 (매수 시그널)", '단가': cp, '수량': 0}
         
         return {'분류': 2, '점수': score, '종목명': nm, '티커': tk, '상태': f"👁️ {action}", '단가': cp, '수량': 0}
 
@@ -301,8 +286,8 @@ with tab3:
             valid_orders = [r for _, r in q_df.iterrows() if r['분류'] in [0, 1] and r['수량'] > 0 and "🟡" not in r['상태'] and "👁️" not in r['상태']]
             for r in valid_orders:
                 tk, side = r['티커'], "BUY" if "매수" in r['상태'] else "SELL"
-                idem_key = f"{SYS_CANO}_{active_strat.value}_{tk}_{side}_{datetime.datetime.now(KST).strftime('%Y%m%d_%H%M')}"
-                spec = quant.OrderSpec(idempotency_key=idem_key, broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                idem_key = f"{SYS_CANO}_{ENV_STR}_{active_strat.value}_{tk}_{side}_{datetime.datetime.now(KST).strftime('%Y%m%d_%H%M')}"
+                spec = quant.OrderSpec(correlation_id="", idempotency_key=idem_key, broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 ok, msg = db.safe_add_order_intent(spec)
                 if ok: success_count += 1
                 else: st.warning(f"⚠️ {r['종목명']} 거절됨: {msg}")
@@ -311,13 +296,13 @@ with tab3:
     else: st.info("대기 중인 종목이 없습니다.")
     
     st.markdown("### 📊 실시간 체결 대사 현황")
-    intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED'], SYS_CANO, ENV_STR)
+    intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED', 'QUARANTINED'], SYS_CANO, ENV_STR)
     if intents: st.dataframe(pd.DataFrame(intents)[['ticker', 'order_type', 'qty', 'status', 'cum_filled_qty', 'resp_code']], use_container_width=True)
 
 with tab4:
     st.header("🧪 고급 백테스트 엔진")
-    st.warning("⚠️ [검증 상태: 미검증] 현재 백테스트 엔진 원본 코드가 제공되지 않아 기능이 보류되었습니다. LIVE 활성화 판단에 사용할 수 없습니다.")
-    stocks_df = pd.DataFrame(db.get_watchlist())
+    st.warning("⚠️ [검증 상태: 미검증] 현재 백테스트 엔진 원본 코드가 제공되지 않아 기능이 보류되었습니다. LIVE 판단 및 실제 운용에 사용할 수 없습니다.")
+    stocks_df = pd.DataFrame(db.get_watchlist(SYS_CANO, ENV_STR))
     today_date = datetime.datetime.now(KST).date()
     
     st.subheader("🎯 Test 1. 단일 종목 정밀 분석")
@@ -402,6 +387,7 @@ with tab5:
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
+        <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
         <li><b>[시스템 규칙] 다중 계좌 스위칭:</b> Core와 Satellite 전략은 Streamlit Secrets에 저장된 완전히 다른 계좌 정보를 바라본다. 설정에 <code>is_mock</code> 항목이 누락될 경우, 실전(False)이 아닌 모의투자(True)로 강제 지정되어 사고를 막는다.</li>
         <li><b>[시스템 규칙] 가상원금 기반 과대 매수 차단:</b> 주문 수량 산출 시 <code>max(실제평가금, 가상원금)</code>을 사용하지 않는다. 실제 잔고가 0보다 크면 무조건 실제 평가금만을 베이스로 계산하여 계좌 잔고를 초과하는 주문 생성 자체를 막는다.</li>
         <li><b>[시스템 규칙] Fail-closed (안전 우선 차단):</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 발생을 방어한다.</li>
@@ -414,12 +400,14 @@ with tab5:
     <ul>
         <li>SQLite 기반 WAL 모드를 적용하여 다중 프로세스(UI/Bot) 간의 동시 접근 락(Lock)을 방지한다.</li>
         <li>주문(<code>order_intents</code>), 보유(<code>positions</code>), 워커 리스(<code>worker_leases</code>)를 분리 관리하여 계좌 간 스코프를 완벽히 격리한다.</li>
+        <li><b>[시스템 규칙] 수동 보유와 자동매매(Managed) 분리:</b> KIS 서버의 전체 잔고를 무조건 자동매매 포지션으로 덮어쓰지 않으며, 봇 스스로 체결한(Fill Delta) 수량만을 <code>managed_qty</code>로 누적하여 장기 투자 수동 보유분의 무단 청산을 방지한다.</li>
     </ul>
 
     <h3>💡 9. 장애 복구 및 프로세스 제어 (Disaster Recovery & Fencing)</h3>
     <ul>
         <li><b>Worker Lease & Fencing:</b> 다중 봇 실행 시 <code>worker_leases</code> 테이블을 통해 Lease 획득자만 주문을 POST 할 수 있으며, 뺏긴 워커는 즉시 권한을 상실한다.</li>
         <li><b>Crash Window 방어:</b> 프로세스가 어느 시점(claim, submit, ack 직전)에 강제 종료되더라도 UNIQUE 제약과 상태 대사를 통해 동일 주문의 2회 발송을 구조적으로 차단한다.</li>
+        <li><b>원자적 안전 게이트(Atomic Safety Gate):</b> 주문 의도가 SUBMITTING 상태로 넘어가기 직전, 단일 트랜잭션 내에서 현금 부족, 킬 스위치 가동 여부, 리스 토큰 만료 여부를 재확인한다.</li>
     </ul>
 
     <h3>🔐 10. 보안 및 런타임 환경 (Security & Runtime Environment)</h3>
