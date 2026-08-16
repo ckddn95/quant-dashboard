@@ -84,7 +84,6 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
         
     return True, "PASS"
 
-# 🛑 [스캐너 고속화 패치] FDR 무한 대기 방지 메모리 캐싱 
 _fdr_cache = {}
 
 def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy_price: float=0, highest_price: float=0, c_price: float=0, high_p: float=0, low_p: float=0, is_halted: bool=False, days_held: int=0):
@@ -92,7 +91,6 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         start_d = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
         cache_key = f"{ticker}_{start_d}"
         
-        # 캐싱 로직으로 스캐너 속도 대폭 상향
         if cache_key in _fdr_cache:
             df = _fdr_cache[cache_key]
         else:
@@ -114,7 +112,6 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         snap.validate(is_halted)
         if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, snap.reason
             
-        # 🛑 [용어 복구] 백서에 명시된 엄격한 한글 단어로 100% 롤백
         if buy_price > 0:
             sl_target = buy_price * (1.0 + cfg.sl)
             ts_target = max(highest_price, snap.high_price) * (1.0 + cfg.ts_drp)
@@ -125,12 +122,17 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         pass_ma200 = (snap.current_price >= snap.ma200) if cfg.ma200 else True
         if strat == Strategy.CORE:
             dist = (snap.ma20 / snap.ma60) - 1.0 if snap.ma60 > 0 else 0.0
-            if pass_ma200 and dist >= cfg.buf and snap.m60_up: return snap.current_price, "🟢 매수 시그널 발생", min(85.0 + max(0.0, dist * 100.0), 99.0), f"골든크로스 (이격도 {dist*100:+.1f}%)"
+            # 🛑 [신규 패치] 스코어 및 이격도 소수점 2자리 엄격 제한
+            if pass_ma200 and dist >= cfg.buf and snap.m60_up: 
+                return snap.current_price, "🟢 매수 시그널 발생", round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스 (이격도 {dist*100:+.2f}%)"
         else:
             dist = (snap.current_price / snap.ma20) - 1.0 if snap.ma20 > 0 else 0.0
-            if pass_ma200 and -0.05 <= dist <= 0.03: return snap.current_price, "🟢 매수 시그널 발생", min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), f"눌림목 (이격도 {dist*100:+.1f}%)"
+            if pass_ma200 and -0.05 <= dist <= 0.03: 
+                return snap.current_price, "🟢 매수 시그널 발생", round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목 (이격도 {dist*100:+.2f}%)"
         
-        return snap.current_price, "🟡 모니터링 유지", 50.0, "관망 대기"
+        # 🛑 [신규 패치] 관망 시 이격도 소수점 2자리 엄격 제한
+        dist_eval = (snap.current_price / snap.ma20) - 1.0 if snap.ma20 > 0 else 0.0
+        return snap.current_price, "🟡 모니터링 유지", 50.0, f"이격도 {dist_eval*100:+.2f}%"
     except Exception as e: return c_price, "에러", 0.0, str(e)
 
 def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
