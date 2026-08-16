@@ -146,7 +146,7 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
 
 
 # ==========================================
-# 🛑 [시뮬레이션 엔진] NAV 평가 버그 픽스 및 마스터 캘린더
+# 🛑 [시뮬레이션 엔진] 이중 출금(Double-Spend) 버그 픽스 및 지능형 휴일 스캔
 # ==========================================
 def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_cash: float, start_date: datetime.date, end_date: datetime.date, cfg: StrategyConfig, is_weekly_scan: bool = False):
     try:
@@ -156,7 +156,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         dfs = {}
         fetch_start = start_date - datetime.timedelta(days=365)
         
-        # 1. 개별 종목 데이터 로드 및 마스터 캘린더 생성
         all_dates = set()
         for tk in tickers:
             df = fdr.DataReader(tk, start=fetch_start, end=end_date)
@@ -177,7 +176,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 market_df['MA200'] = market_df['Close'].rolling(200).mean()
             except: pass
 
-        # 🛑 [패치] 모든 종목의 날짜를 합친 통합 캘린더 적용
         calendar = sorted(list(all_dates))
         calendar = [d for d in calendar if d.date() >= start_date and d.date() <= end_date]
         
@@ -190,26 +188,31 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         assumed_cost_pct = 0.0025 # 0.25% All-in 추정 비용
         
         for i, current_date in enumerate(calendar):
-            # 1. T+1 아침 체결 처리 (실제 데이터가 존재하는 날만 체결)
-            executed_today = []
+            # 1. T+1 아침 체결 처리 (여기서만 cash가 실제로 차감됩니다)
             for order in pending_orders:
                 tk = order['ticker']
-                if tk not in dfs or current_date not in dfs[tk].index: continue # 거래 없으면 패스 (가짜 체결 금지)
+                if tk not in dfs or current_date not in dfs[tk].index: continue 
                 open_p = dfs[tk].loc[current_date, 'Open']
                 
                 if pd.isna(open_p) or open_p <= 0: continue 
                 
                 if order['side'] == 'BUY':
                     cost_price = open_p * (1.0 + assumed_cost_pct)
-                    if cash >= cost_price * order['qty']:
-                        cash -= cost_price * order['qty']
+                    executable_qty = order['qty']
+                    
+                    # 갭상승으로 인해 현금이 부족해진 경우 수량 보수적 하향 조정
+                    if cash < cost_price * executable_qty:
+                        executable_qty = int(cash // cost_price)
+                        
+                    if executable_qty > 0:
+                        cash -= cost_price * executable_qty # ✅ 실제 결제 수행
                         if tk in positions:
                             old_qty, old_bp = positions[tk]['qty'], positions[tk]['buy_price']
-                            new_qty = old_qty + order['qty']
-                            new_bp = ((old_qty * old_bp) + (order['qty'] * cost_price)) / new_qty
+                            new_qty = old_qty + executable_qty
+                            new_bp = ((old_qty * old_bp) + (executable_qty * cost_price)) / new_qty
                             positions[tk] = {"qty": new_qty, "buy_price": new_bp, "highest": cost_price, "days": 0}
                         else:
-                            positions[tk] = {"qty": order['qty'], "buy_price": cost_price, "highest": cost_price, "days": 0}
+                            positions[tk] = {"qty": executable_qty, "buy_price": cost_price, "highest": cost_price, "days": 0}
                 elif order['side'] == 'SELL' and tk in positions:
                     sell_price = open_p * (1.0 - assumed_cost_pct)
                     
@@ -223,7 +226,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             pending_orders = []
             sell_signals = []
             
-            # 2. 장중 보수적 위험 감시
+            # 2. 장중 보수적 위험 감시 (Adverse-first)
             for tk, pos in list(positions.items()):
                 if current_date not in dfs[tk].index: continue
                 row = dfs[tk].loc[current_date]
@@ -261,24 +264,31 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             
             pending_orders.extend(sell_signals)
             
-            # 3. 🛑 [패치] 일일 NAV 기록 (평가용 최신 종가 끌어오기 적용)
+            # 3. 일일 NAV 기록 (결측치 회피)
             daily_eval = cash
             for tk, pos in positions.items():
                 try:
-                    # 해당 종목의 현재 날짜 이하의 가장 최근 유효 종가를 찾아 평가에만 사용
-                    last_close = dfs[tk]['Close'].loc[:current_date].iloc[-1]
-                    if not pd.isna(last_close):
-                        daily_eval += pos['qty'] * last_close
-                    else:
-                        daily_eval += pos['qty'] * pos['buy_price']
+                    last_close = dfs[tk]['Close'].loc[:current_date].dropna().iloc[-1]
+                    daily_eval += pos['qty'] * last_close
                 except:
-                    daily_eval += pos['qty'] * pos['buy_price'] # 에러 시 원가 적용
+                    daily_eval += pos['qty'] * pos['buy_price']
                     
             nav_history.append({"Date": current_date, "NAV": daily_eval})
             
+            # 🛑 [패치] 지능형 휴일 방어: 무조건 금요일이 아니라 "그 주의 마지막 거래일"을 산출
+            is_weekly_scan_day = False
+            if is_weekly_scan:
+                current_iso_week = current_date.isocalendar()[1]
+                if i == len(calendar) - 1:
+                    is_weekly_scan_day = True
+                else:
+                    next_iso_week = calendar[i+1].isocalendar()[1]
+                    is_weekly_scan_day = current_iso_week != next_iso_week
+            else:
+                is_weekly_scan_day = True # Test 1은 매일 스캔
+                
             # 4. 장 마감 후 신규 진입 스캔
-            is_friday = current_date.weekday() == 4
-            if not is_weekly_scan or is_friday:
+            if is_weekly_scan_day:
                 alloc_mult = 1.0
                 if cfg.boost and not market_df.empty and current_date in market_df.index:
                     m_row = market_df.loc[current_date]
@@ -309,13 +319,16 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
                 target_alloc_amt = daily_eval * min(1.0, cfg.alloc * alloc_mult) 
                 
+                # 🛑 [패치] 현금 이중 출금(Double-Spend) 방어
+                # T일에는 '가능 현금(available_cash)' 변수만 차감하여 한도 초과를 막고, 실제 cash는 건드리지 않음
+                available_cash = cash
                 for cand in buy_candidates:
-                    if cash <= 0: break
-                    alloc_amt = min(cash, target_alloc_amt)
+                    if available_cash <= 0: break
+                    alloc_amt = min(available_cash, target_alloc_amt)
                     qty = int(alloc_amt // (cand['close'] * (1.0 + assumed_cost_pct)))
                     if qty > 0:
                         pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty})
-                        cash -= qty * cand['close'] * (1.0 + assumed_cost_pct)
+                        available_cash -= qty * cand['close'] * (1.0 + assumed_cost_pct)
 
         if not nav_history: return {"status": "error", "msg": "데이터 부족으로 시뮬레이션을 완료할 수 없습니다."}
         
