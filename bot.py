@@ -26,7 +26,6 @@ def reconcile_active_orders(api_key, api_sec, cano, acnt_prdt, env_str, token, i
         if odno in executions:
             if order['status'] == 'UNKNOWN': db.transition_order_status(oid, 'UNKNOWN', 'ACKNOWLEDGED')
             db.apply_fill_delta_exactly_once(oid, order['ticker'], order['order_type'], executions[odno]['cum_qty'], executions[odno]['avg_price'])
-        # 🛑 UNKNOWN 주문을 시간 경과만으로 무단 폐기(EXPIRED)하는 로직 영구 제거 (가이드라인 준수)
 
 def cancel_all_open_orders(api_key, api_sec, cano, acnt_prdt, env_str, token, is_mock):
     active_orders = db.get_orders_by_status_and_env(['ACKNOWLEDGED', 'PARTIALLY_FILLED'], cano, env_str)
@@ -66,10 +65,8 @@ def main_loop():
             rd = db.get_setting('last_real_data', {'eval': 0, 'pnl': 0, 'cash': 0})
             daily_pnl = (rd['pnl'] / rd['eval']) if rd['eval'] > 0 else 0.0
 
-            # 1. 시작 시 대사 (Reconciliation)
             reconcile_active_orders(api_key, api_sec, cano, acnt_prdt, env_str, token, is_mock)
 
-            # 2. 큐 처리 (Atomic Gate)
             while True:
                 order = db.claim_next_order(cano, env_str)
                 if not order: break 
@@ -94,7 +91,6 @@ def main_loop():
                     db.transition_order_status(oid, 'CLAIMED', 'RISK_REJECTED', code=reason)
                     print(f"🛑 [Risk Block] {tk}: {reason}"); continue
 
-                # 🛑 [Atomic Safety Gate] POST 전송 직전에만 SUBMITTING CAS 전환 (영구 고착 방어)
                 if not db.transition_order_status(oid, 'CLAIMED', 'SUBMITTING'): continue
                 
                 status, msg, odno, branch, code = kis.execute_kis_order(api_key, api_sec, cano, acnt_prdt, token, tk, spec.side=="BUY", order['qty'], 0, is_mock)
