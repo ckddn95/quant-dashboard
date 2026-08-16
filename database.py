@@ -188,4 +188,4 @@ def get_locked_cash_and_qty(account_id, env, ticker=None):
         return locked_cash, locked_sell_qty
 
 def sync_positions_from_broker(kis_stocks):
-    pass # 백서 9조에 따라 전용 reconciler 개발 시점까지 보류 (수동 보유분 승격 차단)
+    pass
