@@ -111,18 +111,19 @@ try:
 except KeyError:
     SYS_APP_KEY = None
     SYS_APP_SEC = None
-    SYS_CANO = None
+    # 🛑 [버그 픽스] API Key가 없을 때 None이 아니라 MOCK_ACCOUNT 문자열 강제 부여
+    SYS_CANO = "MOCK_ACCOUNT" 
     SYS_IS_MOCK = True
     SYS_ACNT_PRDT = "01"
 
 ENV_STR = "MOCK" if SYS_IS_MOCK else "REAL"
 
 with st.sidebar.expander("🔑 KIS 계좌 연동 상태", expanded=not bool(SYS_APP_KEY)):
-    if SYS_APP_KEY and SYS_CANO:
+    if SYS_APP_KEY and SYS_CANO != "MOCK_ACCOUNT":
         st.success(f"✅ {STRAT_DISPLAY_MAP[active_strat]} 계좌 연동 완료")
         st.caption(f"계좌번호: {SYS_CANO} ({'모의' if SYS_IS_MOCK else '실전'})")
     else:
-        st.error("⚠️ 스트림릿 Secrets에서 계좌 정보를 찾을 수 없습니다.")
+        st.error("⚠️ 스트림릿 Secrets에서 계좌 정보를 찾을 수 없습니다. (모의 DB 모드 작동 중)")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📱 봇 제어 (DB 연동)")
@@ -157,10 +158,12 @@ with tab1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True):
             st.session_state.show_scanner = True
     
+    # 🛑 [UX 패치] 폼 구조 개선하여 등록 후 검색창 비우기 지원
     with st.form("manual_search_form"):
-        search_query = st.text_input("종목명 또는 종목코드(6자리) 입력")
+        search_query = st.text_input("종목명 또는 종목코드(6자리) 입력", value=st.session_state.get('search_q', ''))
         if st.form_submit_button("🔍 검색하기"):
             st.session_state.search_q = search_query
+            st.rerun()
 
     current_watchlist = db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value)
     current_tickers = [s['티커'] for s in current_watchlist]
@@ -174,12 +177,14 @@ with tab1:
                 m_code = str(r['Code']).zfill(6)
                 c1, c2 = st.columns([8, 2])
                 c1.markdown(f"`{m_code}` **{m_name}**")
+                # 🛑 [버그 및 UX 픽스] 등록 버튼 클릭 시 상태 초기화
                 if m_code not in current_tickers and c2.button("➕ 등록", key=f"add_{m_code}"): 
                     db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, current_watchlist + [{'티커': m_code, '종목명': m_name}])
+                    st.session_state.search_q = "" # 검색창 리셋
                     st.rerun()
 
     if st.session_state.get('show_scanner'):
-        with st.spinner("AI 검색 중..."):
+        with st.spinner("AI 검색 중... (엄격한 전략 기준에 따라 종목이 없을 수 있습니다)"):
             scan_res = quant.run_scanner_safe(active_strat, current_config)
             if not scan_res.empty:
                 for _, row in scan_res.iterrows():
@@ -189,9 +194,10 @@ with tab1:
                     c3.markdown(f"🔥 `{row['AI 스코어']:.2f}점` | {row['진단 근거']}")
                     if str(row['티커']).zfill(6) not in current_tickers and c4.button("➕ 담기", key=f"scan_{row['티커']}"):
                         db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, current_watchlist + [{'티커': row['티커'], '종목명': row['종목명']}])
+                        st.session_state.show_scanner = False
                         st.rerun()
             else:
-                st.info("현재 시장에 매수 조건을 만족하는 종목이 없습니다.")
+                st.info("현재 시장 상황에서는 백서의 엄격한 매수 조건(200일선 상회 등)을 만족하는 안전한 종목이 없습니다. 수동 검색을 통해 종목을 추가해보세요.")
 
     st.markdown("---")
     st.markdown("### 📋 현재 감시 리스트")
@@ -215,11 +221,16 @@ with tab1:
                     display_records.append(res)
         display_df = pd.DataFrame(display_records)
         if not display_df.empty:
-            st.data_editor(display_df.sort_values('🔥 점수', ascending=False).reset_index(drop=True).style.format({'🔥 점수': '{:.2f}'}), use_container_width=True)
+            edited_df = st.data_editor(display_df.sort_values('🔥 점수', ascending=False).reset_index(drop=True).style.format({'🔥 점수': '{:.2f}'}), use_container_width=True)
+            # 🛑 [UX 패치] 표에서 체크박스 누르고 저장 시 DB에서 지워지도록 추가 구현
+            if st.button("💾 체크한 종목 삭제 적용", type="primary"):
+                remaining_items = edited_df[edited_df['🗑️ 삭제'] == False][['티커', '종목명']].to_dict('records')
+                db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, remaining_items)
+                st.rerun()
 
 with tab2:
     st.header("🔌 실전 계좌 모니터링")
-    if SYS_APP_KEY and SYS_CANO:
+    if SYS_APP_KEY and SYS_CANO != "MOCK_ACCOUNT":
         if st.button("🔄 잔고 동기화"):
             token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK)
             if token:
@@ -251,6 +262,13 @@ with tab2:
         if rd['stocks']: 
             acc_df = pd.DataFrame([{'종목명': i['prdt_name'], '티커': i['pdno'], '수량': int(i['hldg_qty']), '평균단가': float(i['pchs_avg_pric']), '현재가': float(i['prpr']), '수익률': f"{float(i['evlu_pfls_rt']):+.2f}%"} for i in rd['stocks'] if int(i['hldg_qty'])>0])
             st.dataframe(acc_df.style.map(color_profit_loss, subset=['수익률']).format({'평균단가': '{:,.2f}', '현재가': '{:,.0f}', '수량': '{:,}'}), use_container_width=True)
+    else:
+        st.warning("KIS API Key가 연동되지 않아 모의 잔고 화면만 표시됩니다. (현재 설정된 가상 원금 기준)")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(mts_metric_html("💰 총 평가 금액", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+        c2.markdown(mts_metric_html("📥 투자 원금", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
+        c3.markdown(mts_metric_html("📈 누적 수익금", "0 원"), unsafe_allow_html=True)
+        c4.markdown(mts_metric_html("💵 주문가능 원화", f"{total_cash:,.0f} 원"), unsafe_allow_html=True)
 
 with tab3:
     st.header("🤖 실전 자동매매 큐")
