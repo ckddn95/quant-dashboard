@@ -10,6 +10,7 @@ import broker.kis_client as kis
 import quant_engine as quant
 
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
+# 🛑 [Rule C] KST 타임존 강제
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 def check_password():
@@ -162,7 +163,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
     col_s1, col_s2 = st.columns([8, 2])
-    
     with col_s1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True):
             with st.spinner("AI 검색 중... (엄격한 전략 기준에 따라 종목이 없을 수 있습니다)"):
@@ -442,7 +442,6 @@ with tab4:
     st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
     run_t1 = st.button("테스트 1 실행 (통합 포트폴리오)", type="primary", use_container_width=True)
     
-    # 🛑 [패치] 시작일과 종료일이 같을 때 데이터 부족 안내 강화
     if run_t1:
         if target_df.empty:
             st.warning("분석할 관심종목이나 보유종목이 없습니다.")
@@ -493,7 +492,6 @@ with tab4:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
         run_t2 = st.button("테스트 2 실행 (일간 스캔)", type="primary", use_container_width=True)
         
-    # 🛑 [패치] 시작일과 종료일이 같을 때 데이터 부족 안내 강화
     if run_t2:
         if stocks_df.empty:
             st.error("관심종목 리스트에 종목이 없습니다. 탭 1에서 관심종목을 추가해주세요.")
@@ -516,7 +514,8 @@ with tab4:
                         
                         with st.expander("📝 AI 가상운용 상세 거래 내역 보기"):
                             if res2.get('trade_logs'):
-                                st.dataframe(pd.DataFrame(res2['trade_logs']).style.map(color_profit_loss, subset=['수익률']).format({
+                                tl_df = pd.DataFrame(res2['trade_logs'])
+                                st.dataframe(tl_df.style.map(color_profit_loss, subset=['수익률']).format({
                                     '진입단가': '{:,.0f}', '청산단가': '{:,.0f}', '수량': '{:,}', '손익금': '{:,.0f}'
                                 }), use_container_width=True)
                             else:
@@ -601,6 +600,7 @@ with tab5:
         <li><b>단방향 전이 원칙:</b> UI는 API를 직접 호출하지 않는다. <code>INTENT_CREATED</code> ➔ <code>CLAIMED</code> ➔ <code>SUBMITTING</code> ➔ <code>ACKNOWLEDGED</code>의 단방향 Dureble 상태 전이만을 허용한다.</li>
         <li><b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향, 티커가 조합된 Idempotency Key를 통해 다중 브라우저 또는 다중 워커에 의한 중복 제출(Double POST)을 원천 차단한다. UI에서 '일괄 주문' 클릭 시에도 관망 상태인 종목은 DB에 삽입되지 않도록 사전 필터링된다.</li>
         <li><b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행(Single-flight)으로 갱신된다.</li>
+        <li><b>[시스템 규칙] API 초당 호출 제한(Rate Limit) 방어 쓰레딩:</b> 증권사 Open API의 초당 호출 제한(Rate Limit)을 준수하고 시스템 밴(Ban)을 막기 위해, 시세 조회 등 대량의 API 호출이 수반되는 로직은 반드시 워커 풀의 동시성 크기(<code>max_workers</code>)를 안전한 수치(예: 10개)로 제한하여 실행한다.</li>
     </ul>
 
     <h3>⏱️ 6. 시뮬레이션 및 백테스트 실행 규칙 (Simulation Execution Rules)</h3>
@@ -611,17 +611,20 @@ with tab5:
         <li><b>[시스템 규칙] 강세장 비중 증액 (Bull-market Boost):</b> 사용자가 '강세장 부스터' 옵션을 켰을 경우, 시뮬레이션 및 실거래 엔진은 코스피 지수가 200일선 위에 위치할 때 매수 비중을 최대 1.5배 증액하여 수익률을 극대화한다.</li>
         <li><b>[시스템 규칙] 평가 단가와 체결 단가의 엄격한 분리 (NAV 보정):</b> 특정 종목이 거래 정지되거나 개별 종목의 휴장으로 일봉 데이터가 누락된 날에도 포트폴리오 자산(NAV)이 0원으로 증발하지 않도록, 가치 평가는 '가장 최근의 유효 종가'를 활용한다. 단, 실제 매매 체결은 데이터가 존재하는 유효 거래일에만 엄격하게 집행하여 가짜 체결을 방지한다.</li>
         <li><b>[시스템 규칙] 시뮬레이션 T+1 체결 반영 완료:</b> 신호 발생 당일(T일)의 종가로 체결되는 룩어헤드 편향(Look-ahead Bias)을 제거한다. 모든 신호는 다음 유효 영업일(T+1)의 시가(Open)로 정확하게 체결된다.</li>
+        <li><b>[시스템 규칙] 호가 단위(Tick Size) 보정 및 1주 미만 절사 원칙:</b> 시뮬레이션 매수 수량 산출 시, 수학적 연산 결과가 소수점으로 나오더라도 반드시 <code>int()</code> 처리하여 절사(내림)하며, 평가 금액 및 체결 가격은 KIS 호가 단위에 부합하는 정수형으로 보정 및 기록한다.</li>
         <li><b>[시스템 규칙] 회계 이중 출금 방어 (No Double-Spend):</b> 매수 시그널 당일(T일)에는 가상 현금(available_cash)만을 차감하여 한도를 체크하고, 실제 계좌 잔고(cash)는 반드시 체결 당일(T+1일)에 단 한 번만 차감되도록 회계 무결성을 유지한다.</li>
+        <li><b>[시스템 규칙] 잔여 현금 영혼 보내기(Partial Allocation) 원칙:</b> 매수 시그널 발생 시 가용 현금이 목표 투입 금액(예: 총자산의 35%)보다 적더라도, 최소 1주 이상 살 수 있는 현금이 남아있다면 가용 현금을 100% 소진하여 부분 매수(Partial Allocation)를 집행한다. 현금 부족으로 1주도 살 수 없을 경우 대기열에 명확한 사유('현금 부족')를 표기한다.</li>
         <li><b>[시스템 규칙] 비용 가정 (Cost Assumption):</b> 실제 KIS 브로커 체결 데이터가 없는 시뮬레이션 단계에서는, 매수와 매도 각각 수수료/세금/시장충격을 모두 포함하여 보수적인 <b>All-in 0.25% (왕복 0.50%)</b>의 비용률을 강제 적용한다.</li>
         <li><b>[시스템 규칙] 장중 보수적 손절/익절 (Adverse-first):</b> 과거 일봉 데이터만으로 장중 High/Low 순서를 알 수 없는 경우, 가장 불리한 방향인 <b>손절컷(SL)을 우선 타격</b>한 것으로 가정하여 생존 편향을 억제한다.</li>
         <li><b>[시스템 규칙] 일간 스캔 (Daily Scan) 전면 적용:</b> 짧은 운용 기간(예: 며칠~수 주)을 검증할 때 발생하는 '데이터 부족 및 체결 기회 박탈' 문제를 해결하기 위해, 모든 시뮬레이션(테스트 1, 2, 3)의 신규 진입 종목 스캔 주기를 기존 주 1회에서 <b>매일(Daily) 종가 기준</b>으로 전면 개편하였다. 이를 통해 단기 운용 계좌에서도 AI가 매일의 시장 변화에 즉각 대응하며 정밀한 1:1 성과 비교가 가능하도록 시스템 헌장을 수정한다.</li>
         <li><b>[시스템 규칙] 라운드트립(Round-trip) 상세 거래 장부:</b> 단순 매수/매도 분리 나열 방식의 가독성 저하를 해결하기 위해, 거래 장부(Trade Logs)는 반드시 <b>'진입부터 청산까지의 한 사이클(Closed Trade)'을 한 줄로 병합</b>하여 표기한다. 또한, 시뮬레이션 종료 시점에 <b>아직 청산되지 않은 미실현 보유 포지션(Open Positions)도 장부에 포함</b>하여, 투자자가 미실현 손익과 진행 중인 거래 상태를 누락 없이 파악할 수 있도록 한다.</li>
-        <li><b>[시스템 규칙] 포트폴리오 개설일 정밀 추적:</b> 시뮬레이션 시 비교 기준이 되는 '포트폴리오 개설일'은 단순히 단일 테이블이 아닌, <code>watchlist</code>(관심종목 등록일), <code>order_intents</code>(주문 발생일), <code>positions</code>(잔고 발생일) 등 시스템 내 모든 행동 로그를 포괄적으로 검색하여 가장 이른 시점을 개설일로 자동 세팅한다. 날짜 파싱 시 발생할 수 있는 문자열 오류를 방지하기 위해 앞 10자리(YYYY-MM-DD)를 안전하게 추출하는 방식을 강제한다.</li>
     </ul>
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
+        <li><b>[시스템 규칙] KST(한국표준시) 타임존 절대 강제:</b> 클라우드 환경(Streamlit Cloud 등) 배포 시 OS 시스템 시간이 UTC로 설정될 수 있으므로, 프론트엔드와 백엔드 간의 시차(Timezone) 불일치 오류를 막기 위해 모든 로컬 시간 연산과 DB 레코딩에는 명시적인 <code>KST(UTC+9)</code> 타임존 속성을 강제 적용한다.</li>
         <li><b>[시스템 규칙] 스캐너 세션 캐싱 및 상태 보존:</b> AI 타점 스캐너 실행 결과 및 검색 데이터는 Streamlit의 <code>st.session_state</code>에 안전하게 캐싱되어, 종목 추가(담기) 등의 UI 리렌더링 이벤트 발생 시에도 검색 결과 목록이 증발하지 않고 그대로 유지된다.</li>
+        <li><b>[시스템 규칙] 다중 연산 스피너(Spinner) 및 중복 클릭 방지:</b> 시뮬레이션, 대규모 데이터 스캔, 잔고 동기화 등 응답 지연이 발생하는 작업 수행 시 반드시 UI에 시각적 피드백(<code>st.spinner</code>)을 제공하여 사용자의 중복 클릭(Double-post)으로 인한 메모리 충돌과 세션 꼬임 현상을 원천 방어한다.</li>
         <li><b>[시스템 규칙] 엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(예: <code>is_mock</code>)은 스트림릿 시크릿에서 문자열(예: <code>"false"</code>)로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 대소문자를 무시한 명시적 형변환(Boolean Parsing)을 거친다.</li>
         <li><b>[시스템 규칙] 도메인 URL 위생화(Sanitization):</b> KIS Open API 등의 통신 도메인은 복사/붙여넣기 시 유입될 수 있는 보이지 않는 제로스페이스 및 비-ASCII 특수 문자를 원천 차단하기 위해 철저한 ASCII 클렌징 및 공백 제거 과정을 거친 후 호출한다.</li>
         <li><b>[시스템 규칙] 테스트 1 포트폴리오 분석:</b> 테스트 1은 기존의 단일 종목 입력 방식을 전면 폐기하고, 시스템 내에 등록된 <b>'현재 관심종목'과 '실제 보유종목' 전체를 하나의 포트폴리오로 취합</b>하여 과거 기간의 성과를 회고하는 UI로 개편되었다. 분석 결과는 화면 전체(Full-width)를 활용하여 사용자 가독성을 극대화한다.</li>
