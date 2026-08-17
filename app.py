@@ -15,7 +15,6 @@ KST = datetime.timezone(datetime.timedelta(hours=9))
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     if st.session_state["password_correct"]: return True
-
     hashed_pw_env = os.getenv("ADMIN_PASSWORD_HASH")
     if not hashed_pw_env:
         st.warning("⚠️ 초기 보안 설정: 관리자 비밀번호가 OS 환경변수에 없습니다.")
@@ -26,7 +25,6 @@ def check_password():
             st.code(f"export ADMIN_PASSWORD_HASH='{bcrypt.hashpw(new_pw.encode('utf-8'), salt).decode('utf-8')}'", language="bash")
             st.success("위 명령어를 서버 터미널에 입력하거나 .env 파일에 저장한 뒤 시스템을 재시작하세요.")
         st.stop()
-
     st.markdown("### 🔒 관리자 인증")
     pwd_input = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
@@ -113,27 +111,7 @@ if auto_pilot != init_ap: db.set_setting('auto_pilot', auto_pilot)
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터")
-default_cfg = quant.get_default_config(active_strat)
-saved_p = db.get_setting(f'params_{active_strat.value}', None)
-if saved_p is None or st.session_state.get('last_strat') != active_strat:
-    saved_p = default_cfg.__dict__.copy(); db.set_setting(f'params_{active_strat.value}', saved_p); st.session_state.last_strat = active_strat
-
-is_custom = any(saved_p[k] != v for k, v in default_cfg.__dict__.items())
-if is_custom and st.sidebar.button("🔄 기본값 복구"): saved_p = default_cfg.__dict__.copy(); db.set_setting(f'params_{active_strat.value}', saved_p); st.rerun()
-
-saved_p['ma200'] = st.sidebar.checkbox("🛡️ 200일 추세선", value=saved_p['ma200'])
-saved_p['buf'] = st.sidebar.slider("골든크로스 버퍼 (%)", 0.0, 5.0, float(saved_p['buf']) * 100.0, 0.1) / 100.0
-saved_p['sl'] = st.sidebar.slider("긴급 손절 컷 (%)", -30.0, -5.0, float(saved_p['sl']) * 100.0, 1.0) / 100.0
-with st.sidebar.expander("🧪 고급 안전장치", expanded=is_custom):
-    saved_p['cd'] = st.slider("쿨다운(일)", 0, 90, int(saved_p['cd']), 5)
-    saved_p['alloc'] = st.slider("투입 한도 (%)", 10, 100, int(float(saved_p['alloc']) * 100.0), 5) / 100.0
-    saved_p['min_h'] = st.slider("최소 보유(일)", 0, 20, int(saved_p['min_h']), 1)
-    saved_p['ts_tgt'] = st.slider("익절 목표 (%)", 5, 100, int(float(saved_p['ts_tgt']) * 100.0), 5) / 100.0
-    saved_p['ts_drp'] = st.slider("하락 허용 (%)", -30, -1, int(float(saved_p['ts_drp']) * 100.0), 1) / 100.0
-    saved_p['boost'] = st.checkbox("🔥 강세장 부스터", value=saved_p['boost'])
-
-try: current_config = quant.StrategyConfig(**saved_p); db.set_setting(f'params_{active_strat.value}', saved_p)
-except ValueError as e: st.sidebar.error(f"Parameter Error: {e}"); st.stop()
+current_config = quant.get_default_config(active_strat)
 
 rd = st.session_state.get('real_data', db.get_setting('last_real_data', {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []}))
 st.session_state['real_data'] = rd 
@@ -151,7 +129,7 @@ with tab1:
         search_query = st.text_input("종목명 또는 종목코드(6자리) 입력")
         if st.form_submit_button("🔍 검색하기"): st.session_state.search_q = search_query
 
-    current_watchlist = db.get_watchlist(SYS_CANO, ENV_STR)
+    current_watchlist = db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value)
     current_tickers = [s['티커'] for s in current_watchlist]
     
     if st.session_state.get('search_q'):
@@ -163,7 +141,7 @@ with tab1:
                 c1, c2 = st.columns([8, 2])
                 c1.markdown(f"`{m_code}` **{m_name}**")
                 if m_code not in current_tickers and c2.button("➕ 등록", key=f"add_{m_code}"): 
-                    db.clear_and_update_watchlist(SYS_CANO, ENV_STR, current_watchlist + [{'티커': m_code, '종목명': m_name}])
+                    db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, current_watchlist + [{'티커': m_code, '종목명': m_name}])
                     st.rerun()
 
     if st.session_state.get('show_scanner'):
@@ -176,7 +154,7 @@ with tab1:
                     c2.markdown(f"**{row['현재가']:,.0f} 원**")
                     c3.markdown(f"🔥 `{row['AI 스코어']:.2f}점` | {row['진단 근거']}")
                     if str(row['티커']).zfill(6) not in current_tickers and c4.button("➕ 담기", key=f"scan_{row['티커']}"):
-                        db.clear_and_update_watchlist(SYS_CANO, ENV_STR, current_watchlist + [{'티커': row['티커'], '종목명': row['종목명']}])
+                        db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, current_watchlist + [{'티커': row['티커'], '종목명': row['종목명']}])
                         st.rerun()
             else: st.info("현재 시장에 매수 조건을 만족하는 종목이 없습니다.")
 
@@ -187,7 +165,7 @@ with tab1:
         ticker = str(row['티커']).zfill(6)
         tok = st.session_state.get('kis_token')
         c_price, h_price, l_price, is_halted, _ = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, 0.0, 0.0, False, "No Token")
-        db_positions = {p['ticker']: p for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value)}
+        db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value)}
         buy_p = db_positions[ticker]['buy_price'] if ticker in db_positions else 0.0
         high_p = db_positions[ticker]['highest_price'] if ticker in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[ticker]['buy_date'])).days if ticker in db_positions else 0
@@ -217,7 +195,7 @@ with tab2:
                     new_rd = {'eval': float(s[0]['tot_evlu_amt']), 'pnl': float(s[0]['evlu_pfls_smtl_amt']), 'cash': safe_cash, 'stocks': h}
                     st.session_state['real_data'] = new_rd; db.set_setting('last_real_data', new_rd)
                     kis_stocks = [{'ticker': str(i['pdno']).zfill(6), 'qty': int(i['hldg_qty']), 'buy_price': float(i['pchs_avg_pric']), 'current_price': float(i['prpr'])} for i in h if int(i['hldg_qty']) > 0]
-                    try: db.sync_positions_from_broker(kis_stocks)
+                    try: db.sync_positions_from_broker("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, kis_stocks)
                     except AttributeError: pass 
                     st.success("잔고 동기화 완료! (자동매매 수량은 자체 원장을 따릅니다)"); time.sleep(0.5); st.rerun()
                 else: st.error(err)
@@ -242,13 +220,13 @@ with tab3:
     
     base_eval = rd['eval'] if rd['eval'] > 0 else float(total_cash)
     target_buy_amt = base_eval * current_config.alloc
-    locked_cash, _ = db.get_locked_cash_and_qty(SYS_CANO, ENV_STR, active_strat.value)
+    locked_cash, _ = db.get_locked_cash_and_qty("KIS", ENV_STR, SYS_CANO, active_strat.value)
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
     
     temp_q = []
     eval_list, eval_tickers = [], set()
-    for w in db.get_watchlist(SYS_CANO, ENV_STR): tk = str(w['티커']).zfill(6); eval_tickers.add(tk); eval_list.append({'티커': tk, '종목명': w['종목명']})
-    for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value):
+    for w in db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value): tk = str(w['티커']).zfill(6); eval_tickers.add(tk); eval_list.append({'티커': tk, '종목명': w['종목명']})
+    for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
         tk = str(p['ticker']).zfill(6)
         if tk not in eval_tickers:
             eval_tickers.add(tk); nm = tk
@@ -258,7 +236,7 @@ with tab3:
     
     def process_q(row):
         tk, nm = str(row['티커']).zfill(6), row['종목명']
-        db_positions = {p['ticker']: p for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value)}
+        db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value)}
         m_qty = db_positions[tk]['managed_qty'] if tk in db_positions else 0
         buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
@@ -311,8 +289,7 @@ with tab3:
             valid_orders = [r for _, r in q_df.iterrows() if r['분류'] in [0, 1] and r['주문수량'] > 0 and "🟡" not in r['상태'] and "👁️" not in r['상태']]
             for r in valid_orders:
                 tk, side = r['티커'], "BUY" if "매수" in r['상태'] else "SELL"
-                idem_key = f"{SYS_CANO}_{ENV_STR}_{active_strat.value}_{tk}_{side}_{datetime.datetime.now(KST).strftime('%Y%m%d_%H%M')}"
-                spec = quant.OrderSpec(correlation_id="", idempotency_key=idem_key, broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['주문수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                spec = quant.OrderSpec(correlation_id="", idempotency_key=str(uuid.uuid4()), broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['주문수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 ok, msg = db.safe_add_order_intent(spec)
                 if ok: success_count += 1
                 else: st.warning(f"⚠️ {r['종목명']} 거절됨: {msg}")
@@ -321,30 +298,27 @@ with tab3:
     else: st.info("대기 중인 종목이 없습니다.")
     
     st.markdown("### 📊 실시간 체결 대사 현황")
-    intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED', 'QUARANTINED'], SYS_CANO, ENV_STR)
-    if intents: st.dataframe(pd.DataFrame(intents)[['ticker', 'order_type', 'qty', 'status', 'cum_filled_qty', 'resp_code']], use_container_width=True)
+    intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED', 'QUARANTINED'], "KIS", ENV_STR, SYS_CANO, active_strat.value)
+    if intents: st.dataframe(pd.DataFrame(intents)[['ticker', 'side', 'qty', 'status', 'cum_filled_qty', 'resp_code']], use_container_width=True)
 
 with tab4:
     st.header("🧪 고급 백테스트 엔진")
-    st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
+    st.warning("⚠️ [DATA_LIMITED] 과거 상장폐지 데이터 수급 한계로 인해 생존자 편향(Survivor Bias)이 존재합니다. 미래 수익의 절대적 보장 지표가 아닙니다.")
     
     today_date = datetime.datetime.now(KST).date()
-    stocks_df = pd.DataFrame(db.get_watchlist(SYS_CANO, ENV_STR))
+    stocks_df = pd.DataFrame(db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value))
     
-    # ---------------------------------------------------------
-    # 🎯 테스트 1. 관심·보유종목 전략 매매 시뮬레이션
-    # ---------------------------------------------------------
     st.subheader("🎯 테스트 1. 관심·보유종목 전략 매매 시뮬레이션")
     st.info("현재 관심종목 및 보유종목 전체를 과거 기간에 소급 적용하여 매매 결과를 회고하는 시나리오입니다.")
     
     combined_tickers = set()
     combined_data = []
-    for w in db.get_watchlist(SYS_CANO, ENV_STR):
+    for w in db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
         tk = str(w['티커']).zfill(6)
         if tk not in combined_tickers:
             combined_tickers.add(tk); combined_data.append({'티커': tk, '종목명': w['종목명']})
             
-    for p in db.get_positions(SYS_CANO, ENV_STR, active_strat.value):
+    for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
         tk = str(p['ticker']).zfill(6)
         if tk not in combined_tickers:
             combined_tickers.add(tk); nm = tk
@@ -390,9 +364,6 @@ with tab4:
                 else: st.error(f"실행 불가: {res1['msg']}")
     st.markdown("---")
 
-    # ---------------------------------------------------------
-    # 🎯 테스트 2. AI 가상운용 vs 실제계좌 성과 비교
-    # ---------------------------------------------------------
     st.subheader("🎯 테스트 2. AI 가상운용 vs 실제계좌 성과 비교")
     st.info("선택한 기간 동안 실제 계좌의 투자 원금과 동일한 금액으로 AI가 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
     
@@ -438,9 +409,6 @@ with tab4:
                 else: st.error(f"실행 불가: {res2['msg']}")
     st.markdown("---")
 
-    # ---------------------------------------------------------
-    # 🎯 테스트 3. 과거연도 자동매매 재현 시뮬레이션
-    # ---------------------------------------------------------
     st.subheader("🎯 테스트 3. 과거연도 자동매매 재현 시뮬레이션")
     st.info("선택한 특정 연도의 전체 기간 동안 AI가 주간 단위로 운용했을 때의 결과입니다.")
     t3_c1, t3_c2 = st.columns([3, 7])
