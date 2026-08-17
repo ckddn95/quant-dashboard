@@ -10,7 +10,6 @@ import broker.kis_client as kis
 import quant_engine as quant
 
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
-# 🛑 [Rule C] KST 타임존 강제
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 def check_password():
@@ -151,8 +150,21 @@ if auto_pilot != init_ap:
     db.set_setting('auto_pilot', auto_pilot)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ 전략 파라미터")
+# 🛑 [패치] 전략 파라미터를 YAML 기준으로 Read-only로 투명하게 공개하는 UI 도입
+st.sidebar.header("⚙️ 전략 파라미터 (Baseline)")
 current_config = quant.get_default_config(active_strat)
+
+with st.sidebar.expander("📊 현재 적용된 계약 파라미터 보기", expanded=False):
+    st.info("💡 시스템 헌장(YAML)에 의해 임의 변경이 차단된 읽기 전용 상태입니다. (OOS 검증 원칙 준수)")
+    st.markdown(f"- **200일 추세선 방어:** {'✅ 활성' if current_config.ma200 else '❌ 비활성'}")
+    st.markdown(f"- **골든크로스/눌림목 버퍼:** `{current_config.buf * 100:.1f}%`")
+    st.markdown(f"- **긴급 손절 컷 (SL):** `{current_config.sl * 100:.1f}%`")
+    st.markdown(f"- **트레일링 익절 목표:** `{current_config.ts_tgt * 100:.1f}%`")
+    st.markdown(f"- **트레일링 하락 허용:** `{current_config.ts_drp * 100:.1f}%`")
+    st.markdown(f"- **종목당 투입 한도:** `{current_config.alloc * 100:.0f}%`")
+    st.markdown(f"- **연속 손실 쿨다운:** `{current_config.cd} 거래일`")
+    st.markdown(f"- **최소 보유 기간:** `{current_config.min_h} 거래일`")
+    st.markdown(f"- **강세장 비중 부스터:** {'✅ 활성' if current_config.boost else '❌ 비활성'}")
 
 rd = st.session_state.get('real_data', db.get_setting('last_real_data', {'eval': float(total_cash), 'pnl': 0.0, 'cash': float(total_cash), 'stocks': []}))
 st.session_state['real_data'] = rd 
@@ -618,12 +630,14 @@ with tab5:
         <li><b>[시스템 규칙] 장중 보수적 손절/익절 (Adverse-first):</b> 과거 일봉 데이터만으로 장중 High/Low 순서를 알 수 없는 경우, 가장 불리한 방향인 <b>손절컷(SL)을 우선 타격</b>한 것으로 가정하여 생존 편향을 억제한다.</li>
         <li><b>[시스템 규칙] 일간 스캔 (Daily Scan) 전면 적용:</b> 짧은 운용 기간(예: 며칠~수 주)을 검증할 때 발생하는 '데이터 부족 및 체결 기회 박탈' 문제를 해결하기 위해, 모든 시뮬레이션(테스트 1, 2, 3)의 신규 진입 종목 스캔 주기를 기존 주 1회에서 <b>매일(Daily) 종가 기준</b>으로 전면 개편하였다. 이를 통해 단기 운용 계좌에서도 AI가 매일의 시장 변화에 즉각 대응하며 정밀한 1:1 성과 비교가 가능하도록 시스템 헌장을 수정한다.</li>
         <li><b>[시스템 규칙] 라운드트립(Round-trip) 상세 거래 장부:</b> 단순 매수/매도 분리 나열 방식의 가독성 저하를 해결하기 위해, 거래 장부(Trade Logs)는 반드시 <b>'진입부터 청산까지의 한 사이클(Closed Trade)'을 한 줄로 병합</b>하여 표기한다. 또한, 시뮬레이션 종료 시점에 <b>아직 청산되지 않은 미실현 보유 포지션(Open Positions)도 장부에 포함</b>하여, 투자자가 미실현 손익과 진행 중인 거래 상태를 누락 없이 파악할 수 있도록 한다.</li>
+        <li><b>[시스템 규칙] 포트폴리오 개설일 정밀 추적:</b> 시뮬레이션 시 비교 기준이 되는 '포트폴리오 개설일'은 단순히 단일 테이블이 아닌, <code>watchlist</code>(관심종목 등록일), <code>order_intents</code>(주문 발생일), <code>positions</code>(잔고 발생일) 등 시스템 내 모든 행동 로그를 포괄적으로 검색하여 가장 이른 시점을 개설일로 자동 세팅한다. 날짜 파싱 시 발생할 수 있는 문자열 오류를 방지하기 위해 앞 10자리(YYYY-MM-DD)를 안전하게 추출하는 방식을 강제한다.</li>
     </ul>
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
         <li><b>[시스템 규칙] KST(한국표준시) 타임존 절대 강제:</b> 클라우드 환경(Streamlit Cloud 등) 배포 시 OS 시스템 시간이 UTC로 설정될 수 있으므로, 프론트엔드와 백엔드 간의 시차(Timezone) 불일치 오류를 막기 위해 모든 로컬 시간 연산과 DB 레코딩에는 명시적인 <code>KST(UTC+9)</code> 타임존 속성을 강제 적용한다.</li>
         <li><b>[시스템 규칙] 스캐너 세션 캐싱 및 상태 보존:</b> AI 타점 스캐너 실행 결과 및 검색 데이터는 Streamlit의 <code>st.session_state</code>에 안전하게 캐싱되어, 종목 추가(담기) 등의 UI 리렌더링 이벤트 발생 시에도 검색 결과 목록이 증발하지 않고 그대로 유지된다.</li>
+        <li><b>[시스템 규칙] 전략 파라미터 UI 가시성 및 동결 (Read-only):</b> <code>system_contract.yaml</code>에 의해 동결된 파라미터는 사용자가 슬라이더 등으로 임의 조작할 수 없으나, 현재 시스템이 어떤 기준으로 작동하는지 투명하게 확인할 수 있도록 사이드바에 '읽기 전용(Read-only) 아코디언 패널'을 통해 상시 표기해야 한다. 검증되지 않은 임의 조작 UI의 배치는 엄격히 금지된다.</li>
         <li><b>[시스템 규칙] 다중 연산 스피너(Spinner) 및 중복 클릭 방지:</b> 시뮬레이션, 대규모 데이터 스캔, 잔고 동기화 등 응답 지연이 발생하는 작업 수행 시 반드시 UI에 시각적 피드백(<code>st.spinner</code>)을 제공하여 사용자의 중복 클릭(Double-post)으로 인한 메모리 충돌과 세션 꼬임 현상을 원천 방어한다.</li>
         <li><b>[시스템 규칙] 엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(예: <code>is_mock</code>)은 스트림릿 시크릿에서 문자열(예: <code>"false"</code>)로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 대소문자를 무시한 명시적 형변환(Boolean Parsing)을 거친다.</li>
         <li><b>[시스템 규칙] 도메인 URL 위생화(Sanitization):</b> KIS Open API 등의 통신 도메인은 복사/붙여넣기 시 유입될 수 있는 보이지 않는 제로스페이스 및 비-ASCII 특수 문자를 원천 차단하기 위해 철저한 ASCII 클렌징 및 공백 제거 과정을 거친 후 호출한다.</li>
