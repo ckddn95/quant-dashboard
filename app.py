@@ -11,7 +11,6 @@ import broker.kis_client as kis
 import quant_engine as quant
 
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
-# [Rule C] KST 타임존 강제
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 def check_password():
@@ -55,10 +54,7 @@ def color_profit_loss(val):
     return ''
 
 st.title("Core-Satellite Quant System (MSA)")
-
-# 🛑 [마스터 프롬프트 준수] 필수 테스트 통과 전 LIVE 안전성 선언 엄격 금지 경고 배너
 st.error("🚨 **[LIVE 금지 / 미검증 상태]** 현재 통합 엔진 로직은 🟢[구현 완료] 되었으나, 시스템 헌장 제11장에 명시된 **Pytest 기반 자동화 테스트(상태머신 멱등성, Mock HTTP, 회계 중복예약 방지 등)**를 통과하지 않아 🔵[테스트 완료] 상태가 아닙니다. 실전 계좌(REAL) 자동매매 가동을 엄격히 금지합니다.")
-
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **고급 시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
 STRAT_DISPLAY_MAP = {quant.Strategy.CORE: '대형주 (Core)', quant.Strategy.SATELLITE: '중소형주 (Satellite)'}
@@ -129,7 +125,7 @@ st.sidebar.header("⚙️ 전략 파라미터 (Baseline)")
 current_config = quant.get_default_config(active_strat)
 
 with st.sidebar.expander("📊 현재 적용된 계약 파라미터 보기", expanded=False):
-    st.info("💡 시스템 헌장(YAML)에 의해 임의 변경이 차단된 읽기 전용 상태입니다.")
+    st.info("💡 시스템 헌장(YAML)에 의해 임의 변경이 차단된 읽기 전용 상태입니다. (OOS 검증 원칙 준수)")
     st.markdown(f"- **200일 추세선 방어:** {'✅ 활성' if current_config.ma200 else '❌ 비활성'}")
     st.markdown(f"- **골든크로스/눌림목 버퍼:** `{current_config.buf * 100:.1f}%`")
     st.markdown(f"- **긴급 손절 컷 (SL):** `{current_config.sl * 100:.1f}%`")
@@ -397,7 +393,7 @@ with tab3:
 
 with tab4:
     st.header("🧪 고급 백테스트 엔진")
-    st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
+    st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 완벽히 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
     
     today_date = datetime.datetime.now(KST).date()
     stocks_df = pd.DataFrame(db.get_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value))
@@ -576,69 +572,106 @@ with tab5:
 
     <h3>🧮 2. 전략별 매력도 계산 공식 및 스캔 분리 (Strategy & Signal Regime)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>일봉 지표와 실시간 가격의 완전 분리:</b> 이동평균선(MA20, 60, 200) 등 지표 연산은 '미래 참조(Look-ahead)' 방지를 위해 무조건 전일(T-1) 종가까지만 반영하여 픽스(Fix)한다. 당일 실시간 현재가(T)가 이 고정된 지표선을 돌파하는지만을 순수하게 검사한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>2연속 1분봉 확인 룰 (Signal Regime):</b> 실전 봇(Worker)은 가짜 돌파(Fake Breakout)로 인한 잦은 휩소 매매를 막기 위해, 매수 및 정상 추세 매도 신호가 발생할 경우 1분봉 종가 기준으로 2회 연속 조건 충족이 확인될 때만(Count: 2) 신호를 확정하고 주문을 발송한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>즉각 위험 청산 (Immediate Execution):</b> 장중 손절컷(SL)과 트레일링 스탑(TS)은 계좌 보호를 위해 2분 검증을 거치지 않고 타격 즉시(Instantaneous) 실시간으로 강제 청산 주문을 발송한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>UI 스캐너 예비 타점 명시:</b> 사용자가 화면에서 클릭하는 '실시간 AI 타점 스캐너'는 2분을 기다릴 수 없는 UI 특성상 버튼을 누른 그 순간(Instant)의 1차 조건 충족 여부만을 보여주며, 확정이 아닌 '예비 신호'로 간주된다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>재진입 쿨다운 (Signal Rearm):</b> 어떠한 이유로든 매도가 발생한 종목은, 기존 매수 조건이 한 번 이탈(False)되었다가 다시 충족되어야만 재진입(Rearm)을 허용하여 무한 물타기를 차단한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>공통 조건:</b> KIS 또는 FDR 시세 기준, 가격 유효성 검증(NaN, Inf, 0원 차단), 거래 정지 종목 제외. <code>MA200</code> 장기 추세선 상회 종목만 필터링.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Core (대형주) 산식:</b> KOSPI 시총 상위 200개 종목 대상. <code>MA60</code> 상승 추세 유지 시, <code>MA20</code>과 <code>MA60</code> 이격도를 기반으로 진입. (Score = 85.0 + max(0, 이격도 * 100))</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Satellite (중소형주) 산식:</b> KOSDAQ 시총 상위 150개 종목 대상. <code>MA20</code> 기준 -5% ~ +3% 사이의 눌림목 발생 시 진입. (Score = 85.0 + max(0, (0.03 - 이격도) * 100))</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>일봉 지표와 실시간 가격의 완전 분리:</b> 이동평균선 등 지표 연산은 '미래 참조(Look-ahead)' 방지를 위해 전일(T-1) 종가까지만 반영하여 픽스(Fix)한다. 당일 실시간 현재가(T)가 이 고정된 지표선을 돌파하는지만 검사한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>2연속 1분봉 확인 룰 (Signal Regime):</b> 실전 봇(Worker)은 가짜 돌파(Fake Breakout)를 막기 위해, 매수 및 정상 추세 매도 신호가 발생할 경우 1분봉 종가 기준으로 2회 연속 조건 충족이 확인될 때만(Count: 2) 신호를 확정한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>즉각 위험 청산 (Immediate Execution):</b> 장중 손절컷(SL)과 트레일링 스탑(TS)은 계좌 보호를 위해 2분 검증 없이 타격 즉시(Instantaneous) 강제 청산 주문을 발송한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>UI 스캐너 예비 타점 명시:</b> UI의 '실시간 스캐너'는 2분을 기다릴 수 없으므로 버튼을 누른 그 순간(Instant)의 1차 조건 충족 여부만을 보여주며, 확정이 아닌 '예비 신호'로 취급한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>재진입 쿨다운 (Signal Rearm):</b> 어떠한 이유로든 매도가 발생한 종목은, 매수 조건이 한 번 이탈(False)되었다가 다시 충족되어야만 재진입(Rearm)을 허용하여 무한 물타기를 차단한다.</li>
     </ul>
 
     <h3>⚙️ 3. 전략별 기본 파라미터 및 레지스트리 (Parameters & Registry)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>단일 진실 공급원(SSOT):</b> 시스템의 모든 파라미터(Core/Sat)와 비용률은 오직 <code>system_contract.yaml</code> 파일에서만 관리(하드코딩 배제)되며, UI는 이를 읽기 전용(Read-only)으로 표출만 한다. 변경 시 버전을 동시 상향해야 한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>파라미터 무결성 경계값 보장:</b> <code>NaN</code>, <code>Inf</code>는 시스템 폭주를 유발하므로 엔진단에서 차단한다. 손절컷(<code>sl</code>)과 트레일링 하락허용(<code>ts_drp</code>)은 반드시 음수(-)로 설정되어야 하며, 파라미터 조작으로 인한 오작동을 원천 봉쇄한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>단일 진실 공급원(SSOT):</b> 시스템 파라미터(Core/Sat)와 비용률은 오직 <code>system_contract.yaml</code> 파일에서만 관리되며, UI는 이를 읽기 전용(Read-only)으로 표출한다. 변경 시 버전을 상향해야 한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Core 기본 파라미터:</b> 버퍼 1.5%, 손절 -15%, 투입 한도 35%, 익절목표 30%, 하락허용 -10%, 쿨다운 60 거래일, 최소보유 5 거래일.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Satellite 기본 파라미터:</b> 버퍼 1.0%, 손절 -12%, 투입 한도 20%, 익절목표 20%, 하락허용 -7%, 쿨다운 30 거래일, 최소보유 3 거래일.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>파라미터 무결성 경계값 보장:</b> <code>NaN</code>, <code>Inf</code>는 시스템 폭주를 유발하므로 차단한다. 손절컷(<code>sl</code>)과 트레일링 하락허용(<code>ts_drp</code>)은 반드시 음수(-)로 강제된다.</li>
     </ul>
 
     <h3>🛡️ 4. 3대 고급 안전장치 및 장중 손절/트레일링 규칙</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>장중 보수적 청산:</b> 장중 저가(Low)가 손절선 또는 트레일링 컷에 터치하면 즉각 가장 보수적인 가격(Adverse-first)으로 청산 시그널을 발생시킨다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>종가 추세 이탈:</b> 최소 보유일 경과 후, Core는 MA60을, Satellite는 MA20을 하향 이탈(-버퍼/2.0) 시 종가 기준으로 전량 청산한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>원자적 제출 게이트(Atomic Gate):</b> 봇(Worker)은 KIS 실주문 POST를 쏘기 직전, 동일 트랜잭션 내에서 현금 한도, 킬 스위치, 리스 토큰 만료, 가격 괴리를 완벽히 교차 검증하여, 하나라도 실패하면 즉시 RISK_REJECTED 처리한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>장중 보수적 청산 (Adverse-first):</b> 장중 저가(Low)가 손절선 또는 트레일링 컷에 터치하면 즉각 가장 보수적인 가격으로 청산 시그널을 발생시킨다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>종가 추세 이탈:</b> 최소 보유일 경과 후, Core는 MA60을, Satellite는 MA20을 하향 이탈 시 종가 기준으로 전량 청산한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>일일 손실 컷 차단:</b> 계좌의 일일 손익(Daily PnL)이 -5%를 초과할 경우 당일 신규 매수 진입을 전면 차단한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>가격 괴리율 방어:</b> 주문 생성 시점의 Intent Price와 제출 직전 Current Price 괴리가 3%를 초과하면 이상 급등락으로 간주하고 REJECTED 처리한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>원자적 제출 게이트(Atomic Gate):</b> 봇은 KIS 실주문 POST를 쏘기 직전, 단일 트랜잭션 내에서 현금 한도, 킬 스위치, 리스 토큰 만료를 교차 검증하여 실패 시 CANCELED 처리한다.</li>
     </ul>
 
     <h3>🔄 5. API 호출 규칙 및 주문 상태 머신 (API & State Machine)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>16단계 상태 단방향 전이:</b> 주문은 <code>INTENT_CREATED</code>부터 <code>ACKNOWLEDGED</code>, <code>FILLED</code>, <code>CANCELED</code> 등 계약에 명시된 16개 상태와 단방향 전이 룰에 의해서만 움직인다. UNKNOWN 주문을 맹목적으로 자동 재전송하지 않는다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>부분 체결 대사:</b> 체결 수량과 손익은 브로커 간의 누적 체결 델타(Delta)만을 산출하여 정확히 1번만 계산(Reconciliation)되며 매매 중지 상태에서도 대사는 지속된다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향, 티커가 조합된 Idempotency Key를 통해 다중 워커에 의한 중복 제출(Double POST)을 차단한다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>API 호출 제한 방어(Rate Limit):</b> KIS Open API 초당 호출 제한을 방어하는 철저한 지수 백오프(Exponential Backoff) 및 동시성 큐 통제 로직에 대한 검증을 앞두고 있다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>16단계 상태 단방향 전이:</b> 주문은 <code>INTENT_CREATED</code>부터 계약에 명시된 16개 상태 룰에 의해서만 움직인다. UNKNOWN 주문을 맹목적으로 재전송하지 않는다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>부분 체결 대사 (Reconciliation):</b> 체결 수량과 손익은 브로커 간의 누적 체결 델타(Delta)만을 산출하여 정확히 1번만 계산되며 매매 중지 상태에서도 지속된다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행으로 갱신된다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향 등이 조합된 키를 통해 다중 워커에 의한 중복 제출(Double POST)을 차단한다.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>API 초당 호출 제한(Rate Limit) 방어:</b> 대량 호출 로직 시 워커 풀의 동시성 크기를 10개로 제한하는 지수 백오프 로직 검증이 예정되어 있다.</li>
     </ul>
 
     <h3>⏱️ 6. 시뮬레이션 및 백테스트 실행 규칙 (Simulation Rules)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>고급 지표 산출 (TWR & Turnover):</b> 시뮬레이션은 단순 누적 수익률의 착시를 방지하기 위해 시간가중수익률(TWR), 포트폴리오 회전율(Turnover), 그리고 누수 비용(Cost Drag)을 완벽히 계산하여 UI에 노출한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>외부 입출금 비례 매도 (Pro-rata Sell):</b> Test 2 비교 시 외부 요인으로 포트폴리오 현금이 마이너스가 되면, 다음 거래일 시가에 보유 주식들을 비율대로 강제 매도하여 현금을 복구하는 완벽한 회계 로직을 수행한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>최소 시뮬레이션 기간 보장:</b> 2영업일 이상의 데이터 윈도우가 없거나 시작일과 종료일이 같을(0일) 경우 엔진 레벨에서 즉각 시뮬레이션을 차단(Fail-safe)한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>일간 스캔 전면 적용:</b> 짧은 운용 기간(예: 며칠) 검증 시 데이터 부족 문제를 해결하기 위해 시뮬레이션의 스캔 주기를 매일(Daily) 종가 기준으로 전면 개편하여 정밀한 1:1 성과 비교를 보장한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>라운드트립(Round-trip) 장부 및 미청산 MTM:</b> 거래 장부(Trade Logs)는 '진입부터 청산까지의 한 사이클'을 한 줄로 병합 표기하며, 시뮬레이션 종료 시점에 아직 청산되지 않은 보유 포지션(Open Positions)도 장부에 현재가 기준으로 산출하여 포함한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>잔여 현금 영혼 보내기(Partial Allocation):</b> 매수 시그널 발생 시 가용 현금이 목표 금액보다 적더라도, 1주 이상 살 수 있다면 현금을 100% 소진하여 부분 매수(Partial Allocation)를 집행한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>단일 진실 공급원 (SSOT for signals):</b> 실시간 UI 스캐너, 실전 자동매매 봇, 백테스트 엔진은 모두 동일한 '순수 전략 공통 함수'를 공유한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>무한 출혈(Whipsaw) 방지 로직:</b> 연속 손실 시 설정된 일수(cd)만큼 쿨다운을 적용해 매수 후보에서 배제한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>강세장 비중 증액 (Bull-market Boost):</b> 코스피 지수가 200일선 위에 위치할 때 매수 비중을 최대 1.5배 증액하여 적용한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>평가 단가와 체결 단가의 엄격한 분리 (NAV 보정):</b> 거래 정지/휴장으로 일봉 데이터 누락 시 포트폴리오 가치 평가는 '가장 최근의 유효 종가'를 활용한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>시뮬레이션 T+1 체결 반영:</b> 신호 발생 당일(T일)의 종가로 체결되는 룩어헤드 편향을 제거하고, 다음 유효 영업일(T+1) 시가(Open)로 체결된다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>회계 이중 출금 방어 (No Double-Spend):</b> 매수 시그널 당일에는 가상 현금만 차감하여 한도를 체크하고, 실제 계좌 잔고는 체결 당일에 단 한 번만 차감한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>비용 가정 (Cost Assumption):</b> 매수와 매도 각각 수수료/세금을 포함하여 보수적인 0.25% (왕복 0.50%)의 비용률을 편도 적용한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>일간 스캔 (Daily Scan) 전면 적용:</b> 단기간 검증 시 데이터 부족 문제를 해결하기 위해 시뮬레이션 스캔 주기를 매일 종가 기준으로 개편하여 1:1 비교를 보장한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>라운드트립(Round-trip) 거래 장부 및 MTM:</b> 거래 장부는 '진입부터 청산까지의 한 사이클'을 한 줄로 병합 표기하며, 아직 청산되지 않은 포지션(MTM)도 장부에 현재가 기준으로 포함한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>고급 성과 지표 산출:</b> 단순 누적 수익률 착시 방지를 위해 시간가중수익률(TWR), 포트폴리오 회전율(Turnover), 총 누수 비용(Cost Drag)을 계산하여 노출한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>외부 입출금 발생 시 비례 매도 (Pro-rata Sell):</b> Test 2 비교 시 외부 요인으로 현금이 마이너스가 되면, 다음 거래일 시가에 보유 주식들을 비율대로 강제 매도하여 회계 정합성을 맞춘다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>최소 시뮬레이션 기간 보장:</b> 2영업일 이상의 데이터 윈도우가 없거나 시작일=종료일일 경우 엔진 레벨에서 즉각 시뮬레이션을 차단(Fail-safe)한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>잔여 현금 영혼 보내기 (Partial Allocation):</b> 매수 시그널 발생 시 가용 현금이 목표액보다 적더라도, 1주 이상 살 수 있다면 현금을 100% 소진하여 부분 매수한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>호가 단위(Tick Size) 보정 및 절사 원칙:</b> 시뮬레이션 매수 수량 산출 시, 소수점이 나오더라도 반드시 <code>int()</code> 처리하여 1주 미만 절사(내림)한다.</li>
     </ul>
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>KST(한국표준시) 타임존 강제:</b> 클라우드 배포 시 OS 시간이 UTC로 잡혀 발생할 수 있는 시차 오작동을 막기 위해 모든 시간 연산과 DB 레코딩에는 <code>KST(UTC+9)</code> 타임존을 적용한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>포트폴리오 개설일 강제 동기화:</b> Test 2 수행 시, 포트폴리오 개설일(최초 종목 등록일/주문 발생일)을 추적하여 개설된 지 1년 미만인 경우 '실제 개설일'부터 오늘까지로 시작일을 자동 보정하여 비교 신뢰성을 부여한다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>Point-in-Time 및 생존자 편향:</b> 과거 분봉 데이터 및 과거 상장폐지 종목 획득이 불가능한 현 패키지(FDR) 환경에서는 시뮬레이션 시 종가 데이터를 근사하여 사용하는 <code>DAILY_APPROX</code> 모드가 강제 적용되며, 생존자 편향(Survivor Bias) 근사치임을 붉은색 경고로 노출한다. 향후 1분봉 데이터 레이크 연동을 계획 중이다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>KST(한국표준시) 타임존 절대 강제:</b> 클라우드 배포 시 OS 시간이 UTC로 잡혀 발생할 수 있는 시차 오작동을 막기 위해 모든 연산에 <code>KST(UTC+9)</code> 타임존을 강제한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>스캐너 세션 캐싱 및 상태 보존:</b> AI 스캐너 결과는 Streamlit의 <code>st.session_state</code>에 캐싱되어, 화면 새로고침 시 검색 결과가 증발하지 않도록 방어한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>다중 연산 스피너(Spinner) 및 중복 클릭 방지:</b> 시뮬레이션 등 응답 지연 작업 시 반드시 <code>st.spinner</code> 피드백을 제공해 사용자 중복 클릭 세션 꼬임을 방어한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>도메인 URL 위생화(Sanitization):</b> 통신 도메인은 복사 시 유입될 수 있는 보이지 않는 제로스페이스 및 특수 문자를 차단하기 위해 ASCII 클렌징을 거친다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>테스트 1 포트폴리오 분석:</b> 시스템 내에 등록된 '현재 관심종목'과 '실제 보유종목' 전체를 하나의 포트폴리오로 취합하여 과거 성과를 회고하도록 UI가 개편되었다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>테스트 2 완벽한 1:1 비교 강제:</b> 임의 가상 원금이 아닌 실제 계좌의 현재 투자 원금(Eval - PnL)을 초기 자금으로 강제 동기화하여 진정한 1:1 비교를 제공한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>포트폴리오 개설일 강제 동기화 (Test 2):</b> 개설일(DB상 최초 로그 발생일)을 추적하여 개설된 지 1년 미만인 경우 '실제 개설일'부터 오늘까지로 시작일을 자동 보정한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>시뮬레이션 버튼 및 결과 뷰 100% 확장:</b> 모든 테스트의 실행 버튼과 결과는 화면 전체(Full-width) 너비를 100% 활용하여 가독성을 극대화한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>전략 파라미터 UI 가시성 및 동결 (Read-only):</b> <code>system_contract.yaml</code>에 의해 동결된 파라미터는 읽기 전용 아코디언 패널로 투명하게 공개하되, 조작 UI 배치를 금지한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>다중 계좌 스위칭:</b> Core와 Satellite 전략은 완전히 다른 계좌 정보를 바라보며, <code>is_mock</code> 누락 시 실전이 아닌 모의투자(True)로 강제 지정된다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>가상원금 기반 과대 매수 차단:</b> 주문 수량 산출 시 <code>max(실제평가금, 가상원금)</code>을 사용하지 않고 실제 평가금만을 베이스로 계산한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Fail-closed (안전 우선 차단):</b> API 장애로 인해 금액 조회가 0 반환되더라도, 예수금 대체를 하지 않고 가용 현금을 0으로 인식해 미수금을 방어한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>투명한 대기열 및 정렬:</b> 매도 ➔ 매수 ➔ 관망 순서로 대기열을 자동 정렬하여 현금 부족이나 타점 미달 사유를 큐에 투명하게 표시한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>대기열 뷰 확장 및 추가 매수 구분:</b> 보유 중인 종목에 매수 시그널이 발생할 경우 '추가 매수'로 명확히 구분 표기한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>예외 처리 충돌 방어:</b> Streamlit <code>st.rerun()</code> 동작이 포괄적 except 구문에 걸려 로직이 멈추는 것을 방지하기 위해 ValueError 등을 명시적으로 분리 처리한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>UI/UX 포맷팅 절대 규칙:</b> 지표 용어를 한글로 친절히 순화(CAGR ➔ 연평균 수익률)하고, 수익률 양수 적색, 음수 청색 하드코딩 스타일링을 적용한다.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>Point-in-Time 한계 및 생존자 편향:</b> 과거 분봉 및 상장폐지 종목 획득이 불가능한 현 패키지 환경에서는 <code>DAILY_APPROX</code> 모드가 강제 적용되며, 생존자 편향(Survivor Bias) 근사치임을 붉은색 경고로 노출한다. 향후 1분봉 데이터 연동 시 INTRADAY_EXACT 구동을 목표로 한다.</li>
     </ul>
 
     <h3>🗄️ 8. 데이터베이스 및 계좌 격리 (Database & Integrity)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>무손실 DB 마이그레이션:</b> DB 스키마 업데이트 시, 기존 데이터를 백업 후 <code>INSERT INTO SELECT</code> 방식으로 원자적 마이그레이션하여 과거 원장(Ledger)을 영구 보존한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>계좌 핑거프린트(Fingerprint) 격리:</b> 사용자 자산 보호를 위해 DB의 <code>account_id</code> 컬럼에는 평문 계좌번호 대신 SHA-256 단방향 해시로 생성된 계좌 핑거프린트만을 기록한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>전역/개별 계좌 매매 중지 분리:</b> 매매 통제 시스템은 전체 계좌를 일시에 정지시키는 마스터 킬 스위치(Master)와 특정 전략(Core/Sat) 계좌만을 제어하는 개별 토글로 2원화되어 간섭 없이 작동한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>음수 체결 롤백 금지 및 감사 보존:</b> 체결 수량 불일치로 인해 로컬 포지션이 음수(< 0)가 되더라도 트랜잭션을 롤백(Rollback)하여 은폐하지 않는다. 포지션을 그대로 커밋하되 <code>RECONCILIATION_REQUIRED</code> 상태를 마킹하여 추후 감사가 이루어지도록 한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>SQLite 기반 WAL 모드:</b> 다중 프로세스(UI/Bot) 간의 동시 접근 락(Lock) 방지를 위해 WAL 모드가 적용되었다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>수동 보유와 자동매매(Managed) 분리:</b> 브로커의 전체 잔고를 자동매매 포지션으로 무단 덮어쓰지 않으며, 봇 스스로 체결한(Fill Delta) 수량만을 <code>managed_qty</code>로 누적한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>무손실 DB 마이그레이션:</b> DB 스키마(v4, v5) 업데이트 시 기존 데이터를 임시 테이블 백업 후 <code>INSERT INTO SELECT</code> 방식으로 마이그레이션하여 과거 원장을 보존한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>계좌 핑거프린트(Fingerprint) 격리:</b> DB <code>account_id</code> 컬럼에는 평문 계좌번호 대신 SHA-256 단방향 해시로 생성된 핑거프린트만을 기록한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>OrderSpec 메타데이터 확장 정규화:</b> 주문 의도 테이블은 추적성 확보를 위해 <code>quote_id</code>, <code>intent_ttl</code>, <code>cost_model_version</code> 등 27개의 상세 필드로 정규화되었다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>전역/개별 계좌 매매 중지 분리:</b> 매매 통제 시스템은 마스터 킬 스위치(Master Kill Switch)와 특정 전략(Core/Sat) 개별 토글로 2원화되어 상호 간섭 없이 독립 작동한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>음수 체결 롤백 금지 및 감사 보존:</b> 브로커 수량 불일치로 로컬 포지션이 음수(< 0)가 되더라도 트랜잭션 롤백으로 은폐하지 않는다. 포지션을 그대로 커밋하되 <code>RECONCILIATION_REQUIRED</code> 상태를 마킹하여 감사를 수행하도록 강제한다.</li>
     </ul>
 
     <h3>💡 9. 장애 복구 및 프로세스 제어 (Disaster Recovery & Fencing)</h3>
     <ul>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Worker Lease & Fencing:</b> 다중 봇 실행 시 <code>worker_leases</code> 테이블을 통해 Lease 획득자만 주문을 POST 할 수 있으며, 뺏긴 워커는 즉시 권한을 상실한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Fail-closed (안전 우선 차단):</b> API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 예수금으로 대체하지 않고 가용 현금을 0으로 인식하여 미수금을 원천 방어한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Crash Window 방어:</b> 프로세스가 멈추더라도 UNIQUE 제약과 상태 대사를 통해 동일 주문의 2회 발송을 구조적으로 차단한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>원자적 안전 게이트(Atomic Safety Gate):</b> KIS POST 직전, 동일 트랜잭션 내에서 현금 한도, 킬 스위치, 리스 토큰 만료를 교차 검증하여 실패 시 CANCELED 처리한다.</li>
     </ul>
 
     <h3>🔐 10. 보안 및 런타임 환경 (Security & Environment)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>세션 만료 및 폼 기반 로그인:</b> 로그인 시 '엔터(Enter)' 키 입력을 지원하되, 새로고침(F5) 시 브라우저 세션이 초기화되어 로그아웃되는 것을 의도된 기본 보안 정책(Secure by default)으로 채택한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>패키지 의존성(Dependency) 엄격 관리:</b> 새로운 외부 라이브러리 도입 시 <code>ModuleNotFoundError</code>로 인한 장애를 막기 위해 <code>requirements.txt</code> 파일 형상 관리를 동기화해야 한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>API Key 물리적 격리 (Zero Plaintext):</b> 증권사 <code>APP_KEY</code> 등 민감 정보는 절대 DB나 로그에 평문으로 저장하지 않는다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>강력한 해시 인증 (Bcrypt Authentication):</b> 시스템 로그인에 사용되는 비밀번호는 Salt가 포함된 Bcrypt 해시 알고리즘을 통해서만 검증을 수행한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>세션 만료 및 폼 기반 로그인:</b> 로그인 시 '엔터(Enter)' 키 입력을 지원하되, 새로고침(F5) 시 브라우저 세션이 초기화되어 로그아웃되는 것을 의도된 보안 정책(Secure by default)으로 채택한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>패키지 의존성(Dependency) 엄격 관리:</b> 새로운 외부 라이브러리 도입 시 <code>ModuleNotFoundError</code> 방지를 위해 <code>requirements.txt</code> 파일 형상 관리를 동기화한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(<code>is_mock</code>)이 스트림릿 시크릿에서 문자열 <code>"false"</code>로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 명시적 형변환을 거친다.</li>
     </ul>
 
     <h3>🧪 11. 자동화 테스트 및 품질 보증 (QA & Automated Testing)</h3>
