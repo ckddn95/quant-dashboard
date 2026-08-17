@@ -1,6 +1,7 @@
 whitepaper_version: "1.1.0"
 contract_version: "1.1.0"
-database_schema_version: "v2"
+database_schema_version: "v3"
+cost_model_version: "1.0.0"
 
 strategy:
   CORE:
@@ -30,8 +31,8 @@ simulation_rules:
   intraday_adverse_first: true
   assumed_cost_pct_per_side: 0.0025
   test1_scan_freq: "DAILY"
-  test2_test3_scan_freq: "DAILY"  # 🛑 [패치] 주간 스캔(WEEKLY)의 맹점을 타파하고 매일 스캔(DAILY)으로 통합
-  daily_cutoff: "매 거래일 종가"
+  test2_test3_scan_freq: "DAILY"
+  weekly_cutoff: "매주 마지막 KRX 거래일 종가"
 
 allowed_state_transitions:
   INTENT_CREATED: [CLAIMED, CANCELED, QUARANTINED]
