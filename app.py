@@ -397,7 +397,7 @@ with tab3:
 
 with tab4:
     st.header("🧪 고급 백테스트 엔진")
-    st.warning("⚠️ [DATA_LIMITED] 과거 상장폐지 데이터 수급 한계로 인해 생존자 편향(Survivor Bias)이 존재합니다. 미래 수익의 절대적 보장 지표가 아닙니다.")
+    st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
     
     today_date = datetime.datetime.now(KST).date()
     stocks_df = pd.DataFrame(db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value))
@@ -407,7 +407,6 @@ with tab4:
     
     combined_tickers = set()
     combined_data = []
-    
     for w in db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
         tk = str(w['티커']).zfill(6)
         if tk not in combined_tickers:
@@ -602,6 +601,9 @@ with tab5:
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
+        <li><b>[시스템 규칙] 스캐너 세션 캐싱 및 상태 보존:</b> AI 타점 스캐너 실행 결과 및 검색 데이터는 Streamlit의 <code>st.session_state</code>에 안전하게 캐싱되어, 종목 추가(담기) 등의 UI 리렌더링 이벤트 발생 시에도 검색 결과 목록이 증발하지 않고 그대로 유지된다.</li>
+        <li><b>[시스템 규칙] 엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(예: <code>is_mock</code>)은 스트림릿 시크릿에서 문자열(예: <code>"false"</code>)로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 대소문자를 무시한 명시적 형변환(Boolean Parsing)을 거친다.</li>
+        <li><b>[시스템 규칙] 도메인 URL 위생화(Sanitization):</b> KIS Open API 등의 통신 도메인은 복사/붙여넣기 시 유입될 수 있는 보이지 않는 제로스페이스 및 비-ASCII 특수 문자를 원천 차단하기 위해 철저한 ASCII 클렌징 및 공백 제거 과정을 거친 후 호출한다.</li>
         <li><b>[시스템 규칙] 테스트 1 포트폴리오 분석:</b> 테스트 1은 기존의 단일 종목 입력 방식을 전면 폐기하고, 시스템 내에 등록된 <b>'현재 관심종목'과 '실제 보유종목' 전체를 하나의 포트폴리오로 취합</b>하여 과거 기간의 성과를 회고하는 UI로 개편되었다. 분석 결과는 화면 전체(Full-width)를 활용하여 사용자 가독성을 극대화한다.</li>
         <li><b>[시스템 규칙] 테스트 2 완벽한 1:1 비교 강제:</b> AI 가상 운용 시뮬레이션(테스트 2) 수행 시, 임의의 가상 원금이 아닌 <b>실제 계좌의 현재 투자 원금(Eval - PnL)</b>을 시뮬레이션의 초기 자금(Init Cash)으로 강제 동기화하여 진정한 의미의 성과 비교(Apples-to-apples)를 제공한다. 테스트 2의 비교 기간은 <b>최근 1년</b>을 기본값으로 자동 설정하며, AI 가상 운용 성과와 현재 사용자의 실제 계좌 성과를 화면에 <b>Side-by-side (나란히 비교)</b> 배치하여 직관적인 성과 대조를 강제한다.</li>
         <li><b>[시스템 규칙] 시뮬레이션 버튼 및 결과 뷰 100% 확장:</b> 모든 테스트(1, 2, 3)의 실행 버튼과 분석 결과는 화면 전체(Full-width) 너비를 100% 활용하여 사용자 가독성과 클릭 편의성을 극대화하며, UI의 통일성을 유지한다.</li>
