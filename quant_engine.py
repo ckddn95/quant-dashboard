@@ -304,7 +304,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         pending_orders = []
         cooldown_tracker = {} 
         trade_log = []
-        closed_trades_log = [] # 🛑 [패치] 라운드트립 장부
+        closed_trades_log = []
         assumed_cost_pct = SIM_RULES['assumed_cost_pct_per_side']
         
         for i, current_date in enumerate(calendar):
@@ -329,12 +329,11 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                             old_bp = positions[tk]['buy_price']
                             new_qty = old_qty + executable_qty
                             new_bp = ((old_qty * old_bp) + (executable_qty * cost_price)) / new_qty
-                            # 추가 매수 시 진입일은 최초 유지
                             positions[tk].update({"qty": new_qty, "buy_price": new_bp, "highest": cost_price})
                         else:
                             positions[tk] = {
                                 "qty": executable_qty, "buy_price": cost_price, "highest": cost_price, 
-                                "days": 0, "entry_date": current_date # 🛑 최초 진입일 기록
+                                "days": 0, "entry_date": current_date 
                             }
                         
                 elif order['side'] == 'SELL' and tk in positions:
@@ -345,18 +344,18 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     if profit_pct < 0:
                         cooldown_tracker[tk] = current_date 
                     
-                    # 🛑 [패치] 매도 완료 시 라운드트립 기록 (1줄 병합)
+                    # 🛑 [수정] 표 컬럼 포맷 에러 방지를 위해 키를 완벽히 매칭
                     closed_trades_log.append({
                         "종목명": ticker_to_name.get(tk, tk),
                         "진입일": positions[tk]["entry_date"].strftime('%Y-%m-%d'),
                         "청산일": current_date.strftime('%Y-%m-%d'),
                         "보유일수": f"{positions[tk]['days']}일",
-                        "평균진입가": positions[tk]['buy_price'],
-                        "청산가": sell_price,
+                        "진입단가": positions[tk]['buy_price'],
+                        "청산단가": sell_price,
                         "수량": positions[tk]['qty'],
-                        "실현손익": profit_amt,
+                        "손익금": profit_amt,
                         "수익률": f"{profit_pct*100:+.2f}%",
-                        "청산사유": order.get('reason', '종가 추세이탈')
+                        "사유": order.get('reason', '종가 추세이탈')
                     })
                     
                     cash += sell_price * positions[tk]['qty']
@@ -388,18 +387,17 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     if profit_pct < 0:
                         cooldown_tracker[tk] = current_date
                     
-                    # 🛑 장중 청산 라운드트립 기록
                     closed_trades_log.append({
                         "종목명": ticker_to_name.get(tk, tk),
                         "진입일": pos["entry_date"].strftime('%Y-%m-%d'),
                         "청산일": current_date.strftime('%Y-%m-%d'),
                         "보유일수": f"{pos['days']}일",
-                        "평균진입가": pos['buy_price'],
-                        "청산가": real_sell_price,
+                        "진입단가": pos['buy_price'],
+                        "청산단가": real_sell_price,
                         "수량": pos['qty'],
-                        "실현손익": profit_amt,
+                        "손익금": profit_amt,
                         "수익률": f"{profit_pct*100:+.2f}%",
-                        "청산사유": reason
+                        "사유": reason
                     })
                     
                     cash += real_sell_price * pos['qty']
@@ -471,6 +469,25 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                         pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty, "reason": cand['reason']})
                         available_cash -= qty * cand['close'] * (1.0 + assumed_cost_pct)
 
+        # 🛑 [패치] 시뮬레이션 종료 시점에 청산되지 않고 보유 중인(Open) 종목들도 거래 장부에 추가 표기
+        for tk, pos in positions.items():
+            last_close = dfs[tk]['Close'].loc[:end_date].dropna().iloc[-1] if tk in dfs else pos['buy_price']
+            profit_pct = (last_close / pos['buy_price']) - 1.0 if pos['buy_price'] > 0 else 0
+            profit_amt = (last_close - pos['buy_price']) * pos['qty']
+            
+            closed_trades_log.append({
+                "종목명": ticker_to_name.get(tk, tk),
+                "진입일": pos["entry_date"].strftime('%Y-%m-%d'),
+                "청산일": "-", 
+                "보유일수": f"{pos['days']}일",
+                "진입단가": pos['buy_price'],
+                "청산단가": last_close,
+                "수량": pos['qty'],
+                "손익금": profit_amt,
+                "수익률": f"{profit_pct*100:+.2f}%",
+                "사유": "보유 중 (미청산)"
+            })
+
         if not nav_history:
             return {"status": "error", "msg": "데이터 부족으로 시뮬레이션을 완료할 수 없습니다."}
         
@@ -485,7 +502,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             "final_asset": final_asset,
             "final_port_ret": (final_asset / init_cash - 1) * 100,
             "metrics": {"CAGR": cagr, "MDD": mdd},
-            "trade_logs": closed_trades_log, # 🛑 라운드트립 장부 반환
+            "trade_logs": closed_trades_log,
             "summary_rows": [
                 {"항목": "총 거래일수", "값": f"{len(nav_df)} 일"},
                 {"항목": "총 매도(청산) 횟수", "값": f"{len(trade_log)} 회"},
