@@ -479,6 +479,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
     except Exception as e:
         return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
 
+# 🛑 [패치] Test 3 역시 Daily 스캔 강제
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig):
     krx = load_krx_universe()
     if krx.empty:
@@ -490,4 +491,6 @@ def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, 
         cands = krx[krx['Market'].str.contains('KOSDAQ', case=False, na=False)].head(100)
         
     target_df = pd.DataFrame([{'티커': str(r['Code']).zfill(6), '종목명': r['Name']} for _, r in cands.iterrows()])
-    return run_quant_simulation(target_df, strat, init_cash, datetime.date(year, 1, 1), datetime.date(year, 12, 31), cfg, is_weekly_scan=True)
+    
+    # is_weekly_scan=False 로 변경
+    return run_quant_simulation(target_df, strat, init_cash, datetime.date(year, 1, 1), datetime.date(year, 12, 31), cfg, is_weekly_scan=False)
