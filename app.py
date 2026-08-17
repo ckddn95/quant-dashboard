@@ -54,7 +54,10 @@ def color_profit_loss(val):
     return ''
 
 st.title("Core-Satellite Quant System (MSA)")
-st.error("🚨 **[LIVE 금지 / 미검증 상태]** 현재 통합 엔진 로직은 🟢[구현 완료] 되었으나, 시스템 헌장 제11장에 명시된 **Pytest 기반 자동화 테스트(상태머신 멱등성, Mock HTTP, 회계 중복예약 방지 등)**를 통과하지 않아 🔵[테스트 완료] 상태가 아닙니다. 실전 계좌(REAL) 자동매매 가동을 엄격히 금지합니다.")
+
+# 🛑 [마스터 프롬프트 준수] Pytest 통과 전 LIVE 안전 선언 금지
+st.error("🚨 **[LIVE 금지 / 미검증 상태]** 현재 통합 엔진 및 자동화 테스트 스크립트(`test_quant.py`)가 🟢[구현 완료] 되었으나, 서버 내에서 `pytest`를 통한 검증을 아직 통과하지 않아 🔵[테스트 완료] 상태가 아닙니다. 직접 테스트를 실행하여 통과를 확인하기 전까지 실전 계좌(REAL) 가동을 엄격히 금지합니다.")
+
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **고급 시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
 STRAT_DISPLAY_MAP = {quant.Strategy.CORE: '대형주 (Core)', quant.Strategy.SATELLITE: '중소형주 (Satellite)'}
@@ -601,8 +604,8 @@ with tab5:
 
     <h3>🔄 5. API 호출 규칙 및 주문 상태 머신 (API & State Machine)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>16단계 상태 단방향 전이:</b> 주문은 <code>INTENT_CREATED</code>부터 계약에 명시된 16개 상태 룰에 의해서만 움직인다. UNKNOWN 주문을 맹목적으로 재전송하지 않는다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>부분 체결 대사 (Reconciliation):</b> 체결 수량과 손익은 브로커 간의 누적 체결 델타(Delta)만을 산출하여 정확히 1번만 계산되며 매매 중지 상태에서도 지속된다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>16단계 상태 단방향 전이:</b> 주문은 <code>INTENT_CREATED</code>부터 계약에 명시된 16개 상태 룰에 의해서만 움직인다. UNKNOWN 주문을 맹목적으로 자동 재전송하지 않는다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>부분 체결 대사 (Reconciliation):</b> 체결 수량과 손익은 브로커 간의 누적 체결 델타(Delta)만을 산출하여 정확히 1번만 계산되며 매매 중지 상태에서도 대사는 지속된다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행으로 갱신된다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향 등이 조합된 키를 통해 다중 워커에 의한 중복 제출(Double POST)을 차단한다.</li>
         <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>API 초당 호출 제한(Rate Limit) 방어:</b> 대량 호출 로직 시 워커 풀의 동시성 크기를 10개로 제한하는 지수 백오프 로직 검증이 예정되어 있다.</li>
@@ -620,7 +623,7 @@ with tab5:
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>일간 스캔 (Daily Scan) 전면 적용:</b> 단기간 검증 시 데이터 부족 문제를 해결하기 위해 시뮬레이션 스캔 주기를 매일 종가 기준으로 개편하여 1:1 비교를 보장한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>라운드트립(Round-trip) 거래 장부 및 MTM:</b> 거래 장부는 '진입부터 청산까지의 한 사이클'을 한 줄로 병합 표기하며, 아직 청산되지 않은 포지션(MTM)도 장부에 현재가 기준으로 포함한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>고급 성과 지표 산출:</b> 단순 누적 수익률 착시 방지를 위해 시간가중수익률(TWR), 포트폴리오 회전율(Turnover), 총 누수 비용(Cost Drag)을 계산하여 노출한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>외부 입출금 발생 시 비례 매도 (Pro-rata Sell):</b> Test 2 비교 시 외부 요인으로 현금이 마이너스가 되면, 다음 거래일 시가에 보유 주식들을 비율대로 강제 매도하여 회계 정합성을 맞춘다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>외부 입출금 발생 시 비례 매도 (Pro-rata Sell):</b> Test 2 비교 시 외부 요인으로 포트폴리오 현금이 마이너스가 되면, 다음 거래일 시가에 보유 주식들을 비율대로 강제 매도하여 현금을 복구하는 완벽한 회계 로직을 수행한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>최소 시뮬레이션 기간 보장:</b> 2영업일 이상의 데이터 윈도우가 없거나 시작일=종료일일 경우 엔진 레벨에서 즉각 시뮬레이션을 차단(Fail-safe)한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>잔여 현금 영혼 보내기 (Partial Allocation):</b> 매수 시그널 발생 시 가용 현금이 목표액보다 적더라도, 1주 이상 살 수 있다면 현금을 100% 소진하여 부분 매수한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>호가 단위(Tick Size) 보정 및 절사 원칙:</b> 시뮬레이션 매수 수량 산출 시, 소수점이 나오더라도 반드시 <code>int()</code> 처리하여 1주 미만 절사(내림)한다.</li>
@@ -628,7 +631,7 @@ with tab5:
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>KST(한국표준시) 타임존 절대 강제:</b> 클라우드 배포 시 OS 시간이 UTC로 잡혀 발생할 수 있는 시차 오작동을 막기 위해 모든 연산에 <code>KST(UTC+9)</code> 타임존을 강제한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>KST(한국표준시) 타임존 절대 강제:</b> 클라우드 환경 배포 시 OS 시간이 UTC로 잡혀 발생할 수 있는 시차 오작동을 막기 위해 모든 연산에 <code>KST(UTC+9)</code> 타임존을 강제한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>스캐너 세션 캐싱 및 상태 보존:</b> AI 스캐너 결과는 Streamlit의 <code>st.session_state</code>에 캐싱되어, 화면 새로고침 시 검색 결과가 증발하지 않도록 방어한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>다중 연산 스피너(Spinner) 및 중복 클릭 방지:</b> 시뮬레이션 등 응답 지연 작업 시 반드시 <code>st.spinner</code> 피드백을 제공해 사용자 중복 클릭 세션 꼬임을 방어한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>도메인 URL 위생화(Sanitization):</b> 통신 도메인은 복사 시 유입될 수 있는 보이지 않는 제로스페이스 및 특수 문자를 차단하기 위해 ASCII 클렌징을 거친다.</li>
@@ -651,7 +654,7 @@ with tab5:
     <ul>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>SQLite 기반 WAL 모드:</b> 다중 프로세스(UI/Bot) 간의 동시 접근 락(Lock) 방지를 위해 WAL 모드가 적용되었다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>수동 보유와 자동매매(Managed) 분리:</b> 브로커의 전체 잔고를 자동매매 포지션으로 무단 덮어쓰지 않으며, 봇 스스로 체결한(Fill Delta) 수량만을 <code>managed_qty</code>로 누적한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>무손실 DB 마이그레이션:</b> DB 스키마(v4, v5) 업데이트 시 기존 데이터를 임시 테이블 백업 후 <code>INSERT INTO SELECT</code> 방식으로 마이그레이션하여 과거 원장을 보존한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>무손실 DB 마이그레이션:</b> DB 스키마 업데이트 시 기존 데이터를 임시 테이블 백업 후 <code>INSERT INTO SELECT</code> 방식으로 마이그레이션하여 과거 원장을 보존한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>계좌 핑거프린트(Fingerprint) 격리:</b> DB <code>account_id</code> 컬럼에는 평문 계좌번호 대신 SHA-256 단방향 해시로 생성된 핑거프린트만을 기록한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>OrderSpec 메타데이터 확장 정규화:</b> 주문 의도 테이블은 추적성 확보를 위해 <code>quote_id</code>, <code>intent_ttl</code>, <code>cost_model_version</code> 등 27개의 상세 필드로 정규화되었다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>전역/개별 계좌 매매 중지 분리:</b> 매매 통제 시스템은 마스터 킬 스위치(Master Kill Switch)와 특정 전략(Core/Sat) 개별 토글로 2원화되어 상호 간섭 없이 독립 작동한다.</li>
@@ -671,15 +674,15 @@ with tab5:
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>강력한 해시 인증 (Bcrypt Authentication):</b> 시스템 로그인에 사용되는 비밀번호는 Salt가 포함된 Bcrypt 해시 알고리즘을 통해서만 검증을 수행한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>세션 만료 및 폼 기반 로그인:</b> 로그인 시 '엔터(Enter)' 키 입력을 지원하되, 새로고침(F5) 시 브라우저 세션이 초기화되어 로그아웃되는 것을 의도된 보안 정책(Secure by default)으로 채택한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>패키지 의존성(Dependency) 엄격 관리:</b> 새로운 외부 라이브러리 도입 시 <code>ModuleNotFoundError</code> 방지를 위해 <code>requirements.txt</code> 파일 형상 관리를 동기화한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(<code>is_mock</code>)이 스트림릿 시크릿에서 문자열 <code>"false"</code>로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 명시적 형변환을 거친다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값이 <code>"false"</code> 문자열로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 명시적 형변환을 거친다.</li>
     </ul>
 
     <h3>🧪 11. 자동화 테스트 및 품질 보증 (QA & Automated Testing)</h3>
     <ul>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>실계좌(LIVE) 테스트 엄격 금지:</b> 어떠한 경우에도 개발 중이거나 검증되지 않은 코드를 실계좌(REAL) 환경에서 직접 테스트할 수 없다. 테스트 과정에서는 실계좌 Transport를 구조적으로 차단하며, KIS 모의투자(VTS) 또는 Mock HTTP 응답 테스트를 최우선으로 진행한다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>상태 머신 및 멱등성 필수 테스트:</b> 빈 상관ID(Correlation ID) 차단, 다중 워커 교차 Claim 차단, 부분체결 후 잔량 취소, UNKNOWN 주문의 맹목적 재전송 방지 등 주문 상태 전이에 대한 <b>Pytest 기반 자동화 테스트(Test Fixtures)</b> 도입이 예정되어 있다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>회계 정합성(Double-Spend) 테스트:</b> 시장가 매수 2건이 동일한 가용 현금을 중복 예약(Double-Spend)하지 않는지, 잔량 이상의 매도 주문이 철저히 차단되는지 검증하는 단위 테스트 구축이 필수 요구된다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>LIVE 안전성 선언 조건:</b> 위 명시된 모든 QA 필수 테스트(전략 Golden Test, 무손실 마이그레이션 멱등성, KIS API Rate Limit 제한기 검증 등)가 100% 통과되기 전까지는 UI 및 로그 상에 <b>'LIVE 안전성 확보', '100% 동일', '실전 운용 가능' 등의 표현을 일절 사용할 수 없으며, 'LIVE 금지 (미검증)' 상태를 유지</b>해야 한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>실계좌(LIVE) 테스트 엄격 금지:</b> 테스트 과정에서는 실계좌 Transport를 구조적으로 차단하며, KIS API의 Mock HTTP 응답 테스트가 <code>test_quant.py</code>로 구축되어 실주문 전송 대참사를 원천 방어한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>상태 머신 및 멱등성 필수 테스트:</b> 빈 상관ID(Correlation ID) 차단, 다중 워커 교차 Claim 차단 등 주문 상태 전이에 대한 <b>Pytest 기반 자동화 테스트</b> 스크립트가 구현되어 배포되었다.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>회계 정합성(Double-Spend) 테스트:</b> 시장가 매수 2건이 동일한 가용 현금을 중복 예약(Double-Spend)하지 않는지 검증하는 단위 테스트 케이스의 보강이 요구된다.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>LIVE 안전성 선언 조건:</b> 서버 내에서 <code>pytest test_quant.py</code>가 100% 통과되기 전까지는 UI 및 로그 상에 <b>'LIVE 안전성 확보', '100% 동일', '실전 운용 가능' 등의 표현을 일절 사용할 수 없으며, 'LIVE 금지 (미검증)' 상태를 유지</b>해야 한다.</li>
     </ul>
 
     <hr>
