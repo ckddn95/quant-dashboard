@@ -54,10 +54,7 @@ def color_profit_loss(val):
     return ''
 
 st.title("Core-Satellite Quant System (MSA)")
-
-# 🛑 [마스터 프롬프트 준수] Pytest 통과 전 LIVE 안전 선언 금지
-st.error("🚨 **[LIVE 금지 / 미검증 상태]** 현재 통합 엔진 및 자동화 테스트 스크립트(`test_quant.py`)가 🟢[구현 완료] 되었으나, 서버 내에서 `pytest`를 통한 검증을 아직 통과하지 않아 🔵[테스트 완료] 상태가 아닙니다. 직접 테스트를 실행하여 통과를 확인하기 전까지 실전 계좌(REAL) 가동을 엄격히 금지합니다.")
-
+st.error("🚨 **[LIVE 금지 / 미검증 상태]** 현재 통합 엔진 로직은 🟢[구현 완료] 되었으나, 시스템 헌장 제11장에 명시된 **Pytest 기반 자동화 테스트(상태머신 멱등성, Mock HTTP, 회계 중복예약 방지 등)**를 통과하지 않아 🔵[테스트 완료] 상태가 아닙니다. 실전 계좌(REAL) 자동매매 가동을 엄격히 금지합니다.")
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **고급 시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
 STRAT_DISPLAY_MAP = {quant.Strategy.CORE: '대형주 (Core)', quant.Strategy.SATELLITE: '중소형주 (Satellite)'}
@@ -396,7 +393,7 @@ with tab3:
 
 with tab4:
     st.header("🧪 고급 백테스트 엔진")
-    st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 완벽히 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
+    st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
     
     today_date = datetime.datetime.now(KST).date()
     stocks_df = pd.DataFrame(db.get_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value))
@@ -604,7 +601,7 @@ with tab5:
 
     <h3>🔄 5. API 호출 규칙 및 주문 상태 머신 (API & State Machine)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>16단계 상태 단방향 전이:</b> 주문은 <code>INTENT_CREATED</code>부터 계약에 명시된 16개 상태 룰에 의해서만 움직인다. UNKNOWN 주문을 맹목적으로 자동 재전송하지 않는다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>16단계 상태 단방향 전이:</b> 주문은 <code>INTENT_CREATED</code>부터 계약에 명시된 16개 상태 룰에 의해서만 움직인다. UNKNOWN 주문을 맹목적으로 재전송하지 않는다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>부분 체결 대사 (Reconciliation):</b> 체결 수량과 손익은 브로커 간의 누적 체결 델타(Delta)만을 산출하여 정확히 1번만 계산되며 매매 중지 상태에서도 대사는 지속된다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행으로 갱신된다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향 등이 조합된 키를 통해 다중 워커에 의한 중복 제출(Double POST)을 차단한다.</li>
@@ -680,8 +677,8 @@ with tab5:
     <h3>🧪 11. 자동화 테스트 및 품질 보증 (QA & Automated Testing)</h3>
     <ul>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>실계좌(LIVE) 테스트 엄격 금지:</b> 테스트 과정에서는 실계좌 Transport를 구조적으로 차단하며, KIS API의 Mock HTTP 응답 테스트가 <code>test_quant.py</code>로 구축되어 실주문 전송 대참사를 원천 방어한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>상태 머신 및 멱등성 필수 테스트:</b> 빈 상관ID(Correlation ID) 차단, 다중 워커 교차 Claim 차단 등 주문 상태 전이에 대한 <b>Pytest 기반 자동화 테스트</b> 스크립트가 구현되어 배포되었다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>회계 정합성(Double-Spend) 테스트:</b> 시장가 매수 2건이 동일한 가용 현금을 중복 예약(Double-Spend)하지 않는지 검증하는 단위 테스트 케이스의 보강이 요구된다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>상태 머신 및 멱등성 필수 테스트:</b> 빈 상관ID(Correlation ID) 차단, 역방향 상태 전이 불가 등 주문 상태 전이에 대한 Pytest 기반 자동화 테스트 스크립트가 구현되어 배포되었다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>회계 정합성(Double-Spend) 테스트:</b> 시장가 매수 2건이 동일한 가용 현금을 중복 예약(Double-Spend)하지 않도록 차단하고, 잔량 이상의 매도 주문이 철저히 차단됨을 증명하는 단위 테스트 코딩이 완료되었다.</li>
         <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>LIVE 안전성 선언 조건:</b> 서버 내에서 <code>pytest test_quant.py</code>가 100% 통과되기 전까지는 UI 및 로그 상에 <b>'LIVE 안전성 확보', '100% 동일', '실전 운용 가능' 등의 표현을 일절 사용할 수 없으며, 'LIVE 금지 (미검증)' 상태를 유지</b>해야 한다.</li>
     </ul>
 
