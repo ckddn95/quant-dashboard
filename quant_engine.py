@@ -344,7 +344,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     if profit_pct < 0:
                         cooldown_tracker[tk] = current_date 
                     
-                    # 🛑 [수정] 표 컬럼 포맷 에러 방지를 위해 키를 완벽히 매칭
                     closed_trades_log.append({
                         "종목명": ticker_to_name.get(tk, tk),
                         "진입일": positions[tk]["entry_date"].strftime('%Y-%m-%d'),
@@ -469,7 +468,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                         pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty, "reason": cand['reason']})
                         available_cash -= qty * cand['close'] * (1.0 + assumed_cost_pct)
 
-        # 🛑 [패치] 시뮬레이션 종료 시점에 청산되지 않고 보유 중인(Open) 종목들도 거래 장부에 추가 표기
         for tk, pos in positions.items():
             last_close = dfs[tk]['Close'].loc[:end_date].dropna().iloc[-1] if tk in dfs else pos['buy_price']
             profit_pct = (last_close / pos['buy_price']) - 1.0 if pos['buy_price'] > 0 else 0
@@ -488,8 +486,9 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 "사유": "보유 중 (미청산)"
             })
 
-        if not nav_history:
-            return {"status": "error", "msg": "데이터 부족으로 시뮬레이션을 완료할 수 없습니다."}
+        # 🛑 [패치] 시뮬레이션 기간이 2영업일 미만이면 엔진 단에서 안전하게 에러 반환
+        if len(nav_history) < 2:
+            return {"status": "error", "msg": "수익률 및 지표를 계산하기 위한 거래일 데이터가 부족합니다. (최소 2영업일 이상 필요)"}
         
         nav_df = pd.DataFrame(nav_history)
         final_asset = nav_df['NAV'].iloc[-1]
