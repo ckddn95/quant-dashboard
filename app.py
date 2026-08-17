@@ -100,7 +100,6 @@ new_cash = st.sidebar.number_input("총 투자 운용 자산 (가상 원금)", v
 if new_cash != total_cash:
     db.set_setting('virtual_cash', new_cash)
 
-# 🛑 [패치] 문자열로 들어온 is_mock을 완벽하게 Boolean 처리하여 인증 충돌 방지
 account_key = "core" if active_strat == quant.Strategy.CORE else "satellite"
 try:
     acc_config = st.secrets["kis_accounts"][account_key]
@@ -160,8 +159,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
     col_s1, col_s2 = st.columns([8, 2])
-    
-    # 🛑 [패치] 스캐너 결과 캐싱 (목록 증발 방지)
     with col_s1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True):
             with st.spinner("AI 검색 중... (엄격한 전략 기준에 따라 종목이 없을 수 있습니다)"):
@@ -191,7 +188,6 @@ with tab1:
                     st.session_state.search_q = "" 
                     st.rerun()
 
-    # 🛑 [패치] 캐시된 스캐너 데이터 화면에 유지
     if st.session_state.get('show_scanner'):
         scan_res = st.session_state.get('scan_res', pd.DataFrame())
         if not scan_res.empty:
@@ -201,11 +197,10 @@ with tab1:
                 c2.markdown(f"**{row['현재가']:,.0f} 원**")
                 c3.markdown(f"🔥 `{row['AI 스코어']:.2f}점` | {row['진단 근거']}")
                 
-                # 이미 담은 종목은 완료 처리
                 if str(row['티커']).zfill(6) not in current_tickers:
                     if c4.button("➕ 담기", key=f"scan_{row['티커']}"):
                         db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, current_watchlist + [{'티커': row['티커'], '종목명': row['종목명']}])
-                        st.rerun() # 재실행되어도 세션이 유지되어 리스트 안사라짐
+                        st.rerun() 
                 else:
                     c4.button("✅ 완료", key=f"scan_{row['티커']}", disabled=True)
         else:
@@ -243,7 +238,6 @@ with tab2:
     st.header("🔌 실전 계좌 모니터링")
     if SYS_APP_KEY and SYS_CANO != "MOCK_ACCOUNT":
         if st.button("🔄 잔고 동기화"):
-            # 🛑 [패치] 토큰 발급 에러 메시지 상세화
             token, token_err = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK)
             if token:
                 st.session_state['kis_token'] = token 
@@ -413,6 +407,7 @@ with tab4:
     
     combined_tickers = set()
     combined_data = []
+    
     for w in db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
         tk = str(w['티커']).zfill(6)
         if tk not in combined_tickers:
