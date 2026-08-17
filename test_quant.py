@@ -88,7 +88,7 @@ def test_order_idempotency_and_state_machine():
     # 역주행 전이 차단 확인
     assert db.transition_order_status(order_id, 'SUBMITTING', 'INTENT_CREATED') is False
 
-# 🛑 4. [신규 추가] 회계 정합성: 매수 현금 중복 예약 (Double-Spend) 방어 검증
+# 🛑 4. 회계 정합성: 매수 현금 중복 예약 (Double-Spend) 방어 검증
 def test_buy_double_spend_prevention():
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     # 현금 100만원 가정. 80만원짜리 삼성전자 매수
@@ -132,7 +132,7 @@ def test_buy_double_spend_prevention():
     assert is_ok is False
     assert "Insufficient Cash" in reason
 
-# 🛑 5. [신규 추가] 회계 정합성: 잔량 이상의 매도 방어 검증
+# 🛑 5. 회계 정합성: 잔량 이상의 매도 방어 검증
 def test_sell_double_spend_prevention():
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     spec1 = quant.OrderSpec(
