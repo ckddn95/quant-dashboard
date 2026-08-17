@@ -162,6 +162,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
     col_s1, col_s2 = st.columns([8, 2])
+    
     with col_s1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True):
             with st.spinner("AI 검색 중... (엄격한 전략 기준에 따라 종목이 없을 수 있습니다)"):
@@ -441,9 +442,12 @@ with tab4:
     st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
     run_t1 = st.button("테스트 1 실행 (통합 포트폴리오)", type="primary", use_container_width=True)
     
+    # 🛑 [패치] 시작일과 종료일이 같을 때 데이터 부족 안내 강화
     if run_t1:
         if target_df.empty:
             st.warning("분석할 관심종목이나 보유종목이 없습니다.")
+        elif start_d1 >= end_d1:
+            st.warning("⚠️ 시뮬레이션 지표를 계산하려면 최소 하루 이상의 기간이 필요합니다. 시작일이 종료일보다 과거여야 합니다.")
         else:
             with st.spinner(f"총 {len(combined_data)}개 종목 대상 시뮬레이션 구동 중... (T+1 체결, 0.25% 비용 가정)"):
                 res1 = quant.run_quant_simulation(target_df, active_strat, total_cash, start_d1, end_d1, current_config, is_weekly_scan=False)
@@ -459,7 +463,6 @@ with tab4:
                     with st.expander("📝 상세 거래 내역 보기 (클릭하여 펼치기)"):
                         if res1.get('trade_logs'):
                             tl_df = pd.DataFrame(res1['trade_logs'])
-                            # 🛑 [패치] 키 이름 매칭
                             st.dataframe(tl_df.style.map(color_profit_loss, subset=['수익률']).format({
                                 '진입단가': '{:,.0f}', '청산단가': '{:,.0f}', '수량': '{:,}', '손익금': '{:,.0f}'
                             }), use_container_width=True)
@@ -490,9 +493,12 @@ with tab4:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
         run_t2 = st.button("테스트 2 실행 (일간 스캔)", type="primary", use_container_width=True)
         
+    # 🛑 [패치] 시작일과 종료일이 같을 때 데이터 부족 안내 강화
     if run_t2:
         if stocks_df.empty:
             st.error("관심종목 리스트에 종목이 없습니다. 탭 1에서 관심종목을 추가해주세요.")
+        elif start_d2 >= end_d2:
+            st.warning("⚠️ 시뮬레이션(수익률 계산 등)을 수행하려면 최소 하루 이상의 기간이 필요합니다. (포트폴리오를 오늘 개설하셨다면 내일부터 조회가 가능합니다.)")
         else:
             with st.spinner("일간 유니버스 갱신 및 AI 가상운용 시뮬레이션 구동 중..."):
                 res2 = quant.run_quant_simulation(stocks_df, active_strat, real_invested_principal, start_d2, end_d2, current_config, is_weekly_scan=False)
@@ -510,8 +516,7 @@ with tab4:
                         
                         with st.expander("📝 AI 가상운용 상세 거래 내역 보기"):
                             if res2.get('trade_logs'):
-                                tl_df = pd.DataFrame(res2['trade_logs'])
-                                st.dataframe(tl_df.style.map(color_profit_loss, subset=['수익률']).format({
+                                st.dataframe(pd.DataFrame(res2['trade_logs']).style.map(color_profit_loss, subset=['수익률']).format({
                                     '진입단가': '{:,.0f}', '청산단가': '{:,.0f}', '수량': '{:,}', '손익금': '{:,.0f}'
                                 }), use_container_width=True)
                             else:
@@ -601,10 +606,14 @@ with tab5:
     <h3>⏱️ 6. 시뮬레이션 및 백테스트 실행 규칙 (Simulation Execution Rules)</h3>
     <ul>
         <li><b>[시스템 규칙] 데이터 편향 한계 (Data Limitation):</b> 현재 시스템은 과거 시가총액이나 상장폐지 기록 등 Point-in-time 데이터를 제공하지 못하므로, 분석 결과에 필연적으로 '생존자 편향(Survivor Bias)'이 개입된다. 따라서 <b>이 시뮬레이션 결과는 절대적인 미래 예측이나 LIVE 활성화 기준으로 단독 사용될 수 없다.</b></li>
+        <li><b>[시스템 규칙] 최소 시뮬레이션 기간 보장:</b> 퀀트 시뮬레이션에서 수익률, CAGR, MDD 등의 핵심 지표를 산출하기 위해서는 최소한 '진입'과 '평가'를 비교할 수 있는 2영업일 이상의 데이터 윈도우(Time-window)가 필수적이다. 만약 시작일과 종료일이 같거나(0일), 데이터가 부족할 경우 엔진 레벨에서 즉각 시뮬레이션을 차단(Fail-safe)하고, 사용자에게 명확한 거절 사유를 반환하여 무의미한 연산과 에러를 방지한다.</li>
         <li><b>[시스템 규칙] 단일 진실 공급원 (Single Source of Truth):</b> 실시간 UI 스캐너, 실전 자동매매 봇, 백테스트 시뮬레이션 엔진은 모두 완벽히 동일한 '순수 전략 공통 함수(`calc_buy_signal`, `calc_sell_signal`)'를 공유하여, 결과의 정합성을 100% 보장한다.</li>
         <li><b>[시스템 규칙] 강세장 비중 증액 (Bull-market Boost):</b> 사용자가 '강세장 부스터' 옵션을 켰을 경우, 시뮬레이션 및 실거래 엔진은 코스피 지수가 200일선 위에 위치할 때 매수 비중을 최대 1.5배 증액하여 수익률을 극대화한다.</li>
+        <li><b>[시스템 규칙] 평가 단가와 체결 단가의 엄격한 분리 (NAV 보정):</b> 특정 종목이 거래 정지되거나 개별 종목의 휴장으로 일봉 데이터가 누락된 날에도 포트폴리오 자산(NAV)이 0원으로 증발하지 않도록, 가치 평가는 '가장 최근의 유효 종가'를 활용한다. 단, 실제 매매 체결은 데이터가 존재하는 유효 거래일에만 엄격하게 집행하여 가짜 체결을 방지한다.</li>
         <li><b>[시스템 규칙] 시뮬레이션 T+1 체결 반영 완료:</b> 신호 발생 당일(T일)의 종가로 체결되는 룩어헤드 편향(Look-ahead Bias)을 제거한다. 모든 신호는 다음 유효 영업일(T+1)의 시가(Open)로 정확하게 체결된다.</li>
+        <li><b>[시스템 규칙] 회계 이중 출금 방어 (No Double-Spend):</b> 매수 시그널 당일(T일)에는 가상 현금(available_cash)만을 차감하여 한도를 체크하고, 실제 계좌 잔고(cash)는 반드시 체결 당일(T+1일)에 단 한 번만 차감되도록 회계 무결성을 유지한다.</li>
         <li><b>[시스템 규칙] 비용 가정 (Cost Assumption):</b> 실제 KIS 브로커 체결 데이터가 없는 시뮬레이션 단계에서는, 매수와 매도 각각 수수료/세금/시장충격을 모두 포함하여 보수적인 <b>All-in 0.25% (왕복 0.50%)</b>의 비용률을 강제 적용한다.</li>
+        <li><b>[시스템 규칙] 장중 보수적 손절/익절 (Adverse-first):</b> 과거 일봉 데이터만으로 장중 High/Low 순서를 알 수 없는 경우, 가장 불리한 방향인 <b>손절컷(SL)을 우선 타격</b>한 것으로 가정하여 생존 편향을 억제한다.</li>
         <li><b>[시스템 규칙] 일간 스캔 (Daily Scan) 전면 적용:</b> 짧은 운용 기간(예: 며칠~수 주)을 검증할 때 발생하는 '데이터 부족 및 체결 기회 박탈' 문제를 해결하기 위해, 모든 시뮬레이션(테스트 1, 2, 3)의 신규 진입 종목 스캔 주기를 기존 주 1회에서 <b>매일(Daily) 종가 기준</b>으로 전면 개편하였다. 이를 통해 단기 운용 계좌에서도 AI가 매일의 시장 변화에 즉각 대응하며 정밀한 1:1 성과 비교가 가능하도록 시스템 헌장을 수정한다.</li>
         <li><b>[시스템 규칙] 라운드트립(Round-trip) 상세 거래 장부:</b> 단순 매수/매도 분리 나열 방식의 가독성 저하를 해결하기 위해, 거래 장부(Trade Logs)는 반드시 <b>'진입부터 청산까지의 한 사이클(Closed Trade)'을 한 줄로 병합</b>하여 표기한다. 또한, 시뮬레이션 종료 시점에 <b>아직 청산되지 않은 미실현 보유 포지션(Open Positions)도 장부에 포함</b>하여, 투자자가 미실현 손익과 진행 중인 거래 상태를 누락 없이 파악할 수 있도록 한다.</li>
         <li><b>[시스템 규칙] 포트폴리오 개설일 정밀 추적:</b> 시뮬레이션 시 비교 기준이 되는 '포트폴리오 개설일'은 단순히 단일 테이블이 아닌, <code>watchlist</code>(관심종목 등록일), <code>order_intents</code>(주문 발생일), <code>positions</code>(잔고 발생일) 등 시스템 내 모든 행동 로그를 포괄적으로 검색하여 가장 이른 시점을 개설일로 자동 세팅한다. 날짜 파싱 시 발생할 수 있는 문자열 오류를 방지하기 위해 앞 10자리(YYYY-MM-DD)를 안전하게 추출하는 방식을 강제한다.</li>
@@ -613,12 +622,19 @@ with tab5:
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
     <ul>
         <li><b>[시스템 규칙] 스캐너 세션 캐싱 및 상태 보존:</b> AI 타점 스캐너 실행 결과 및 검색 데이터는 Streamlit의 <code>st.session_state</code>에 안전하게 캐싱되어, 종목 추가(담기) 등의 UI 리렌더링 이벤트 발생 시에도 검색 결과 목록이 증발하지 않고 그대로 유지된다.</li>
+        <li><b>[시스템 규칙] 엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(예: <code>is_mock</code>)은 스트림릿 시크릿에서 문자열(예: <code>"false"</code>)로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 대소문자를 무시한 명시적 형변환(Boolean Parsing)을 거친다.</li>
         <li><b>[시스템 규칙] 도메인 URL 위생화(Sanitization):</b> KIS Open API 등의 통신 도메인은 복사/붙여넣기 시 유입될 수 있는 보이지 않는 제로스페이스 및 비-ASCII 특수 문자를 원천 차단하기 위해 철저한 ASCII 클렌징 및 공백 제거 과정을 거친 후 호출한다.</li>
+        <li><b>[시스템 규칙] 테스트 1 포트폴리오 분석:</b> 테스트 1은 기존의 단일 종목 입력 방식을 전면 폐기하고, 시스템 내에 등록된 <b>'현재 관심종목'과 '실제 보유종목' 전체를 하나의 포트폴리오로 취합</b>하여 과거 기간의 성과를 회고하는 UI로 개편되었다. 분석 결과는 화면 전체(Full-width)를 활용하여 사용자 가독성을 극대화한다.</li>
         <li><b>[시스템 규칙] 테스트 2 완벽한 1:1 비교 강제:</b> AI 가상 운용 시뮬레이션(테스트 2) 수행 시, 임의의 가상 원금이 아닌 <b>실제 계좌의 현재 투자 원금(Eval - PnL)</b>을 시뮬레이션의 초기 자금(Init Cash)으로 강제 동기화하여 진정한 의미의 성과 비교(Apples-to-apples)를 제공한다.</li>
+        <li><b>[시스템 규칙] 포트폴리오 개설일 강제 동기화 (Test 2):</b> 테스트 2 수행 시, 포트폴리오 개설일(DB상 최초 종목 등록일 또는 주문 발생일)을 동적으로 추적하여 개설된 지 1년 미만인 경우 무의미한 과거 1년 전체를 시뮬레이션하지 않고 '실제 개설일'부터 오늘까지로 시작일을 자동 보정하여 완벽한 비교 신뢰성을 부여한다. 시작일과 종료일이 같은 당일(0일) 시뮬레이션 시도 시, 즉각 경고를 반환하여 사용자의 혼란을 방지한다.</li>
         <li><b>[시스템 규칙] 시뮬레이션 버튼 및 결과 뷰 100% 확장:</b> 모든 테스트(1, 2, 3)의 실행 버튼과 분석 결과는 화면 전체(Full-width) 너비를 100% 활용하여 사용자 가독성과 클릭 편의성을 극대화하며, UI의 통일성을 유지한다.</li>
+        <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
         <li><b>[시스템 규칙] 다중 계좌 스위칭:</b> Core와 Satellite 전략은 Streamlit Secrets에 저장된 완전히 다른 계좌 정보를 바라본다. 설정에 <code>is_mock</code> 항목이 누락될 경우, 실전(False)이 아닌 모의투자(True)로 강제 지정되어 사고를 막는다.</li>
+        <li><b>[시스템 규칙] 가상원금 기반 과대 매수 차단:</b> 주문 수량 산출 시 <code>max(실제평가금, 가상원금)</code>을 사용하지 않는다. 실제 잔고가 0보다 크면 무조건 실제 평가금만을 베이스로 계산하여 계좌 잔고를 초과하는 주문 생성 자체를 막는다.</li>
         <li><b>[시스템 규칙] Fail-closed (안전 우선 차단):</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 발생을 방어한다.</li>
+        <li><b>[시스템 규칙] 투명한 대기열 및 정렬:</b> 당장 매수/매도 시그널이 발생하지 않더라도 시스템의 판단(현금 부족, 타점 미달 등)을 큐에 모두 표시하여 관측성을 높인다. 큐는 항상 <code>매도(0) ➔ 매수(1) ➔ 관망(2)</code> 순서로 자동 정렬된다.</li>
         <li><b>[시스템 규칙] 대기열 뷰 확장 및 추가 매수 구분:</b> 사용자의 직관적인 판단을 위해 대기열에 종목의 '주문수량'뿐만 아니라 '현재 보유수량'과 '평균단가'를 실시간 대조하여 렌더링한다. 또한 이미 보유 중인 종목에 매수 시그널이 발생할 경우 단순 매수 시그널이 아닌 '추가 매수'로 명확히 구분하여 표기한다.</li>
+        <li><b>[시스템 규칙] 예외 처리 충돌 방어:</b> Streamlit의 <code>st.rerun()</code> 동작이 포괄적 <code>except:</code> 구문에 걸려 로직이 멈추는 것을 방지하기 위해, 에러 캐치 시 반드시 <code>ValueError</code> 등 명확한 Exception Class를 지정하여 처리한다.</li>
         <li><b>[UI/UX 포맷팅 절대 규칙]</b> 일반 사용자의 직관성을 위해 성과 지표 용어를 한글로 친절히 순화(예: <code>CAGR ➔ 연평균 수익률(CAGR)</code>, <code>MDD ➔ 최대 낙폭(MDD)</code>)하여 표기한다. 계좌 표의 수익률은 양수일 경우 적색(<code>#FF5050</code>), 음수일 경우 청색(<code>#3b82f6</code>)으로 하드코딩 스타일링한다. AI 스코어, 이격도, 평균단가 등 변동성이 있는 지표는 반드시 소수점 둘째 자리(<code>.2f</code>)로 고정 노출하고, 현재가 및 수량은 정수 콤마 포맷(<code>,.0f</code>)을 적용하여 시각적 혼란을 방지한다.</li>
     </ul>
 
