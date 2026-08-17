@@ -130,9 +130,17 @@ def sync_positions_from_broker(broker, env, account_id, portfolio_id, strategy_i
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
+            
+            # 🛑 [패치] 기존에 들고 있던 종목 중, KIS에서 사라진(매도된) 종목을 찾아서 DB에서도 삭제
+            existing_rows = conn.execute("SELECT ticker FROM positions WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=?", (broker, env, account_id, portfolio_id, strategy_id)).fetchall()
+            existing_tickers = set([r['ticker'] for r in existing_rows])
+            kis_tickers = set([s['ticker'] for s in kis_stocks])
+            
             for stock in kis_stocks:
                 tk = stock['ticker']
                 b_qty = stock['qty']
+                buy_price = stock.get('buy_price', 0.0)
+                
                 row = conn.execute("SELECT managed_qty, manual_qty, unknown_quarantined_qty FROM positions WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
                                    (broker, env, account_id, portfolio_id, strategy_id, tk)).fetchone()
                 if row:
@@ -141,13 +149,20 @@ def sync_positions_from_broker(broker, env, account_id, portfolio_id, strategy_i
                     u_qty = row['unknown_quarantined_qty']
                     diff = b_qty - (m_qty + man_qty)
                     if diff != u_qty:
-                        conn.execute("UPDATE positions SET broker_qty=?, unknown_quarantined_qty=? WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
-                                     (b_qty, diff, broker, env, account_id, portfolio_id, strategy_id, tk))
+                        conn.execute("UPDATE positions SET broker_qty=?, unknown_quarantined_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
+                                     (b_qty, diff, buy_price, broker, env, account_id, portfolio_id, strategy_id, tk))
                 else:
-                    conn.execute("INSERT INTO positions (broker, environment, account_id, portfolio_id, strategy_id, ticker, broker_qty, manual_qty) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                                 (broker, env, account_id, portfolio_id, strategy_id, tk, b_qty, b_qty))
+                    conn.execute("INSERT INTO positions (broker, environment, account_id, portfolio_id, strategy_id, ticker, broker_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                                 (broker, env, account_id, portfolio_id, strategy_id, tk, b_qty, b_qty, buy_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            
+            # 매도되어 잔고가 0이 된 종목 삭제
+            sold_tickers = existing_tickers - kis_tickers
+            for tk in sold_tickers:
+                conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, account_id, portfolio_id, strategy_id, tk))
+                
             conn.execute("COMMIT")
-        except Exception:
+        except Exception as e:
+            print("DB Sync Error:", e)
             conn.execute("ROLLBACK")
 
 def get_locked_cash_and_qty(broker, env, account_id, portfolio_id, ticker=None):
