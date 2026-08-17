@@ -173,7 +173,7 @@ def get_locked_cash_and_qty(broker, env, account_id, portfolio_id, ticker=None):
             locked_sell_qty = int(r2['locked_qty']) if r2['locked_qty'] else 0
         return locked_cash, locked_sell_qty
 
-# 🛑 [프롬프트 핵심 버그 픽스] 포트폴리오 실제 개설일 자동 추적 함수 신설
+# 🛑 [패치] 파싱 에러(문법 오류)를 방지하고, positions 테이블까지 완벽하게 스캔하도록 보강
 def get_portfolio_creation_date(broker, env, account_id, portfolio_id):
     with get_connection() as conn:
         try:
@@ -183,10 +183,14 @@ def get_portfolio_creation_date(broker, env, account_id, portfolio_id):
             row2 = conn.execute("SELECT MIN(added_at) as first_date FROM watchlist WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=?", (broker, env, account_id, portfolio_id)).fetchone()
             d2 = row2['first_date'] if row2 and row2['first_date'] else None
             
-            dates = [d for d in [d1, d2] if d]
+            row3 = conn.execute("SELECT MIN(buy_date) as first_date FROM positions WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=?", (broker, env, account_id, portfolio_id)).fetchone()
+            d3 = row3['first_date'] if row3 and row3['first_date'] else None
+
+            dates = [d for d in [d1, d2, d3] if d]
             if dates:
                 earliest = min(dates)
-                return datetime.strptime(earliest, '%Y-%m-%d %H:%M:%S').date()
+                # 초 단위, 밀리초 단위 등 포맷 불일치로 인한 파싱 에러를 방지하기 위해 앞 10자리(YYYY-MM-DD)만 안전하게 파싱합니다.
+                return datetime.strptime(earliest[:10], '%Y-%m-%d').date()
         except Exception as e:
             print("Creation Date Check Error:", e)
     return None
