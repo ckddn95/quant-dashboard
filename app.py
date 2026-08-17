@@ -28,7 +28,6 @@ def check_password():
         st.stop()
 
     st.markdown("### 🔒 관리자 인증")
-    # 🛑 [UX 패치] st.form 구조를 도입하여 '엔터(Enter) 키' 로그인 지원
     with st.form("login_form"):
         pwd_input = st.text_input("비밀번호를 입력하세요", type="password")
         submitted = st.form_submit_button("로그인")
@@ -163,6 +162,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
     col_s1, col_s2 = st.columns([8, 2])
+    
     with col_s1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True):
             with st.spinner("AI 검색 중... (엄격한 전략 기준에 따라 종목이 없을 수 있습니다)"):
@@ -461,7 +461,7 @@ with tab4:
                         if res1.get('trade_logs'):
                             tl_df = pd.DataFrame(res1['trade_logs'])
                             st.dataframe(tl_df.style.map(color_profit_loss, subset=['수익률']).format({
-                                '체결단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
+                                '진입단가': '{:,.0f}', '청산단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
                             }), use_container_width=True)
                         else:
                             st.info("해당 기간 동안 발생한 거래 내역이 없습니다.")
@@ -511,7 +511,7 @@ with tab4:
                         with st.expander("📝 AI 가상운용 상세 거래 내역 보기"):
                             if res2.get('trade_logs'):
                                 st.dataframe(pd.DataFrame(res2['trade_logs']).style.map(color_profit_loss, subset=['수익률']).format({
-                                    '체결단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
+                                    '진입단가': '{:,.0f}', '청산단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
                                 }), use_container_width=True)
                             else:
                                 st.info("해당 기간 동안 발생한 거래 내역이 없습니다.")
@@ -548,7 +548,7 @@ with tab4:
                     if res3.get('trade_logs'):
                         tl_df = pd.DataFrame(res3['trade_logs'])
                         st.dataframe(tl_df.style.map(color_profit_loss, subset=['수익률']).format({
-                            '체결단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
+                            '진입단가': '{:,.0f}', '청산단가': '{:,.0f}', '수량': '{:,}', '실현손익': '{:,.0f}'
                         }), use_container_width=True)
                     else:
                         st.info("해당 기간 동안 발생한 거래 내역이 없습니다.")
@@ -609,7 +609,7 @@ with tab5:
         <li><b>[시스템 규칙] 비용 가정 (Cost Assumption):</b> 실제 KIS 브로커 체결 데이터가 없는 시뮬레이션 단계에서는, 매수와 매도 각각 수수료/세금/시장충격을 모두 포함하여 보수적인 <b>All-in 0.25% (왕복 0.50%)</b>의 비용률을 강제 적용한다.</li>
         <li><b>[시스템 규칙] 장중 보수적 손절/익절 (Adverse-first):</b> 과거 일봉 데이터만으로 장중 High/Low 순서를 알 수 없는 경우, 가장 불리한 방향인 <b>손절컷(SL)을 우선 타격</b>한 것으로 가정하여 생존 편향을 억제한다.</li>
         <li><b>[시스템 규칙] 일간 스캔 (Daily Scan) 전면 적용:</b> 짧은 운용 기간(예: 며칠~수 주)을 검증할 때 발생하는 '데이터 부족 및 체결 기회 박탈' 문제를 해결하기 위해, 모든 시뮬레이션(테스트 1, 2, 3)의 신규 진입 종목 스캔 주기를 기존 주 1회에서 <b>매일(Daily) 종가 기준</b>으로 전면 개편하였다. 이를 통해 단기 운용 계좌에서도 AI가 매일의 시장 변화에 즉각 대응하며 정밀한 1:1 성과 비교가 가능하도록 시스템 헌장을 수정한다.</li>
-        <li><b>[시스템 규칙] 상세 거래 장부(Ledger) 보존 및 공개:</b> 시뮬레이션의 신뢰성 및 투명성 확보를 위해, 퀀트 엔진은 매수/매도 시그널에 따른 모든 개별 종목의 체결일, 단가, 수량, 실현손익, 매매 사유(손절컷, 익절, 추세이탈 등)를 상세 회계 장부(Trade Logs)로 기록하며, 이를 UI 화면에서 엑셀 표와 같은 형태로 100% 공개해야 한다.</li>
+        <li><b>[시스템 규칙] 라운드트립(Round-trip) 상세 거래 장부:</b> 단순 매수/매도 분리 나열 방식의 가독성 저하를 해결하기 위해, 거래 장부(Trade Logs)는 반드시 <b>'진입부터 청산까지의 한 사이클(Closed Trade)'을 한 줄로 병합</b>하여 표기한다. 진입일, 청산일, 평균진입단가, 청산단가, 보유일수, 실현손익, 최종 수익률, 청산 사유를 한눈에 파악할 수 있도록 직관적인 UX를 강제한다.</li>
     </ul>
 
     <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability & Fail-closed)</h3>
