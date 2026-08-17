@@ -17,18 +17,18 @@ def get_valid_token(api_key, api_sec, is_mock):
     if token: TOKEN_CACHE["token"], TOKEN_CACHE["expires_at"] = token, now + 43200
     return token
 
-def reconcile_active_orders(api_key, api_sec, cano, acnt_prdt, env_str, port_id, token, is_mock):
-    active_orders = db.get_orders_by_status_and_env(['ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED'], cano, env_str)
+def reconcile_active_orders(api_key, api_sec, cano, acnt_prdt, env_str, port_id, strat_id, token, is_mock):
+    active_orders = db.get_orders_by_status_and_env(['ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED'], "KIS", env_str, cano, port_id)
     if not active_orders: return
     executions = kis.fetch_kis_order_executions(api_key, api_sec, cano, acnt_prdt, token, is_mock)
     for order in active_orders:
         oid, odno = order['id'], order['broker_order_id']
         if odno in executions:
             if order['status'] == 'UNKNOWN': db.transition_order_status(oid, 'UNKNOWN', 'ACKNOWLEDGED')
-            db.apply_fill_delta_exactly_once(oid, order['ticker'], order['order_type'], cano, env_str, port_id, executions[odno]['cum_qty'], executions[odno]['avg_price'])
+            db.apply_fill_delta_exactly_once(oid, order['ticker'], order['side'], "KIS", env_str, cano, port_id, strat_id, executions[odno]['cum_qty'], executions[odno]['avg_price'])
 
-def cancel_all_open_orders(api_key, api_sec, cano, acnt_prdt, env_str, token, is_mock):
-    active_orders = db.get_orders_by_status_and_env(['ACKNOWLEDGED', 'PARTIALLY_FILLED'], cano, env_str)
+def cancel_all_open_orders(api_key, api_sec, cano, acnt_prdt, env_str, port_id, token, is_mock):
+    active_orders = db.get_orders_by_status_and_env(['ACKNOWLEDGED', 'PARTIALLY_FILLED'], "KIS", env_str, cano, port_id)
     for order in active_orders:
         if not order['broker_order_id'] or not order['branch_no']: continue
         status, msg = kis.cancel_kis_order(api_key, api_sec, cano, acnt_prdt, token, order['broker_order_id'], order['branch_no'], is_mock)
@@ -50,30 +50,40 @@ def main_loop():
             token = get_valid_token(api_key, api_sec, is_mock)
             if not token: print("⚠️ Token Issuance Failed."); time.sleep(10); continue
 
-            sys_status = db.get_system_status()
-            if sys_status == "HALTED_CONFIG_ERROR": time.sleep(10); continue
-            elif sys_status == "KILL_SWITCH":
+            # 이 워커가 담당할 포트폴리오(전략)를 DB에서 획득
+            active_strat_str = db.get_setting('strategy', 'CORE')
+            port_id = active_strat_str
+            strat_id = active_strat_str
+            
+            sys_status = db.get_system_status("KIS", env_str, cano, port_id)
+            
+            # 버전 불일치 구조적 차단
+            if sys_status["contract_version"] != db.CONTRACT["contract_version"]:
+                print("🚨 Version Mismatch. Halting."); time.sleep(10); continue
+
+            if sys_status["kill_switch"]:
                 print("🚨 KILL SWITCH ACTIVE! Blocking new orders & canceling open orders...")
-                cancel_all_open_orders(api_key, api_sec, cano, acnt_prdt, env_str, token, is_mock)
+                cancel_all_open_orders(api_key, api_sec, cano, acnt_prdt, env_str, port_id, token, is_mock)
                 time.sleep(10); continue
             
-            if not bool(db.get_setting('auto_trade_enabled', False)): time.sleep(5); continue
+            if not sys_status["auto_trade"]: time.sleep(5); continue
             
-            lease_ok, lease_token = db.acquire_worker_lease(cano, env_str, WORKER_ID)
+            lease_ok, lease_token = db.acquire_worker_lease("KIS", env_str, cano, port_id, WORKER_ID)
             if not lease_ok: time.sleep(10); continue
 
             rd = db.get_setting('last_real_data', {'eval': 0, 'pnl': 0, 'cash': 0})
             daily_pnl = (rd['pnl'] / rd['eval']) if rd['eval'] > 0 else 0.0
 
+            reconcile_active_orders(api_key, api_sec, cano, acnt_prdt, env_str, port_id, strat_id, token, is_mock)
+
             while True:
-                order = db.claim_next_order(cano, env_str, WORKER_ID, lease_token)
+                order = db.claim_next_order("KIS", env_str, cano, port_id, WORKER_ID, lease_token)
                 if not order: break 
-                oid, tk, port_id = order['id'], order['ticker'], order['portfolio_id']
+                oid, tk = order['id'], order['ticker']
                 
-                # 대사 (Reconciliation)는 주문이 Claim 된 직후 최신 상태 반영
-                reconcile_active_orders(api_key, api_sec, cano, acnt_prdt, env_str, port_id, token, is_mock)
-                
-                if db.get_setting('kill_switch', False) or not db.get_setting('auto_trade_enabled', False):
+                # 재확인
+                check_sys = db.get_system_status("KIS", env_str, cano, port_id)
+                if check_sys["kill_switch"] or not check_sys["auto_trade"]:
                     db.transition_order_status(oid, 'CLAIMED', 'CANCELED', code="SYS_BLOCKED"); break
                     
                 if (datetime.now() - datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S')).total_seconds() > INTENT_TTL_SECONDS:
@@ -83,8 +93,8 @@ def main_loop():
                 snap = quant.StockSnapshot(ticker=tk, current_price=cur_p, high_price=high_p, low_price=low_p, ma20=0, ma60=0, ma200=0, m60_up=False, as_of=datetime.now(), source="KIS", is_valid=(rsn=="OK"), is_complete_bar=False, reason=rsn, executable=True)
                 snap.validate(is_halted)
                 
-                locked_cash, locked_sell_qty = db.get_locked_cash_and_qty(cano, env_str, port_id, tk)
-                spec = quant.OrderSpec(correlation_id="", idempotency_key=order['idempotency_key'], broker="KIS", environment=env_str, account_id=cano, account_product_code=acnt_prdt, portfolio_id=port_id, strategy_id=order['strategy_id'], strategy_version="1.0", ticker=tk, stock_name=tk, side=order['order_type'], order_kind="MARKET" if order['price']==0 else "LIMIT", quantity=order['qty'], limit_price=order['price'], intent_created_at=order['created_at'])
+                locked_cash, locked_sell_qty = db.get_locked_cash_and_qty("KIS", env_str, cano, port_id, tk)
+                spec = quant.OrderSpec(correlation_id=order['correlation_id'], idempotency_key=order['idempotency_key'], broker="KIS", environment=env_str, account_id=cano, account_product_code=acnt_prdt, portfolio_id=port_id, strategy_id=strat_id, strategy_version=order['strategy_version'], ticker=tk, stock_name=order['stock_name'], side=order['side'], order_kind=order['order_kind'], quantity=order['qty'], limit_price=order['limit_price'], intent_created_at=order['created_at'])
                 ctx = quant.RiskContext(account_id=cano, env=env_str, usable_cash=rd['cash'] - locked_cash, locked_buy_cash=locked_cash, managed_sell_qty=locked_sell_qty, current_exposure=0.0, max_exposure=float('inf'), daily_pnl_pct=daily_pnl, is_kill_switch_on=False, is_auto_trade_on=True)
                 
                 is_ok, reason = quant.pre_flight_risk_check(spec, snap, ctx)
