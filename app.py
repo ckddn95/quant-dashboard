@@ -4,57 +4,36 @@ import datetime
 import time
 import concurrent.futures
 import os
-import bcrypt 
+import bcrypt
+import hashlib
 import database as db
 import broker.kis_client as kis
 import quant_engine as quant
 
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
-# [Rule C] KST 타임존 강제
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     if st.session_state["password_correct"]: return True
-
     hashed_pw_env = os.getenv("ADMIN_PASSWORD_HASH")
     if not hashed_pw_env:
-        st.warning("⚠️ 초기 보안 설정: 관리자 비밀번호가 OS 환경변수에 없습니다.")
-        st.info("터미널 환경변수(ADMIN_PASSWORD_HASH)에 넣을 bcrypt 해시를 생성합니다.")
-        new_pw = st.text_input("새로운 비밀번호 입력", type="password")
-        if st.button("비밀번호 해시 생성"):
-            salt = bcrypt.gensalt()
-            st.code(f"export ADMIN_PASSWORD_HASH='{bcrypt.hashpw(new_pw.encode('utf-8'), salt).decode('utf-8')}'", language="bash")
-            st.success("위 명령어를 서버 터미널에 입력하거나 .env 파일에 저장한 뒤 시스템을 재시작하세요.")
+        st.warning("⚠️ 초기 보안 설정 필요")
         st.stop()
-
-    st.markdown("### 🔒 관리자 인증")
     with st.form("login_form"):
-        pwd_input = st.text_input("비밀번호를 입력하세요", type="password")
-        submitted = st.form_submit_button("로그인")
-        
-    if submitted:
-        try:
-            if bcrypt.checkpw(pwd_input.encode('utf-8'), hashed_pw_env.encode('utf-8')):
-                st.session_state["password_correct"] = True
-                st.rerun()
-            else:
-                st.error("비밀번호가 일치하지 않습니다.")
-        except ValueError:
-            st.error("서버 설정 오류: 잘못된 형식의 해시값입니다.")
+        pwd_input = st.text_input("비밀번호", type="password")
+        if st.form_submit_button("로그인") and bcrypt.checkpw(pwd_input.encode('utf-8'), hashed_pw_env.encode('utf-8')):
+            st.session_state["password_correct"] = True; st.rerun()
     return False
 
-if not check_password():
-    st.stop()
+if not check_password(): st.stop()
 
 def mts_metric_html(label, value, delta=None):
     val_color = "white"
     val_str = str(value)
     if not delta: 
-        if val_str.startswith('+'):
-            val_color = "#FF5050"
-        elif val_str.startswith('-') and val_str != '-':
-            val_color = "#3b82f6"
+        if val_str.startswith('+'): val_color = "#FF5050"
+        elif val_str.startswith('-') and val_str != '-': val_color = "#3b82f6"
     delta_html = ""
     if delta:
         d_str = str(delta)
@@ -70,10 +49,8 @@ def mts_metric_html(label, value, delta=None):
 
 def color_profit_loss(val):
     if isinstance(val, str) and '%' in val:
-        if val.startswith('+'):
-            return 'color: #FF5050; font-weight: bold;'
-        elif val.startswith('-'):
-            return 'color: #3b82f6; font-weight: bold;'
+        if val.startswith('+'): return 'color: #FF5050; font-weight: bold;'
+        elif val.startswith('-'): return 'color: #3b82f6; font-weight: bold;'
     return ''
 
 st.title("Core-Satellite Quant System (MSA)")
@@ -107,25 +84,15 @@ if new_cash != total_cash:
 account_key = "core" if active_strat == quant.Strategy.CORE else "satellite"
 try:
     acc_config = st.secrets["kis_accounts"][account_key]
-    SYS_APP_KEY = acc_config["app_key"]
-    SYS_APP_SEC = acc_config["app_secret"]
-    SYS_CANO = str(acc_config["cano"]).strip()
-    
-    is_mock_val = acc_config.get("is_mock", True)
-    if isinstance(is_mock_val, str):
-        SYS_IS_MOCK = is_mock_val.lower() == 'true'
-    else:
-        SYS_IS_MOCK = bool(is_mock_val)
-        
+    SYS_APP_KEY, SYS_APP_SEC, SYS_CANO = acc_config["app_key"], acc_config["app_secret"], str(acc_config["cano"]).strip()
+    SYS_IS_MOCK = acc_config.get("is_mock", True)
+    if isinstance(SYS_IS_MOCK, str): SYS_IS_MOCK = SYS_IS_MOCK.lower() == 'true'
     SYS_ACNT_PRDT = str(acc_config.get("acnt_prdt", "01")).strip()
 except KeyError:
-    SYS_APP_KEY = None
-    SYS_APP_SEC = None
-    SYS_CANO = "MOCK_ACCOUNT" 
-    SYS_IS_MOCK = True
-    SYS_ACNT_PRDT = "01"
+    SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_IS_MOCK, SYS_ACNT_PRDT = None, None, "MOCK_ACCOUNT", True, "01"
 
 ENV_STR = "MOCK" if SYS_IS_MOCK else "REAL"
+ACC_FP = hashlib.sha256(SYS_CANO.encode()).hexdigest()[:16] if SYS_CANO != "MOCK_ACCOUNT" else "MOCK_ACCOUNT"
 
 with st.sidebar.expander("🔑 KIS 계좌 연동 상태", expanded=not bool(SYS_APP_KEY)):
     if SYS_APP_KEY and SYS_CANO != "MOCK_ACCOUNT":
@@ -135,20 +102,22 @@ with st.sidebar.expander("🔑 KIS 계좌 연동 상태", expanded=not bool(SYS_
         st.error("⚠️ 스트림릿 Secrets에서 계좌 정보를 찾을 수 없습니다. (모의 DB 모드 작동 중)")
 
 st.sidebar.markdown("---")
-st.sidebar.header("📱 봇 제어 (DB 연동)")
-init_ks = bool(db.get_setting('kill_switch', False))
-init_at = bool(db.get_setting('auto_trade_enabled', False))
-init_ap = bool(db.get_setting('auto_pilot', False))
-kill_switch = st.sidebar.toggle("🚨 긴급 정지 (KILL SWITCH)", value=init_ks)
-auto_trade = st.sidebar.toggle("🚀 실전 자동주문 활성화", value=init_at)
-auto_pilot = st.sidebar.toggle("🔄 오토파일럿 켜기", value=init_ap)
+st.sidebar.header("🚨 전역 제어 (Master)")
+master_ks = st.sidebar.toggle("전체 매매 일시중지 (Master Kill Switch)", value=bool(db.get_setting('master_kill_switch', False)))
+if master_ks != bool(db.get_setting('master_kill_switch', False)): db.set_setting('master_kill_switch', master_ks)
 
-if kill_switch != init_ks:
-    db.set_setting('kill_switch', kill_switch)
-if auto_trade != init_at:
-    db.set_setting('auto_trade_enabled', auto_trade)
-if auto_pilot != init_ap:
-    db.set_setting('auto_pilot', auto_pilot)
+st.sidebar.header(f"📱 {STRAT_DISPLAY_MAP[active_strat]} 계좌 제어")
+acc_ks_key = f"kill_switch_KIS_{ENV_STR}_{ACC_FP}_{active_strat.value}"
+acc_at_key = f"auto_trade_KIS_{ENV_STR}_{ACC_FP}_{active_strat.value}"
+acc_ap_key = f"auto_pilot_KIS_{ENV_STR}_{ACC_FP}_{active_strat.value}"
+
+acc_ks = st.sidebar.toggle("해당 계좌 긴급 정지", value=bool(db.get_setting(acc_ks_key, False)))
+acc_at = st.sidebar.toggle("실전 자동주문 활성화", value=bool(db.get_setting(acc_at_key, False)))
+acc_ap = st.sidebar.toggle("오토파일럿 켜기", value=bool(db.get_setting(acc_ap_key, False)))
+
+if acc_ks != bool(db.get_setting(acc_ks_key, False)): db.set_setting(acc_ks_key, acc_ks)
+if acc_at != bool(db.get_setting(acc_at_key, False)): db.set_setting(acc_at_key, acc_at)
+if acc_ap != bool(db.get_setting(acc_ap_key, False)): db.set_setting(acc_ap_key, acc_ap)
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 전략 파라미터 (Baseline)")
@@ -175,6 +144,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
     col_s1, col_s2 = st.columns([8, 2])
+    
     with col_s1:
         if st.button("🚀 실시간 AI 타점 스캐너 가동", type="primary", use_container_width=True):
             with st.spinner("AI 검색 중... (엄격한 전략 기준에 따라 종목이 없을 수 있습니다)"):
@@ -187,7 +157,7 @@ with tab1:
             st.session_state.search_q = search_query
             st.rerun()
 
-    current_watchlist = db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value)
+    current_watchlist = db.get_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value)
     current_tickers = [s['티커'] for s in current_watchlist]
     
     if st.session_state.get('search_q'):
@@ -200,7 +170,7 @@ with tab1:
                 c1, c2 = st.columns([8, 2])
                 c1.markdown(f"`{m_code}` **{m_name}**")
                 if m_code not in current_tickers and c2.button("➕ 등록", key=f"add_{m_code}"): 
-                    db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, current_watchlist + [{'티커': m_code, '종목명': m_name}])
+                    db.clear_and_update_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value, current_watchlist + [{'티커': m_code, '종목명': m_name}])
                     st.session_state.search_q = "" 
                     st.rerun()
 
@@ -215,7 +185,7 @@ with tab1:
                 
                 if str(row['티커']).zfill(6) not in current_tickers:
                     if c4.button("➕ 담기", key=f"scan_{row['티커']}"):
-                        db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, current_watchlist + [{'티커': row['티커'], '종목명': row['종목명']}])
+                        db.clear_and_update_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value, current_watchlist + [{'티커': row['티커'], '종목명': row['종목명']}])
                         st.rerun() 
                 else:
                     c4.button("✅ 완료", key=f"scan_{row['티커']}", disabled=True)
@@ -229,7 +199,7 @@ with tab1:
         ticker = str(row['티커']).zfill(6)
         tok = st.session_state.get('kis_token')
         c_price, h_price, l_price, is_halted, _ = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, ticker, tok, SYS_IS_MOCK) if SYS_APP_KEY and tok else (0.0, 0.0, 0.0, False, "No Token")
-        db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value)}
+        db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value)}
         buy_p = db_positions[ticker]['buy_price'] if ticker in db_positions else 0.0
         high_p = db_positions[ticker]['highest_price'] if ticker in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[ticker]['buy_date'])).days if ticker in db_positions else 0
@@ -247,7 +217,7 @@ with tab1:
             edited_df = st.data_editor(display_df.sort_values('🔥 점수', ascending=False).reset_index(drop=True).style.format({'🔥 점수': '{:.2f}'}), use_container_width=True)
             if st.button("💾 체크한 종목 삭제 적용", type="primary"):
                 remaining_items = edited_df[edited_df['🗑️ 삭제'] == False][['티커', '종목명']].to_dict('records')
-                db.clear_and_update_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, remaining_items)
+                db.clear_and_update_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value, remaining_items)
                 st.rerun()
 
 with tab2:
@@ -266,7 +236,7 @@ with tab2:
                     db.set_setting('last_real_data', new_rd)
                     kis_stocks = [{'ticker': str(i['pdno']).zfill(6), 'qty': int(i['hldg_qty']), 'buy_price': float(i['pchs_avg_pric']), 'current_price': float(i['prpr'])} for i in h if int(i['hldg_qty']) > 0]
                     try:
-                        db.sync_positions_from_broker("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value, kis_stocks)
+                        db.sync_positions_from_broker("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value, kis_stocks)
                     except Exception as e:
                         st.error(f"DB 동기화 중 오류 발생: {e}")
                         
@@ -298,25 +268,25 @@ with tab2:
 with tab3:
     st.header("🤖 실전 자동매매 큐")
     c1, c2, c3 = st.columns(3)
-    c1.metric("🚨 킬 스위치", "차단됨" if kill_switch else "정상")
-    c2.metric("🚀 자동주문", "활성화" if auto_trade else "비활성화")
+    c1.metric("🚨 킬 스위치", "차단됨" if (master_ks or acc_ks) else "정상")
+    c2.metric("🚀 자동주문", "활성화" if acc_at else "비활성화")
     c3.metric("💵 가용 현금", f"{rd['cash']:,.0f} 원")
     st.markdown("---")
     
     base_eval = rd['eval'] if rd['eval'] > 0 else float(total_cash)
     target_buy_amt = base_eval * current_config.alloc
-    locked_cash, _ = db.get_locked_cash_and_qty("KIS", ENV_STR, SYS_CANO, active_strat.value)
+    locked_cash, _ = db.get_locked_cash_and_qty("KIS", ENV_STR, ACC_FP, active_strat.value)
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
     
     temp_q = []
     eval_list = []
     eval_tickers = set()
-    for w in db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
+    for w in db.get_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value):
         tk = str(w['티커']).zfill(6)
         eval_tickers.add(tk)
         eval_list.append({'티커': tk, '종목명': w['종목명']})
         
-    for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
+    for p in db.get_positions("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value):
         tk = str(p['ticker']).zfill(6)
         if tk not in eval_tickers:
             eval_tickers.add(tk)
@@ -330,7 +300,7 @@ with tab3:
     def process_q(row):
         tk = str(row['티커']).zfill(6)
         nm = row['종목명']
-        db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value)}
+        db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value)}
         m_qty = db_positions[tk]['managed_qty'] if tk in db_positions else 0
         buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
@@ -393,7 +363,17 @@ with tab3:
                 tk = r['티커']
                 side = "BUY" if "매수" in r['상태'] else "SELL"
                 now_str = datetime.datetime.now(KST).strftime('%Y%m%d_%H%M')
-                spec = quant.OrderSpec(correlation_id="", idempotency_key=f"UI_{tk}_{now_str}", broker="KIS", environment=ENV_STR, account_id=SYS_CANO, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, strategy_id=active_strat.value, strategy_version="1.0", ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['주문수량'], limit_price=0, intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                # DB의 정규화된 27개 필드를 채우는 OrderSpec 생성
+                spec = quant.OrderSpec(
+                    correlation_id="", idempotency_key=f"UI_{tk}_{now_str}", broker="KIS", environment=ENV_STR, 
+                    account_fingerprint=ACC_FP, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, 
+                    strategy_id=active_strat.value, strategy_version="1.0", contract_version=db.CONTRACT['contract_version'],
+                    ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['주문수량'], limit_price=0, 
+                    reference_price=0.0, exchange="KRX", time_in_force="GTC", signal_id="UI_MANUAL", signal_source="UI", 
+                    signal_cutoff=now_str, quote_id="", quote_source="UI", quote_timestamp=now_str, 
+                    intent_ttl=300, cost_model_version=db.CONTRACT.get('cost_model_version', '1.0.0'), 
+                    intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                )
                 ok, msg = db.safe_add_order_intent(spec)
                 if ok:
                     success_count += 1
@@ -407,16 +387,16 @@ with tab3:
         st.info("대기 중인 종목이 없습니다.")
     
     st.markdown("### 📊 실시간 체결 대사 현황")
-    intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED', 'QUARANTINED'], "KIS", ENV_STR, SYS_CANO, active_strat.value)
+    intents = db.get_orders_by_status_and_env(['INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'REJECTED', 'QUARANTINED'], "KIS", ENV_STR, ACC_FP, active_strat.value)
     if intents:
-        st.dataframe(pd.DataFrame(intents)[['ticker', 'order_type', 'qty', 'status', 'cum_filled_qty', 'resp_code']], use_container_width=True)
+        st.dataframe(pd.DataFrame(intents)[['ticker', 'side', 'qty', 'status', 'cum_filled_qty', 'resp_code']], use_container_width=True)
 
 with tab4:
     st.header("🧪 고급 백테스트 엔진")
     st.warning("⚠️ [DATA_LIMITED] 현재 시스템은 과거 시가총액/상장폐지 등 Point-in-time 데이터를 제공하지 않아, 생존자 편향(Survivor Bias)이 포함된 근사 시뮬레이션만을 수행합니다. 미래 수익 예측이나 LIVE 활성화의 절대적 기준으로 사용할 수 없습니다.")
     
     today_date = datetime.datetime.now(KST).date()
-    stocks_df = pd.DataFrame(db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value))
+    stocks_df = pd.DataFrame(db.get_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value))
     
     st.subheader("🎯 테스트 1. 관심·보유종목 전략 매매 시뮬레이션")
     st.info("현재 관심종목 및 보유종목 전체를 과거 기간에 소급 적용하여 매매 결과를 회고하는 시나리오입니다.")
@@ -424,13 +404,13 @@ with tab4:
     combined_tickers = set()
     combined_data = []
     
-    for w in db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
+    for w in db.get_watchlist("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value):
         tk = str(w['티커']).zfill(6)
         if tk not in combined_tickers:
             combined_tickers.add(tk)
             combined_data.append({'티커': tk, '종목명': w['종목명']})
             
-    for p in db.get_positions("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
+    for p in db.get_positions("KIS", ENV_STR, ACC_FP, active_strat.value, active_strat.value):
         tk = str(p['ticker']).zfill(6)
         if tk not in combined_tickers:
             combined_tickers.add(tk)
@@ -488,7 +468,7 @@ with tab4:
     t2_end_default = today_date
     one_year_ago = t2_end_default - datetime.timedelta(days=365)
     
-    creation_date = db.get_portfolio_creation_date("KIS", ENV_STR, SYS_CANO, active_strat.value)
+    creation_date = db.get_portfolio_creation_date("KIS", ENV_STR, ACC_FP, active_strat.value)
     
     if creation_date and creation_date > one_year_ago:
         t2_start_default = creation_date
@@ -597,11 +577,15 @@ with tab5:
         <li><b>[시스템 규칙] 단일 진실 공급원(SSOT):</b> 시스템의 모든 파라미터(Core/Satellite)와 비용률, 시뮬레이션 주기 등은 오직 <code>system_contract.yaml</code> 파일에서만 관리(하드코딩 배제)되며, UI는 이를 읽기 전용(Read-only)으로 표출만 한다. 변경 시 반드시 버전을 동시 상향해야 한다.</li>
         <li><b>Core:</b> 버퍼 1.5%, 손절 -15%, 투입 한도 35%, 익절목표 30%, 하락허용 -10%, 쿨다운 60 거래일, 최소보유 5 거래일.</li>
         <li><b>Satellite:</b> 버퍼 1.0%, 손절 -12%, 투입 한도 20%, 익절목표 20%, 하락허용 -7%, 쿨다운 30 거래일, 최소보유 3 거래일.</li>
+        <li><b>[시스템 규칙] 파라미터 무결성 경계값 보장:</b> <code>NaN</code>, <code>Inf</code>는 시스템 폭주를 유발하므로 엔진단에서 즉시 차단(에러)한다. 손절컷(<code>sl</code>)과 트레일링 하락허용(<code>ts_drp</code>)은 시스템상 <b>반드시 음수(-)</b>로 설정되어야 하며, 투입 한도(<code>alloc</code>)는 0 초과 1.0 이하의 비율, 쿨다운과 최소보유일은 0 이상의 정수만 허용하여 파라미터 조작으로 인한 오작동을 원천 봉쇄한다.</li>
     </ul>
 
     <h3>🛡️ 4. 3대 고급 안전장치 및 장중 손절/트레일링 규칙</h3>
     <ul>
         <li><b>장중 보수적 청산:</b> 종가(Close)를 기다리지 않고 장중 저가(Low)가 손절선 또는 트레일링 컷에 터치하면 즉각 <b>가장 보수적인 가격(Adverse-first)</b>으로 청산 시그널을 발생시킨다.</li>
+        <li><b>종가 추세 이탈:</b> 최소 보유일 경과 후, Core는 MA60을, Satellite는 MA20을 하향 이탈(-버퍼/2.0) 시 종가 기준으로 전량 청산한다.</li>
+        <li><b>일일 손실 컷 차단:</b> 계좌의 일일 손익(Daily PnL)이 -5%를 초과할 경우 당일 신규 매수(BUY) 진입을 전면 차단한다.</li>
+        <li><b>가격 괴리율 방어:</b> 주문 생성 시점의 Intent Price와 실제 제출 직전의 Current Price 괴리가 3%를 초과하면 이상 급등락으로 간주하고 주문을 REJECTED 처리한다.</li>
         <li><b>원자적 제출 게이트(Atomic Gate):</b> 봇(Worker)은 KIS 실주문 POST를 쏘기 직전, 동일 트랜잭션 내에서 현금 한도, 킬 스위치, 리스 토큰 만료, 가격 괴리, 일일 손실 -5% 초과 여부를 다시 한 번 완벽히 교차 검증하여, 하나라도 실패하면 즉시 CANCELED/RISK_REJECTED 처리한다.</li>
     </ul>
 
@@ -609,33 +593,66 @@ with tab5:
     <ul>
         <li><b>[시스템 규칙] 16단계 상태 단방향 전이:</b> 주문은 <code>INTENT_CREATED</code>부터 <code>ACKNOWLEDGED</code>, <code>FILLED</code>, <code>CANCELED</code> 등 계약에 명시된 16개 상태와 엄격한 단방향 전이 룰에 의해서만 움직인다. KIS 접수 ACK를 체결(FILLED)로 오인하지 않으며, UNKNOWN 주문을 맹목적으로 자동 재전송하지 않는다.</li>
         <li><b>[시스템 규칙] 부분 체결 대사:</b> 체결 수량과 손익은 로컬 원장과 KIS 브로커 간의 누적 체결 델타(Delta)만을 산출하여 정확히 1번만 계산(Reconciliation)되며 매매 중지 상태에서도 대사는 지속된다.</li>
-        <li><b>[시스템 규칙] API 초당 호출 제한(Rate Limit) 방어 쓰레딩:</b> 증권사 Open API의 초당 호출 제한(Rate Limit)을 준수하고 시스템 밴(Ban)을 막기 위해, 시세 조회 등 대량의 API 호출이 수반되는 로직은 반드시 워커 풀의 동시성 크기(<code>max_workers</code>)를 안전한 수치(예: 10개)로 제한하여 실행한다.</li>
+        <li><b>[시스템 규칙] API Token Caching & Rate Limit:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행(Single-flight)으로 갱신된다. 또한 증권사 서버 차단을 막기 위해 워커 풀의 동시성 크기를 안전한 수치로 제한한다.</li>
+        <li><b>[시스템 규칙] 멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향, 티커가 조합된 Idempotency Key를 통해 다중 브라우저 또는 다중 워커에 의한 중복 제출(Double POST)을 원천 차단한다. UI에서 '일괄 주문' 클릭 시에도 관망 상태인 종목은 DB에 삽입되지 않도록 사전 필터링된다.</li>
     </ul>
 
     <h3>⏱️ 6. 시뮬레이션 및 백테스트 실행 규칙 (Simulation Rules)</h3>
     <ul>
         <li><b>[시스템 규칙] 시뮬레이션 정밀도 라벨링:</b> 과거 1분봉 데이터 획득이 불가능한 현 패키지 환경에서는 시뮬레이션 시 종가 데이터를 근사하여 사용하는 <code>DAILY_APPROX</code> 모드가 강제 적용됨을 명시하며, 미래 예측의 절대적 기준이 아님(생존자 편향 내포)을 경고한다.</li>
+        <li><b>[시스템 규칙] 최소 시뮬레이션 기간 보장:</b> 퀀트 시뮬레이션에서 수익률, CAGR, MDD 등의 핵심 지표를 산출하기 위해서는 최소한 '진입'과 '평가'를 비교할 수 있는 2영업일 이상의 데이터 윈도우가 필수적이다. 시작일과 종료일이 같거나(0일), 데이터가 부족할 경우 엔진 레벨에서 즉각 시뮬레이션을 차단(Fail-safe)한다.</li>
+        <li><b>[시스템 규칙] 강세장 비중 증액 (Bull-market Boost):</b> 사용자가 '강세장 부스터' 옵션을 켰을 경우, 시뮬레이션 및 실거래 엔진은 코스피 지수가 200일선 위에 위치할 때 매수 비중을 최대 1.5배 증액하여 수익률을 극대화한다.</li>
         <li><b>[시스템 규칙] T+1 체결 및 비용:</b> 모든 신호는 다음 유효 영업일(T+1) 시가(Open)로 체결되며, 왕복/편도 혼선을 막기 위해 매수 시 <code>+0.25%</code>, 매도 시 <code>-0.25%</code>의 명확한 편도 비용 산식을 적용한다.</li>
-        <li><b>[시스템 규칙] 일간 스캔 및 미청산 MTM:</b> Test 2/3의 스캔 빈도를 매일(Daily)로 설정하여 1~2일짜리 짧은 계좌도 완벽한 1:1 비교를 수행하며, 시뮬레이션 종료 시점에 팔지 않고 보유 중인 주식(Open Position)도 라운드트립 장부(Ledger)에 현재가 기준으로 명확히 산출하여 누락을 막는다. 최소 2영업일 미만의 불가능한 시뮬레이션 요청은 엔진 레벨에서 즉각 안전하게 거부(Fail-safe)한다.</li>
+        <li><b>[시스템 규칙] 일간 스캔 및 미청산 MTM:</b> Test 2/3의 스캔 빈도를 매일(Daily)로 설정하여 1~2일짜리 짧은 계좌도 완벽한 1:1 비교를 수행하며, 시뮬레이션 종료 시점에 팔지 않고 보유 중인 주식(Open Position)도 라운드트립 장부(Ledger)에 현재가 기준으로 명확히 산출하여 누락을 막는다.</li>
         <li><b>[시스템 규칙] 잔여 현금 영혼 보내기(Partial Allocation) 원칙:</b> 매수 시그널 발생 시 가용 현금이 목표 투입 금액보다 적더라도, 최소 1주 이상 살 수 있는 현금이 남아있다면 가용 현금을 100% 소진하여 부분 매수(Partial Allocation)를 집행한다.</li>
         <li><b>[시스템 규칙] 호가 단위(Tick Size) 보정 및 1주 미만 절사 원칙:</b> 시뮬레이션 매수 수량 산출 시, 수학적 연산 결과가 소수점으로 나오더라도 반드시 <code>int()</code> 처리하여 절사(내림)하며, 평가 금액 및 체결 가격은 KIS 호가 단위에 부합하는 정수형으로 보정 및 기록한다.</li>
+        <li><b>[시스템 규칙] 회계 이중 출금 방어 (No Double-Spend):</b> 매수 시그널 당일(T일)에는 가상 현금(available_cash)만을 차감하여 한도를 체크하고, 실제 계좌 잔고(cash)는 반드시 체결 당일(T+1일)에 단 한 번만 차감되도록 회계 무결성을 유지한다.</li>
     </ul>
 
-    <h3>🖥️ 7. UI 레이아웃 및 장애 복구 (UI & Recovery)</h3>
+    <h3>🖥️ 7. UI 레이아웃 및 관측 가능성 (UI Observability)</h3>
     <ul>
         <li><b>[시스템 규칙] KST(한국표준시) 타임존 절대 강제:</b> 클라우드 환경 배포 시 시스템 시간이 UTC로 잡혀 발생할 수 있는 시차 오작동을 막기 위해 모든 시간 연산과 DB 레코딩에는 <code>KST(UTC+9)</code> 타임존을 강제 적용한다.</li>
         <li><b>[시스템 규칙] 스캐너 세션 캐싱 및 상태 보존:</b> AI 타점 스캐너 실행 결과 및 검색 데이터는 Streamlit의 <code>st.session_state</code>에 안전하게 캐싱되어, 화면 새로고침 시 검색 결과 목록이 증발하지 않도록 방어한다.</li>
         <li><b>[시스템 규칙] 다중 연산 스피너(Spinner) 및 중복 클릭 방지:</b> 시뮬레이션이나 API 호출 연산 시 사용자 중복 클릭으로 인한 메모리 충돌을 막기 위해 반드시 UI 스피너를 강제한다.</li>
-        <li><b>[시스템 규칙] 세션 만료 및 폼 기반 로그인 (Session Volatility):</b> 로그인 시 '엔터(Enter)' 키 입력을 지원하는 폼 구조를 사용하되, 새로고침(F5) 시 브라우저 세션이 초기화되는 것은 의도된 보안 정책(Secure by default)으로 채택하여 잔고 노출을 방어한다.</li>
-        <li><b>[시스템 규칙] Core/Satellite 워커 환경 분리:</b> 두 워커는 완전히 독립된 계좌/포트폴리오 바인딩으로 동작하며, 한 워커의 에러가 다른 계좌의 원장을 오염시키지 않는 구조적 격리(Fencing)를 보장한다.</li>
         <li><b>[시스템 규칙] 도메인 URL 위생화(Sanitization):</b> KIS 통신 도메인은 복사 시 섞여 들어올 수 있는 보이지 않는 제로스페이스 및 특수 문자를 차단하기 위해 철저한 ASCII 클렌징 과정을 거친 후 호출한다.</li>
-        <li><b>[시스템 규칙] 무손실 DB 마이그레이션:</b> DB 스키마(v3) 업데이트 시, 기존 데이터를 임시 테이블에 백업 후 <code>INSERT INTO SELECT</code> 방식으로 원자적으로 마이그레이션하여 과거 원장(Ledger)을 영구 보존한다.</li>
+        <li><b>[시스템 규칙] 테스트 1 포트폴리오 분석:</b> 테스트 1은 기존의 단일 종목 입력 방식을 전면 폐기하고, 시스템 내에 등록된 <b>'현재 관심종목'과 '실제 보유종목' 전체를 하나의 포트폴리오로 취합</b>하여 과거 기간의 성과를 회고하는 UI로 개편되었다.</li>
+        <li><b>[시스템 규칙] 테스트 2 완벽한 1:1 비교 강제:</b> AI 가상 운용 시뮬레이션(테스트 2) 수행 시, 임의의 가상 원금이 아닌 <b>실제 계좌의 현재 투자 원금(Eval - PnL)</b>을 시뮬레이션의 초기 자금(Init Cash)으로 강제 동기화하여 진정한 의미의 성과 비교(Apples-to-apples)를 제공한다.</li>
+        <li><b>[시스템 규칙] 포트폴리오 개설일 강제 동기화 (Test 2):</b> 테스트 2 수행 시, 포트폴리오 개설일(DB상 최초 종목 등록일 또는 주문 발생일)을 동적으로 추적하여 개설된 지 1년 미만인 경우 무의미한 과거 1년 전체를 시뮬레이션하지 않고 '실제 개설일'부터 오늘까지로 시작일을 자동 보정하여 완벽한 비교 신뢰성을 부여한다. 시작일과 종료일이 같은 당일(0일) 시뮬레이션 시도 시, 즉각 경고를 반환하여 사용자의 혼란을 방지한다.</li>
+        <li><b>[시스템 규칙] 시뮬레이션 버튼 및 결과 뷰 100% 확장:</b> 모든 테스트(1, 2, 3)의 실행 버튼과 분석 결과는 화면 전체(Full-width) 너비를 100% 활용하여 사용자 가독성과 클릭 편의성을 극대화하며, UI의 통일성을 유지한다.</li>
+        <li><b>[시스템 규칙] 대기열 뷰 확장 및 추가 매수 구분:</b> 사용자의 직관적인 판단을 위해 대기열에 종목의 '주문수량'뿐만 아니라 '현재 보유수량'과 '평균단가'를 실시간 대조하여 렌더링한다. 또한 이미 보유 중인 종목에 매수 시그널이 발생할 경우 단순 매수 시그널이 아닌 '추가 매수'로 명확히 구분하여 표기한다.</li>
+        <li><b>[UI/UX 포맷팅 절대 규칙]</b> 성과 지표 용어를 한글로 친절히 순화(예: <code>CAGR ➔ 연평균 수익률(CAGR)</code>, <code>MDD ➔ 최대 낙폭(MDD)</code>)하여 표기한다. 수익률은 양수일 경우 적색(<code>#FF5050</code>), 음수일 경우 청색(<code>#3b82f6</code>)으로 스타일링한다. AI 스코어, 평균단가 등 변동 지표는 소수점 둘째 자리(<code>.2f</code>), 현재가 및 수량은 정수 콤마 포맷(<code>,.0f</code>)을 적용한다.</li>
+    </ul>
+
+    <h3>🗄️ 8. 데이터베이스 및 계좌 격리 (Database & Integrity)</h3>
+    <ul>
+        <li><b>[시스템 규칙] 무손실 DB 마이그레이션:</b> DB 스키마(v4 등) 업데이트 시, 기존 데이터를 임시 테이블에 백업 후 <code>INSERT INTO SELECT</code> 방식으로 원자적 마이그레이션하여 과거 원장(Ledger)을 영구 보존한다.</li>
+        <li><b>[시스템 규칙] 계좌번호(CANO) 평문 저장 금지:</b> 사용자 자산 보호를 위해 DB(SQLite)의 <code>account_id</code> 컬럼에는 평문 계좌번호 대신 SHA-256 단방향 해시로 생성된 <b>계좌 핑거프린트(Fingerprint)</b>만을 기록한다. 평문 정보는 메모리(secrets.toml) 상에서만 제한적으로 활용된다.</li>
+        <li><b>[시스템 규칙] OrderSpec 메타데이터 확장 정규화:</b> 주문 의도(Order Intent) 테이블은 추적성(Audit) 확보를 위해 <code>quote_id</code>, <code>intent_ttl</code>, <code>cost_model_version</code> 등 27개의 상세 필드로 정규화되어 무손실 마이그레이션(v4)을 거친다.</li>
+        <li><b>[시스템 규칙] 전역/개별 계좌 매매 중지 분리:</b> 매매 통제 시스템은 전체 계좌를 일시에 정지시키는 마스터 킬 스위치(Master Kill Switch)와, 특정 전략(Core/Satellite) 계좌만을 제어하는 개별 토글로 2원화되어 상호 간섭 없이 독립 작동한다.</li>
+        <li><b>[시스템 규칙] 수동 보유와 자동매매(Managed) 분리:</b> KIS 서버의 전체 잔고를 무조건 자동매매 포지션으로 덮어쓰지 않으며, 봇 스스로 체결한(Fill Delta) 수량만을 <code>managed_qty</code>로 누적하여 장기 투자 수동 보유분의 무단 청산을 방지한다.</li>
+        <li><b>[시스템 규칙] 음수 체결 롤백 금지 및 감사 보존:</b> 브로커와의 체결 수량 불일치로 인해 로컬 포지션이 음수(< 0)가 되더라도 강제로 트랜잭션을 롤백(Rollback)하여 주문 내역을 은폐하지 않는다. 포지션을 그대로 커밋하되 주문 상태를 <code>RECONCILIATION_REQUIRED</code>로 확정하여 시스템이 이상 상태를 명확히 인지하고 감사를 수행하도록 강제한다.</li>
+    </ul>
+
+    <h3>💡 9. 장애 복구 및 프로세스 제어 (Disaster Recovery & Fencing)</h3>
+    <ul>
+        <li><b>Worker Lease & Fencing:</b> 다중 봇 실행 시 <code>worker_leases</code> 테이블을 통해 Lease 획득자만 주문을 POST 할 수 있으며, 뺏긴 워커는 즉시 권한을 상실한다.</li>
+        <li><b>Crash Window 방어:</b> 프로세스가 어느 시점(claim, submit, ack 직전)에 강제 종료되더라도 UNIQUE 제약과 상태 대사를 통해 동일 주문의 2회 발송을 구조적으로 차단한다.</li>
+        <li><b>Fail-closed (안전 우선 차단):</b> KIS API 장애 등으로 인해 주문가능금액 조회가 일시적으로 실패(0 반환)하더라도, 이를 총 예수금으로 강제 대체하지 않고 가용 현금을 <code>0</code>으로 인식하여 미수금 발생을 방어한다.</li>
+    </ul>
+
+    <h3>🔐 10. 보안 및 런타임 환경 (Security & Runtime Environment)</h3>
+    <ul>
+        <li><b>API Key 물리적 격리 (Zero Plaintext):</b> 증권사 <code>APP_KEY</code>, <code>APP_SECRET</code>, <code>CANO</code> 등의 민감한 정보는 절대 Google Sheets나 SQLite, 애플리케이션 로그에 평문으로 저장하지 않는다.</li>
+        <li><b>강력한 해시 인증 (Bcrypt Authentication):</b> 시스템 로그인에 사용되는 기본 비밀번호 0000이나 URL 쿼리 파라미터 인증을 전면 폐기하고, Salt가 포함된 <b>Argon2id 또는 Bcrypt 해시 알고리즘</b>을 통해서만 검증을 수행한다. 관리자 비밀번호 해시값 역시 OS 환경변수(<code>ADMIN_PASSWORD_HASH</code>)에 보관된다.</li>
+        <li><b>[시스템 규칙] 세션 만료 및 폼 기반 로그인 (Session Volatility):</b> 사용자의 편의를 위해 로그인 시 '엔터(Enter)' 키 입력을 지원하는 폼(Form) 구조를 사용한다. 단, 새로고침(F5) 시에는 브라우저 세션이 초기화되어 로그아웃 처리되는 것을 '의도된 기본 보안 정책(Secure by default)'으로 채택하여, 금융 데이터가 타인에게 노출되는 것을 방지한다.</li>
+        <li><b>[시스템 규칙] 엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(예: <code>is_mock</code>)은 스트림릿 시크릿에서 문자열(예: <code>"false"</code>)로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 대소문자를 무시한 명시적 형변환(Boolean Parsing)을 거친다.</li>
+        <li><b>[시스템 규칙] 패키지 의존성(Dependency) 엄격 관리:</b> 시스템에 새로운 외부 라이브러리(예: <code>PyYAML</code>, <code>bcrypt</code> 등)를 도입하여 코드를 업데이트할 경우, 클라우드 서버(Streamlit Cloud 등) 배포 시 <code>ModuleNotFoundError</code>로 인해 시스템이 즉각 다운되는 치명적 장애를 막기 위해, <b>반드시 <code>requirements.txt</code> 파일에 해당 패키지명을 명시적으로 추가하여 형상 관리를 동기화</b>해야 한다.</li>
     </ul>
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 및 자동 문서화 (절대 원칙)</h3>
     <ul style='color: #DC2626;'>
-        <li>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~7 전체 내용(투자 대원칙, 전략 공식, UI 규칙, 방어 로직 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b></li>
+        <li>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~10 전체 내용(투자 대원칙, 전략 공식, UI 규칙, 방어 로직 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b></li>
         <li><b>[자동 문서화 헌장]:</b> 향후 시스템의 로직, 파라미터, UI/UX 규칙을 새롭게 추가하거나 변경할 경우(단순 오타 수정 제외), <b>사용자가 따로 요청하지 않더라도 AI는 반드시 그 변경 사항과 사유를 이 백서(해당하는 Part)에 자동으로 업데이트하여 기록해야 합니다.</b> 이 백서는 시스템의 단일 진실 공급원(Single Source of Truth)으로 취급되어야 합니다.</li>
     </ul>
     """, unsafe_allow_html=True)
