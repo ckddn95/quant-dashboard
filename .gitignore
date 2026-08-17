@@ -1,0 +1,12 @@
+# Python Cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Database & Backups
+quant_system.db
+*.bak
+
+# Environment Variables & Secrets
+.env
+secrets.toml
