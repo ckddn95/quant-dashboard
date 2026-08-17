@@ -407,6 +407,7 @@ with tab4:
     
     combined_tickers = set()
     combined_data = []
+    
     for w in db.get_watchlist("KIS", ENV_STR, SYS_CANO, active_strat.value, active_strat.value):
         tk = str(w['티커']).zfill(6)
         if tk not in combined_tickers:
@@ -465,10 +466,18 @@ with tab4:
     st.markdown("---")
 
     st.subheader("🎯 테스트 2. AI 가상운용 vs 실제계좌 성과 비교")
-    st.info("선택한 기간 동안 실제 계좌의 투자 원금과 동일한 금액으로 AI가 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
     
     t2_end_default = today_date
-    t2_start_default = t2_end_default - datetime.timedelta(days=365)
+    one_year_ago = t2_end_default - datetime.timedelta(days=365)
+    
+    creation_date = db.get_portfolio_creation_date("KIS", ENV_STR, SYS_CANO, active_strat.value)
+    
+    if creation_date and creation_date > one_year_ago:
+        t2_start_default = creation_date
+        st.info(f"💡 포트폴리오 개설일({creation_date})이 1년 미만이므로, 과거 1년 전체가 아닌 '개설일부터 오늘까지'의 성과를 1:1로 비교합니다.")
+    else:
+        t2_start_default = one_year_ago
+        st.info("💡 최근 1년 동안 동일한 시작금액(현금)으로 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
     
     t2_c1, t2_c2, t2_c3 = st.columns([3, 3, 4])
     with t2_c1: start_d2 = st.date_input("시작일", t2_start_default, key="t2_start")
@@ -605,7 +614,8 @@ with tab5:
         <li><b>[시스템 규칙] 엄격한 불리언(Boolean) 설정 파싱:</b> KIS 계좌 설정값(예: <code>is_mock</code>)은 스트림릿 시크릿에서 문자열(예: <code>"false"</code>)로 잘못 입력되더라도 파이썬에서 참으로 오인하지 않도록 대소문자를 무시한 명시적 형변환(Boolean Parsing)을 거친다.</li>
         <li><b>[시스템 규칙] 도메인 URL 위생화(Sanitization):</b> KIS Open API 등의 통신 도메인은 복사/붙여넣기 시 유입될 수 있는 보이지 않는 제로스페이스 및 비-ASCII 특수 문자를 원천 차단하기 위해 철저한 ASCII 클렌징 및 공백 제거 과정을 거친 후 호출한다.</li>
         <li><b>[시스템 규칙] 테스트 1 포트폴리오 분석:</b> 테스트 1은 기존의 단일 종목 입력 방식을 전면 폐기하고, 시스템 내에 등록된 <b>'현재 관심종목'과 '실제 보유종목' 전체를 하나의 포트폴리오로 취합</b>하여 과거 기간의 성과를 회고하는 UI로 개편되었다. 분석 결과는 화면 전체(Full-width)를 활용하여 사용자 가독성을 극대화한다.</li>
-        <li><b>[시스템 규칙] 테스트 2 완벽한 1:1 비교 강제:</b> AI 가상 운용 시뮬레이션(테스트 2) 수행 시, 임의의 가상 원금이 아닌 <b>실제 계좌의 현재 투자 원금(Eval - PnL)</b>을 시뮬레이션의 초기 자금(Init Cash)으로 강제 동기화하여 진정한 의미의 성과 비교(Apples-to-apples)를 제공한다. 테스트 2의 비교 기간은 <b>최근 1년</b>을 기본값으로 자동 설정하며, AI 가상 운용 성과와 현재 사용자의 실제 계좌 성과를 화면에 <b>Side-by-side (나란히 비교)</b> 배치하여 직관적인 성과 대조를 강제한다.</li>
+        <li><b>[시스템 규칙] 테스트 2 완벽한 1:1 비교 강제:</b> AI 가상 운용 시뮬레이션(테스트 2) 수행 시, 임의의 가상 원금이 아닌 <b>실제 계좌의 현재 투자 원금(Eval - PnL)</b>을 시뮬레이션의 초기 자금(Init Cash)으로 강제 동기화하여 진정한 의미의 성과 비교(Apples-to-apples)를 제공한다.</li>
+        <li><b>[시스템 규칙] 포트폴리오 개설일 강제 동기화 (Test 2):</b> 테스트 2 수행 시, 포트폴리오 개설일(DB상 최초 종목 등록일 또는 주문 발생일)을 동적으로 추적하여 개설된 지 1년 미만인 경우 무의미한 과거 1년 전체를 시뮬레이션하지 않고 '실제 개설일'부터 오늘까지로 시작일을 자동 보정하여 완벽한 비교 신뢰성을 부여한다.</li>
         <li><b>[시스템 규칙] 시뮬레이션 버튼 및 결과 뷰 100% 확장:</b> 모든 테스트(1, 2, 3)의 실행 버튼과 분석 결과는 화면 전체(Full-width) 너비를 100% 활용하여 사용자 가독성과 클릭 편의성을 극대화하며, UI의 통일성을 유지한다.</li>
         <li>관심종목 탭, 실전 계좌 모니터링, 자동매매 대기열, 백테스트 엔진 등 명확한 MSA 관점의 분리된 탭을 제공한다.</li>
         <li><b>[시스템 규칙] 다중 계좌 스위칭:</b> Core와 Satellite 전략은 Streamlit Secrets에 저장된 완전히 다른 계좌 정보를 바라본다. 설정에 <code>is_mock</code> 항목이 누락될 경우, 실전(False)이 아닌 모의투자(True)로 강제 지정되어 사고를 막는다.</li>
@@ -635,6 +645,7 @@ with tab5:
     <ul>
         <li><b>API Key 물리적 격리 (Zero Plaintext):</b> 증권사 <code>APP_KEY</code>, <code>APP_SECRET</code>, <code>CANO</code> 등의 민감한 정보는 절대 Google Sheets나 SQLite, 애플리케이션 로그에 평문으로 저장하지 않는다.</li>
         <li><b>강력한 해시 인증 (Bcrypt Authentication):</b> 시스템 로그인에 사용되는 기본 비밀번호 0000이나 URL 쿼리 파라미터 인증을 전면 폐기하고, Salt가 포함된 <b>Argon2id 또는 Bcrypt 해시 알고리즘</b>을 통해서만 검증을 수행한다. 관리자 비밀번호 해시값 역시 OS 환경변수(<code>ADMIN_PASSWORD_HASH</code>)에 보관된다.</li>
+        <li><b>[시스템 규칙] 패키지 의존성(Dependency) 엄격 관리:</b> 시스템에 새로운 외부 라이브러리(예: <code>PyYAML</code>, <code>bcrypt</code> 등)를 도입하여 코드를 업데이트할 경우, 클라우드 서버(Streamlit Cloud 등) 배포 시 <code>ModuleNotFoundError</code>로 인해 시스템이 즉각 다운되는 치명적 장애를 막기 위해, <b>반드시 <code>requirements.txt</code> 파일에 해당 패키지명을 명시적으로 추가하여 형상 관리를 동기화</b>해야 한다.</li>
     </ul>
 
     <hr>
