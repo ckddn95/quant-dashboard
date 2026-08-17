@@ -164,7 +164,6 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
     if not res_df.empty and 'AI 스코어' in res_df.columns: return res_df.sort_values('AI 스코어', ascending=False)
     return pd.DataFrame()
 
-# 🛑 [Step 3 패치] 외부 현금 입출금(external_cash_flows) 반영 및 고급 지표 산출 엔진
 def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_cash: float, start_date: datetime.date, end_date: datetime.date, cfg: StrategyConfig, is_weekly_scan: bool = False, external_cash_flows: dict = None):
     try:
         if target_stocks_df.empty: return {"status": "error", "msg": "분석 대상 종목이 없습니다."}
@@ -184,7 +183,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 dfs[tk] = df
                 all_dates.update(df.index)
         
-        if not dfs: return {"status": "error", "msg": "POINT_IN_TIME_DATA_UNAVAILABLE: 생존자 편향 등 데이터 조회 불가."}
+        if not dfs: return {"status": "error", "msg": "POINT_IN_TIME_DATA_UNAVAILABLE: 생존자 편향 데이터 조회 불가."}
         
         market_df = pd.DataFrame()
         if cfg.boost:
@@ -204,24 +203,20 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         closed_trades_log = []
         assumed_cost_pct = SIM_RULES['assumed_cost_pct_per_side']
         
-        # [Step 3] 고급 지표 추적 변수
         total_traded_value = 0.0
         total_cost_drag = 0.0
-        twr_index = 1.0 # Time-Weighted Return (시간가중수익률)
+        twr_index = 1.0 
         
         for i, current_date in enumerate(calendar):
             current_date_str = current_date.strftime('%Y-%m-%d')
             
-            # 🛑 1. 외부 입출금 처리 및 비례 매도 (Pro-rata Sell)
+            # 비례 매도 처리
             if current_date_str in external_cash_flows:
                 cash_flow = external_cash_flows[current_date_str]
                 cash += cash_flow
-                
-                # 출금으로 현금이 마이너스인 경우, 보유 주식을 비율대로 강제 매도
                 if cash < 0 and positions:
                     shortage = abs(cash)
                     total_stock_value = sum([pos['qty'] * (dfs[tk].loc[current_date, 'Open'] if current_date in dfs[tk].index else pos['buy_price']) for tk, pos in positions.items()])
-                    
                     if total_stock_value > 0:
                         sell_ratio = min(1.0, shortage / total_stock_value)
                         for tk, pos in list(positions.items()):
@@ -241,12 +236,11 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                                     "보유일수": f"{pos['days']}일", "진입단가": pos['buy_price'], "청산단가": sell_price, "수량": sell_qty,
                                     "손익금": profit_amt, "수익률": f"{profit_pct*100:+.2f}%", "사유": "현금 인출 (비례매도)"
                                 })
-                                
                                 cash += sell_price * sell_qty
                                 pos['qty'] -= sell_qty
                                 if pos['qty'] == 0: del positions[tk]
                     
-            # 2. 대기 주문(신규/매도) 처리
+            # 대기 주문 처리
             for order in pending_orders:
                 tk = order['ticker']
                 if tk not in dfs or current_date not in dfs[tk].index: continue 
@@ -290,7 +284,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             
             pending_orders, sell_signals = [], []
             
-            # 3. 장중 손절/트레일링 검사
+            # 장중 손절/트레일링 검사
             for tk, pos in list(positions.items()):
                 if current_date not in dfs[tk].index: continue
                 row = dfs[tk].loc[current_date]
@@ -320,7 +314,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             
             pending_orders.extend(sell_signals)
             
-            # 4. 일일 자산 평가 및 TWR 계산
+            # 일일 자산 평가 및 TWR 계산
             daily_eval = cash
             for tk, pos in positions.items():
                 try: daily_eval += pos['qty'] * dfs[tk]['Close'].loc[:current_date].dropna().iloc[-1]
@@ -331,14 +325,13 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             if len(nav_history) >= 2:
                 prev_nav = nav_history[-2]["NAV"]
                 if prev_nav > 0:
-                    # 입출금을 보정한 순수 일일 수익률 (Modified Dietz 근사)
                     daily_pure_ret = (daily_eval - external_cash_flows.get(current_date_str, 0)) / prev_nav
                     twr_index *= daily_pure_ret
                     daily_pnl_pct = daily_pure_ret - 1.0
                 else: daily_pnl_pct = 0.0
             else: daily_pnl_pct = 0.0
             
-            # 5. 스캔(매수 검토)
+            # 스캔(매수 검토)
             is_weekly_scan_day = False
             if is_weekly_scan:
                 current_iso_week = current_date.isocalendar()[1]
@@ -381,14 +374,26 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 "진입단가": pos['buy_price'], "청산단가": last_close, "수량": pos['qty'], "손익금": profit_amt, "수익률": f"{profit_pct*100:+.2f}%", "사유": "보유 중 (미청산 MTM)"
             })
 
-        if len(nav_history) < 2: return {"status": "error", "msg": "수익률 및 지표를 계산하기 위한 거래일 데이터가 부족합니다. (최소 2영업일 이상 필요)"}
+        if len(nav_history) < 2: return {"status": "error", "msg": "수익률을 계산하기 위한 데이터가 부족합니다."}
         
         nav_df = pd.DataFrame(nav_history)
         final_asset = nav_df['NAV'].iloc[-1]
         
-        # 고급 지표 연산
+        # 🛑 고급 리스크 지표 연산 적용
+        nav_df['Return'] = nav_df['NAV'].pct_change().fillna(0)
+        rf_daily = 0.03 / 252 # 무위험 수익률 연 3% 가정
+        
+        excess_returns = nav_df['Return'] - rf_daily
+        sharpe_ratio = (excess_returns.mean() / excess_returns.std() * np.sqrt(252)) if excess_returns.std() > 0 else 0.0
+        
+        downside_returns = excess_returns[excess_returns < 0]
+        downside_std = np.sqrt((downside_returns**2).mean()) if len(downside_returns) > 0 else 0.0
+        sortino_ratio = (excess_returns.mean() / downside_std * np.sqrt(252)) if downside_std > 0 else 0.0
+        
         cagr = (twr_index) ** (252 / len(nav_df)) - 1 if len(nav_df) > 0 else 0
         mdd = (nav_df['NAV'] / nav_df['NAV'].cummax() - 1).min()
+        calmar_ratio = (cagr / abs(mdd)) if mdd < 0 else 0.0
+        
         win_rate = (sum(1 for p in trade_log if p > 0) / len(trade_log) * 100) if trade_log else 0.0
         avg_nav = nav_df['NAV'].mean()
         turnover_rate = (total_traded_value / 2.0) / avg_nav if avg_nav > 0 else 0.0
@@ -403,7 +408,9 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 {"항목": "포트폴리오 회전율 (Turnover)", "값": f"{turnover_rate * 100:.1f} %"},
                 {"항목": "총 누수 비용 (Cost Drag)", "값": f"{total_cost_drag:,.0f} 원"},
                 {"항목": "승률 (Win Rate)", "값": f"{win_rate:.1f} % (총 {len(trade_log)}회)"},
-                {"항목": "데이터 처리 모드", "값": "DAILY_APPROX (생존자 편향 근사)"}
+                {"항목": "샤프 비율 (Sharpe Ratio)", "값": f"{sharpe_ratio:.2f}"},
+                {"항목": "소르티노 비율 (Sortino Ratio)", "값": f"{sortino_ratio:.2f}"},
+                {"항목": "칼마 비율 (Calmar Ratio)", "값": f"{calmar_ratio:.2f}"}
             ]
         }
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
