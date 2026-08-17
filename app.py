@@ -11,6 +11,7 @@ import broker.kis_client as kis
 import quant_engine as quant
 
 st.set_page_config(page_title="Core-Satellite Quant System", page_icon="🚀", layout="wide")
+# [Rule C] KST 타임존 강제
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 def check_password():
@@ -363,7 +364,6 @@ with tab3:
                 tk = r['티커']
                 side = "BUY" if "매수" in r['상태'] else "SELL"
                 now_str = datetime.datetime.now(KST).strftime('%Y%m%d_%H%M')
-                # DB의 정규화된 27개 필드를 채우는 OrderSpec 생성
                 spec = quant.OrderSpec(
                     correlation_id="", idempotency_key=f"UI_{tk}_{now_str}", broker="KIS", environment=ENV_STR, 
                     account_fingerprint=ACC_FP, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, 
@@ -563,9 +563,13 @@ with tab5:
         <li><b>손실 최소화 우선 (Capital Preservation):</b> 수익 창출보다 원금 보존을 최우선으로 하며, 시장 폭락 시 기계적인 장중 손절 및 트레일링 스탑을 통해 포트폴리오의 MDD(Maximum Drawdown)를 엄격히 통제한다.</li>
     </ul>
 
-    <h3>🧮 2. 전략별 매력도 계산 공식 (Strategy Scoring & Entry Logic)</h3>
+    <h3>🧮 2. 전략별 매력도 계산 공식 및 스캔 분리 (Strategy & Signal Regime)</h3>
     <ul>
-        <li><b>공통 조건:</b> KIS 또는 FDR 시세 기준, 가격 유효성 검증(NaN, Inf, 0원 차단), 거래 정지 종목 제외. <code>MA200</code> 장기 추세선 상회 종목만 필터링.</li>
+        <li><b>[시스템 규칙] 일봉 지표와 실시간 가격의 완전 분리:</b> 이동평균선(MA20, 60, 200) 등 지표 연산은 '미래 참조(Look-ahead)' 방지를 위해 무조건 <b>전일(T-1) 종가까지만 반영하여 픽스(Fix)</b>한다. 당일의 실시간 현재가(T)가 이 고정된 지표선을 돌파하는지만을 순수하게 검사한다.</li>
+        <li><b>[시스템 규칙] 2연속 1분봉 확인 룰 (Signal Regime):</b> 실전 봇(Worker)은 가짜 돌파(Fake Breakout)로 인한 잦은 휩소 매매를 막기 위해, 매수 및 정상 추세 매도 신호가 발생할 경우 <b>1분봉 종가 기준으로 2회 연속 조건 충족이 확인될 때만(Count: 2) 신호를 확정</b>하고 주문을 발송한다.</li>
+        <li><b>[시스템 규칙] 즉각 위험 청산 (Immediate Execution):</b> 장중 손절컷(SL)과 트레일링 스탑(TS)은 계좌 보호를 위해 2분 검증을 거치지 않고 타격 즉시(Instantaneous) 실시간으로 강제 청산 주문을 발송한다.</li>
+        <li><b>[시스템 규칙] UI 스캐너 예비 타점 명시:</b> 사용자가 화면에서 클릭하는 '실시간 AI 타점 스캐너'는 2분을 기다릴 수 없는 UI 특성상 버튼을 누른 그 순간(Instant)의 1차 조건 충족 여부만을 보여준다. 따라서 스캐너의 결과는 확정이 아닌 <b>'예비 신호'</b>로 간주됨을 명시한다.</li>
+        <li><b>[시스템 규칙] 재진입 쿨다운 (Signal Rearm):</b> 어떠한 이유로든 매도가 발생한 종목은, 기존 매수 조건이 한 번 이탈(False)되었다가 다시 충족되어야만 재진입(Rearm)을 허용하여 무한 물타기를 구조적으로 차단한다.</li>
         <li><b>Core (대형주):</b> KOSPI 시가총액 상위 200개 종목 대상. <code>MA60</code> 상승 추세 유지 시, <code>MA20</code>과 <code>MA60</code> 간의 이격도(골든크로스 버퍼 적용)를 기반으로 진입점 산출. <br>
         <i>매력도 점수(Score) = 85.0 + max(0, 이격도 * 100) (최대 99점)</i></li>
         <li><b>Satellite (중소형주):</b> KOSDAQ 시가총액 상위 150개 종목 대상. <code>MA20</code> 기준 -5% ~ +3% 사이의 눌림목 발생 시 진입점 산출. <br>
@@ -625,9 +629,9 @@ with tab5:
 
     <h3>🗄️ 8. 데이터베이스 및 계좌 격리 (Database & Integrity)</h3>
     <ul>
-        <li><b>[시스템 규칙] 무손실 DB 마이그레이션:</b> DB 스키마(v4 등) 업데이트 시, 기존 데이터를 임시 테이블에 백업 후 <code>INSERT INTO SELECT</code> 방식으로 원자적 마이그레이션하여 과거 원장(Ledger)을 영구 보존한다.</li>
+        <li><b>[시스템 규칙] 무손실 DB 마이그레이션:</b> DB 스키마(v4, v5 등) 업데이트 시, 기존 데이터를 임시 테이블에 백업 후 <code>INSERT INTO SELECT</code> 방식으로 원자적 마이그레이션하여 과거 원장(Ledger)을 영구 보존한다.</li>
         <li><b>[시스템 규칙] 계좌번호(CANO) 평문 저장 금지:</b> 사용자 자산 보호를 위해 DB(SQLite)의 <code>account_id</code> 컬럼에는 평문 계좌번호 대신 SHA-256 단방향 해시로 생성된 <b>계좌 핑거프린트(Fingerprint)</b>만을 기록한다. 평문 정보는 메모리(secrets.toml) 상에서만 제한적으로 활용된다.</li>
-        <li><b>[시스템 규칙] OrderSpec 메타데이터 확장 정규화:</b> 주문 의도(Order Intent) 테이블은 추적성(Audit) 확보를 위해 <code>quote_id</code>, <code>intent_ttl</code>, <code>cost_model_version</code> 등 27개의 상세 필드로 정규화되어 무손실 마이그레이션(v4)을 거친다.</li>
+        <li><b>[시스템 규칙] OrderSpec 메타데이터 확장 정규화:</b> 주문 의도(Order Intent) 테이블은 추적성(Audit) 확보를 위해 <code>quote_id</code>, <code>intent_ttl</code>, <code>cost_model_version</code> 등 27개의 상세 필드로 정규화되어 무손실 마이그레이션을 거친다.</li>
         <li><b>[시스템 규칙] 전역/개별 계좌 매매 중지 분리:</b> 매매 통제 시스템은 전체 계좌를 일시에 정지시키는 마스터 킬 스위치(Master Kill Switch)와, 특정 전략(Core/Satellite) 계좌만을 제어하는 개별 토글로 2원화되어 상호 간섭 없이 독립 작동한다.</li>
         <li><b>[시스템 규칙] 수동 보유와 자동매매(Managed) 분리:</b> KIS 서버의 전체 잔고를 무조건 자동매매 포지션으로 덮어쓰지 않으며, 봇 스스로 체결한(Fill Delta) 수량만을 <code>managed_qty</code>로 누적하여 장기 투자 수동 보유분의 무단 청산을 방지한다.</li>
         <li><b>[시스템 규칙] 음수 체결 롤백 금지 및 감사 보존:</b> 브로커와의 체결 수량 불일치로 인해 로컬 포지션이 음수(< 0)가 되더라도 강제로 트랜잭션을 롤백(Rollback)하여 주문 내역을 은폐하지 않는다. 포지션을 그대로 커밋하되 주문 상태를 <code>RECONCILIATION_REQUIRED</code>로 확정하여 시스템이 이상 상태를 명확히 인지하고 감사를 수행하도록 강제한다.</li>
