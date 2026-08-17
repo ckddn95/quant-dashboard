@@ -28,8 +28,12 @@ def check_password():
         st.stop()
 
     st.markdown("### 🔒 관리자 인증")
-    pwd_input = st.text_input("비밀번호를 입력하세요", type="password")
-    if st.button("로그인"):
+    # 🛑 [UX 패치] st.form 구조를 도입하여 '엔터(Enter) 키' 로그인 지원
+    with st.form("login_form"):
+        pwd_input = st.text_input("비밀번호를 입력하세요", type="password")
+        submitted = st.form_submit_button("로그인")
+        
+    if submitted:
         try:
             if bcrypt.checkpw(pwd_input.encode('utf-8'), hashed_pw_env.encode('utf-8')):
                 st.session_state["password_correct"] = True
@@ -484,7 +488,6 @@ with tab4:
     with t2_c2: end_d2 = st.date_input("종료일", t2_end_default, key="t2_end")
     with t2_c3:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        # 🛑 [패치] 주간 스캔 버튼 라벨을 일간 스캔으로 변경
         run_t2 = st.button("테스트 2 실행 (일간 스캔)", type="primary", use_container_width=True)
         
     if run_t2:
@@ -492,7 +495,6 @@ with tab4:
             st.error("관심종목 리스트에 종목이 없습니다. 탭 1에서 관심종목을 추가해주세요.")
         else:
             with st.spinner("일간 유니버스 갱신 및 AI 가상운용 시뮬레이션 구동 중..."):
-                # 🛑 [패치] is_weekly_scan을 False로 변경
                 res2 = quant.run_quant_simulation(stocks_df, active_strat, real_invested_principal, start_d2, end_d2, current_config, is_weekly_scan=False)
                 if res2.get('status') == 'success':
                     st.success("테스트 2 시뮬레이션 완료!")
@@ -647,6 +649,7 @@ with tab5:
     <ul>
         <li><b>API Key 물리적 격리 (Zero Plaintext):</b> 증권사 <code>APP_KEY</code>, <code>APP_SECRET</code>, <code>CANO</code> 등의 민감한 정보는 절대 Google Sheets나 SQLite, 애플리케이션 로그에 평문으로 저장하지 않는다.</li>
         <li><b>강력한 해시 인증 (Bcrypt Authentication):</b> 시스템 로그인에 사용되는 기본 비밀번호 0000이나 URL 쿼리 파라미터 인증을 전면 폐기하고, Salt가 포함된 <b>Argon2id 또는 Bcrypt 해시 알고리즘</b>을 통해서만 검증을 수행한다. 관리자 비밀번호 해시값 역시 OS 환경변수(<code>ADMIN_PASSWORD_HASH</code>)에 보관된다.</li>
+        <li><b>[시스템 규칙] 세션 만료 및 폼 기반 로그인 (Session Volatility):</b> 사용자의 편의를 위해 로그인 시 '엔터(Enter)' 키 입력을 지원하는 폼(Form) 구조를 사용한다. 단, 새로고침(F5) 시에는 브라우저 세션이 초기화되어 로그아웃 처리되는 것을 '의도된 기본 보안 정책(Secure by default)'으로 채택하여, 금융 데이터가 타인에게 노출되는 것을 방지한다.</li>
         <li><b>[시스템 규칙] 패키지 의존성(Dependency) 엄격 관리:</b> 시스템에 새로운 외부 라이브러리(예: <code>PyYAML</code>, <code>bcrypt</code> 등)를 도입하여 코드를 업데이트할 경우, 클라우드 서버(Streamlit Cloud 등) 배포 시 <code>ModuleNotFoundError</code>로 인해 시스템이 즉각 다운되는 치명적 장애를 막기 위해, <b>반드시 <code>requirements.txt</code> 파일에 해당 패키지명을 명시적으로 추가하여 형상 관리를 동기화</b>해야 한다.</li>
     </ul>
 
