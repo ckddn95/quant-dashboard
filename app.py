@@ -477,21 +477,23 @@ with tab4:
         st.info(f"💡 포트폴리오 개설일({creation_date})이 1년 미만이므로, 과거 1년 전체가 아닌 '개설일부터 오늘까지'의 성과를 1:1로 비교합니다.")
     else:
         t2_start_default = one_year_ago
-        st.info("💡 최근 1년 동안 동일한 시작금액(현금)으로 매주 금요일마다 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
+        st.info("💡 매일(Daily) 종가 기준으로 관심종목을 다시 스캔하여 운용했을 때의 성과와, 현재 사용자의 실제 계좌 성과를 나란히 비교합니다.")
     
     t2_c1, t2_c2, t2_c3 = st.columns([3, 3, 4])
     with t2_c1: start_d2 = st.date_input("시작일", t2_start_default, key="t2_start")
     with t2_c2: end_d2 = st.date_input("종료일", t2_end_default, key="t2_end")
     with t2_c3:
         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        run_t2 = st.button("테스트 2 실행 (주간 스캔)", type="primary", use_container_width=True)
+        # 🛑 [패치] 주간 스캔 버튼 라벨을 일간 스캔으로 변경
+        run_t2 = st.button("테스트 2 실행 (일간 스캔)", type="primary", use_container_width=True)
         
     if run_t2:
         if stocks_df.empty:
             st.error("관심종목 리스트에 종목이 없습니다. 탭 1에서 관심종목을 추가해주세요.")
         else:
-            with st.spinner("주간 유니버스 갱신 및 AI 가상운용 시뮬레이션 구동 중..."):
-                res2 = quant.run_quant_simulation(stocks_df, active_strat, real_invested_principal, start_d2, end_d2, current_config, is_weekly_scan=True)
+            with st.spinner("일간 유니버스 갱신 및 AI 가상운용 시뮬레이션 구동 중..."):
+                # 🛑 [패치] is_weekly_scan을 False로 변경
+                res2 = quant.run_quant_simulation(stocks_df, active_strat, real_invested_principal, start_d2, end_d2, current_config, is_weekly_scan=False)
                 if res2.get('status') == 'success':
                     st.success("테스트 2 시뮬레이션 완료!")
                     st.markdown("### 🏆 성과 비교: AI 가상운용 vs 실제 계좌 (현재)")
@@ -522,7 +524,7 @@ with tab4:
     st.markdown("---")
 
     st.subheader("🎯 테스트 3. 과거연도 자동매매 재현 시뮬레이션")
-    st.info("선택한 특정 연도의 전체 기간 동안 AI가 주간 단위로 운용했을 때의 결과입니다.")
+    st.info("선택한 특정 연도의 전체 기간 동안 AI가 매일(Daily) 단위로 운용했을 때의 결과입니다.")
     t3_c1, t3_c2 = st.columns([3, 7])
     with t3_c1: test_year = st.selectbox("검증 연도 선택", [2022, 2023, 2024, 2025, 2026], index=4)
     with t3_c2:
@@ -604,7 +606,7 @@ with tab5:
         <li><b>[시스템 규칙] 회계 이중 출금 방어 (No Double-Spend):</b> 매수 시그널 당일(T일)에는 가상 현금(available_cash)만을 차감하여 한도를 체크하고, 실제 계좌 잔고(cash)는 반드시 체결 당일(T+1일)에 단 한 번만 차감되도록 회계 무결성을 유지한다.</li>
         <li><b>[시스템 규칙] 비용 가정 (Cost Assumption):</b> 실제 KIS 브로커 체결 데이터가 없는 시뮬레이션 단계에서는, 매수와 매도 각각 수수료/세금/시장충격을 모두 포함하여 보수적인 <b>All-in 0.25% (왕복 0.50%)</b>의 비용률을 강제 적용한다.</li>
         <li><b>[시스템 규칙] 장중 보수적 손절/익절 (Adverse-first):</b> 과거 일봉 데이터만으로 장중 High/Low 순서를 알 수 없는 경우, 가장 불리한 방향인 <b>손절컷(SL)을 우선 타격</b>한 것으로 가정하여 생존 편향을 억제한다.</li>
-        <li><b>[시스템 규칙] 주간 스캔 (Weekly Scan):</b> 연산량 절감 및 현실적 매매 빈도 조절을 위해, 테스트 2와 3의 신규 진입 종목 스캔은 매주 마지막 거래일(금요일) 종가 기준으로 주 1회만 실시하되, 기존 보유 종목에 대한 위험 감시(SL/TS)는 매일 수행한다. 공휴일이 겹친 주간에는 달력 로직 기반으로 '그 주의 마지막 유효 거래일'을 능동적으로 추적하여 스캔을 수행한다.</li>
+        <li><b>[시스템 규칙] 일간 스캔 (Daily Scan) 전면 적용:</b> 짧은 운용 기간(예: 며칠~수 주)을 검증할 때 발생하는 '데이터 부족 및 체결 기회 박탈' 문제를 해결하기 위해, 모든 시뮬레이션(테스트 1, 2, 3)의 신규 진입 종목 스캔 주기를 기존 주 1회에서 <b>매일(Daily) 종가 기준</b>으로 전면 개편하였다. 이를 통해 단기 운용 계좌에서도 AI가 매일의 시장 변화에 즉각 대응하며 정밀한 1:1 성과 비교가 가능하도록 시스템 헌장을 수정한다.</li>
         <li><b>[시스템 규칙] 상세 거래 장부(Ledger) 보존 및 공개:</b> 시뮬레이션의 신뢰성 및 투명성 확보를 위해, 퀀트 엔진은 매수/매도 시그널에 따른 모든 개별 종목의 체결일, 단가, 수량, 실현손익, 매매 사유(손절컷, 익절, 추세이탈 등)를 상세 회계 장부(Trade Logs)로 기록하며, 이를 UI 화면에서 엑셀 표와 같은 형태로 100% 공개해야 한다.</li>
     </ul>
 
