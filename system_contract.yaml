@@ -1,6 +1,7 @@
 whitepaper_version: "1.1.0"
 contract_version: "1.1.0"
-database_schema_version: "v3"
+# 🛑 DB 스키마 v4로 상향 (계좌 격리 및 OrderSpec 정규화)
+database_schema_version: "v4"
 cost_model_version: "1.0.0"
 
 strategy:
