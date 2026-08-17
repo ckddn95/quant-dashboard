@@ -42,7 +42,6 @@ class RiskContext:
     account_id: str; env: str; usable_cash: float; locked_buy_cash: float; managed_sell_qty: int
     current_exposure: float; max_exposure: float; daily_pnl_pct: float; is_kill_switch_on: bool; is_auto_trade_on: bool
 
-# 🛑 [패치] DB 정규화를 위한 OrderSpec 필드 전면 확장 (27개)
 @dataclass(frozen=True)
 class OrderSpec:
     correlation_id: str; idempotency_key: str; broker: str; environment: str
@@ -86,6 +85,7 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
         if dev > 0.03: return False, "Price Deviation > 3%"
     return True, "PASS"
 
+# 🛑 [Step 2 패치] 일봉(T-1) 지표와 실시간 가격(T)의 명확한 분리 연산
 def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: float, ma60: float, ma200: float, m60_up: bool) -> tuple[bool, float, str]:
     pass_ma200 = (close_p >= ma200) if cfg.ma200 else True
     if strat == Strategy.CORE:
@@ -100,28 +100,36 @@ def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: 
 def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float) -> tuple[bool, float, str]:
     sl_target = buy_p * (1.0 + cfg.sl)
     ts_target = max(highest_p, high_p) * (1.0 + cfg.ts_drp)
+    
+    # 🛑 [Step 2 패치] 장중 실시간 손절/트레일링은 즉각(Immediate) 판정
     hit_sl = low_p <= sl_target
     hit_ts = (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (low_p <= ts_target)
-    
     if hit_sl and hit_ts: return True, min(open_p, sl_target), "🔴 장중 손절컷"
     elif hit_sl: return True, min(open_p, sl_target), "🔴 장중 손절컷"
     elif hit_ts: return True, min(open_p, ts_target), "🔵 트레일링 익절"
     
+    # 🛑 [Step 2 패치] 추세 이탈(정상매도)은 연속성 확인 대상이므로 분리 처리
     if days_held >= cfg.min_h:
-        if strat == Strategy.CORE and close_p < ma60 * (1.0 - cfg.buf/2.0): return True, close_p, "🔴 종가 추세이탈"
-        elif strat == Strategy.SATELLITE and close_p < ma20 * (1.0 - cfg.buf/2.0): return True, close_p, "🔴 종가 추세이탈"
+        if strat == Strategy.CORE and close_p < ma60 * (1.0 - cfg.buf/2.0): return True, close_p, "🔴 추세이탈 (검증필요)"
+        elif strat == Strategy.SATELLITE and close_p < ma20 * (1.0 - cfg.buf/2.0): return True, close_p, "🔴 추세이탈 (검증필요)"
     return False, 0.0, ""
 
+# 🛑 [Step 2 패치] UI 스캐너 전용 (Instantaneous Signal - 즉각 표시용)
 _fdr_cache = {}
-
 def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy_price: float=0, highest_price: float=0, c_price: float=0, high_p: float=0, low_p: float=0, is_halted: bool=False, days_held: int=0):
     try:
+        # 무조건 어제(T-1)까지의 데이터만 로드하여 콘크리트 지표 생성
         start_d = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
-        cache_key = f"{ticker}_{start_d}"
+        end_d = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        cache_key = f"{ticker}_{end_d}"
+        
         if cache_key in _fdr_cache: df = _fdr_cache[cache_key]
-        else: df = fdr.DataReader(str(ticker).zfill(6), start=start_d); _fdr_cache[cache_key] = df
+        else: 
+            df = fdr.DataReader(str(ticker).zfill(6), start=start_d, end=end_d)
+            _fdr_cache[cache_key] = df
             
-        if df.empty: return c_price, "분석 불가", 0.0, "과거 데이터 없음"
+        if df.empty: return c_price, "분석 불가", 0.0, "전일(T-1) 데이터 없음"
+        
         fdr_close, fdr_high, fdr_low = float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
         ma20, ma60, ma200 = df['Close'].rolling(20).mean().iloc[-1], df['Close'].rolling(60).mean().iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
         m60_up = True if len(df) < 60 else (ma60 > df['Close'].rolling(60).mean().iloc[-11])
@@ -136,10 +144,10 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
             
         if buy_price > 0:
             is_sell, _, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60)
-            if is_sell: return snap.current_price, s_reason, 999.0, s_reason
+            if is_sell: return snap.current_price, s_reason.replace(" (검증필요)", " (예비)"), 999.0, s_reason
             
         is_buy, score, b_reason = calc_buy_signal(strat, cfg, snap.current_price, ma20, ma60, ma200, m60_up)
-        if is_buy: return snap.current_price, "🟢 매수 시그널 발생", score, b_reason
+        if is_buy: return snap.current_price, "🟢 매수 시그널 발생 (예비)", score, b_reason
         return snap.current_price, "🟡 모니터링 유지", 50.0, b_reason
     except Exception as e: return c_price, "에러", 0.0, str(e)
 
@@ -160,5 +168,5 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
     if not res_df.empty and 'AI 스코어' in res_df.columns: return res_df.sort_values('AI 스코어', ascending=False)
     return pd.DataFrame()
 
-# (run_quant_simulation 등은 기존과 동일)
-# ... (생략 방지를 위해 아래에 이어 붙이셔도 무방하나 길이상 UI 엔진은 기존과 동일합니다)
+# (이하 run_quant_simulation 등은 기존과 동일하므로 생략 없이 사용)
+# ... (답변 길이 한계로 시뮬레이션 본문은 직전 100% 동일 본문 사용)
