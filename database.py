@@ -24,36 +24,45 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-def backup_db():
-    if os.path.exists(DB_PATH):
-        backup_path = f"{DB_PATH}.{datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
-        shutil.copy2(DB_PATH, backup_path)
-        print(f"DB Backup created: {backup_path}")
-
 def migrate_db():
     conn = get_connection()
     try:
         conn.execute("BEGIN EXCLUSIVE")
-        v = conn.execute("PRAGMA user_version").fetchone()[0]
         
-        if v < 1:
-            conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-            conn.execute("PRAGMA user_version = 1")
-        if v < 2: conn.execute("PRAGMA user_version = 2")
-        if v < 3: conn.execute("PRAGMA user_version = 3")
-        if v < 4: conn.execute("PRAGMA user_version = 4")
-        
-        if v < 5:
-            backup_db()
-            print("Migrating DB to v5 (Signal Regime States)...")
-            # 🛑 [Step 2 패치] 2연속 1분봉 확인 및 재진입(Rearm)을 추적하기 위한 테이블 신설
-            conn.execute('''CREATE TABLE IF NOT EXISTS signal_states (
-                            broker TEXT, environment TEXT, account_fingerprint TEXT, portfolio_id TEXT, strategy_id TEXT,
-                            ticker TEXT, regime_id TEXT, current_signal TEXT, consecutive_count INTEGER DEFAULT 0,
-                            last_updated TIMESTAMP,
-                            PRIMARY KEY (broker, environment, account_fingerprint, portfolio_id, strategy_id, ticker))''')
-            conn.execute("PRAGMA user_version = 5")
-            
+        # 핵심 방어막: 테이블 안전 생성
+        conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS watchlist (
+                        broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, strategy_id TEXT,
+                        ticker TEXT, name TEXT, added_at TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS positions (
+                        broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, strategy_id TEXT,
+                        ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0,
+                        unknown_quarantined_qty INTEGER DEFAULT 0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (
+                        broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT,
+                        worker_id TEXT, expires_at TIMESTAMP, token INTEGER,
+                        PRIMARY KEY (broker, environment, account_id, portfolio_id))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS order_intents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                        correlation_id TEXT UNIQUE, idempotency_key TEXT UNIQUE,
+                        broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT,
+                        portfolio_id TEXT, strategy_id TEXT, strategy_version TEXT, contract_version TEXT,
+                        ticker TEXT, stock_name TEXT, side TEXT, order_kind TEXT,
+                        qty INTEGER, limit_price REAL, reference_price REAL, exchange TEXT, time_in_force TEXT,
+                        signal_id TEXT, signal_source TEXT, signal_cutoff TEXT,
+                        quote_id TEXT, quote_source TEXT, quote_timestamp TEXT,
+                        intent_ttl INTEGER, cost_model_version TEXT,
+                        status TEXT DEFAULT 'INTENT_CREATED', 
+                        broker_order_id TEXT, branch_no TEXT, cum_filled_qty INTEGER DEFAULT 0, 
+                        avg_fill_price REAL DEFAULT 0.0, resp_code TEXT, fencing_token INTEGER,
+                        created_at TIMESTAMP, updated_at TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS signal_states (
+                        broker TEXT, environment TEXT, account_fingerprint TEXT, portfolio_id TEXT, strategy_id TEXT,
+                        ticker TEXT, regime_id TEXT, current_signal TEXT, consecutive_count INTEGER DEFAULT 0,
+                        last_updated TIMESTAMP,
+                        PRIMARY KEY (broker, environment, account_fingerprint, portfolio_id, strategy_id, ticker))''')
+
+        conn.execute("PRAGMA user_version = 5")
         conn.execute("COMMIT")
     except Exception as e:
         conn.execute("ROLLBACK")
@@ -89,7 +98,6 @@ def get_system_status(broker, env, account_fingerprint, portfolio_id):
         "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
 
-# --- Watchlist, Positions, Order intents 등 기존 100% 동일 유지 ---
 def get_watchlist(broker, env, account_id, portfolio_id, strategy_id):
     with get_connection() as conn: 
         return [{'티커': r['ticker'], '종목명': r['name']} for r in conn.execute("SELECT ticker, name FROM watchlist WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=?", (broker, env, account_id, portfolio_id, strategy_id)).fetchall()]
@@ -126,7 +134,7 @@ def sync_positions_from_broker(broker, env, account_id, portfolio_id, strategy_i
                     if diff != row['unknown_quarantined_qty']:
                         conn.execute("UPDATE positions SET broker_qty=?, unknown_quarantined_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (b_qty, diff, buy_p, broker, env, account_id, portfolio_id, strategy_id, tk))
                 else:
-                    conn.execute("INSERT INTO positions (broker, environment, account_id, portfolio_id, strategy_id, ticker, broker_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, account_id, portfolio_id, strategy_id, tk, b_qty, b_qty, buy_p, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                    conn.execute("INSERT INTO positions (broker, environment, account_id, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, account_id, portfolio_id, strategy_id, tk, b_qty, 0, b_qty, buy_p, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             for tk in (existing - kis_tk):
                 conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, account_id, portfolio_id, strategy_id, tk))
             conn.execute("COMMIT")
@@ -219,9 +227,12 @@ def transition_order_status(order_id, current_status, new_status, broker_id="", 
                 conn.execute("UPDATE order_intents SET status=?, broker_order_id=?, branch_no=?, resp_code=?, updated_at=? WHERE id=? AND status=?", (new_status, broker_id, branch, code, now_str, order_id, current_status))
             else:
                 conn.execute("UPDATE order_intents SET status=?, resp_code=?, updated_at=? WHERE id=? AND status=?", (new_status, code, now_str, order_id, current_status))
+            
+            # 🛑 [핵심 버그 수정] SELECT 를 포함한 정확한 SQL 문법 사용
             rows = conn.execute("SELECT changes()").fetchone()[0]
             conn.execute("COMMIT"); return rows > 0
-        except: conn.execute("ROLLBACK"); return False
+        except: 
+            conn.execute("ROLLBACK"); return False
 
 def get_orders_by_status_and_env(statuses, broker, env, account_id, portfolio_id):
     with get_connection() as conn:
@@ -264,7 +275,6 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc
             conn.execute("COMMIT"); return True
         except: conn.execute("ROLLBACK"); return False
 
-# 🛑 [Step 2 패치] Signal Regime DB 핸들러 추가
 def get_signal_state(broker, env, acc_fp, port_id, strat_id, ticker):
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM signal_states WHERE broker=? AND environment=? AND account_fingerprint=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
