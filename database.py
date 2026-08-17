@@ -130,8 +130,6 @@ def sync_positions_from_broker(broker, env, account_id, portfolio_id, strategy_i
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            
-            # 🛑 [패치] 기존에 들고 있던 종목 중, KIS에서 사라진(매도된) 종목을 찾아서 DB에서도 삭제
             existing_rows = conn.execute("SELECT ticker FROM positions WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=?", (broker, env, account_id, portfolio_id, strategy_id)).fetchall()
             existing_tickers = set([r['ticker'] for r in existing_rows])
             kis_tickers = set([s['ticker'] for s in kis_stocks])
@@ -155,7 +153,6 @@ def sync_positions_from_broker(broker, env, account_id, portfolio_id, strategy_i
                     conn.execute("INSERT INTO positions (broker, environment, account_id, portfolio_id, strategy_id, ticker, broker_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
                                  (broker, env, account_id, portfolio_id, strategy_id, tk, b_qty, b_qty, buy_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             
-            # 매도되어 잔고가 0이 된 종목 삭제
             sold_tickers = existing_tickers - kis_tickers
             for tk in sold_tickers:
                 conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, account_id, portfolio_id, strategy_id, tk))
@@ -175,6 +172,24 @@ def get_locked_cash_and_qty(broker, env, account_id, portfolio_id, ticker=None):
             r2 = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as locked_qty FROM order_intents WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND ticker=? AND side='SELL' AND status IN {open_states}", (broker, env, account_id, portfolio_id, ticker)).fetchone()
             locked_sell_qty = int(r2['locked_qty']) if r2['locked_qty'] else 0
         return locked_cash, locked_sell_qty
+
+# 🛑 [프롬프트 핵심 버그 픽스] 포트폴리오 실제 개설일 자동 추적 함수 신설
+def get_portfolio_creation_date(broker, env, account_id, portfolio_id):
+    with get_connection() as conn:
+        try:
+            row1 = conn.execute("SELECT MIN(created_at) as first_date FROM order_intents WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=?", (broker, env, account_id, portfolio_id)).fetchone()
+            d1 = row1['first_date'] if row1 and row1['first_date'] else None
+            
+            row2 = conn.execute("SELECT MIN(added_at) as first_date FROM watchlist WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=?", (broker, env, account_id, portfolio_id)).fetchone()
+            d2 = row2['first_date'] if row2 and row2['first_date'] else None
+            
+            dates = [d for d in [d1, d2] if d]
+            if dates:
+                earliest = min(dates)
+                return datetime.strptime(earliest, '%Y-%m-%d %H:%M:%S').date()
+        except Exception as e:
+            print("Creation Date Check Error:", e)
+    return None
 
 def acquire_worker_lease(broker, env, account_id, portfolio_id, worker_id, ttl=30):
     with get_connection() as conn:
