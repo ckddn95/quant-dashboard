@@ -10,3 +10,4 @@ gspread
 google-auth
 requests
 bcrypt
+PyYAML
