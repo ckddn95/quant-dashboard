@@ -2,25 +2,43 @@ import requests
 import json
 from typing import Tuple, Dict, List
 
+# 🛑 [패치] 보이지 않는 유니코드 특수 공백문자(Zero-width space 등)를 완벽히 소각하는 헬퍼 함수
+def _get_clean_domain(is_mock: bool) -> str:
+    raw_domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
+    # ASCII 영역 외의 보이지 않는 특수문자를 날려버리고 앞뒤 공백을 완벽히 제거합니다.
+    return raw_domain.encode('ascii', 'ignore').decode('ascii').strip()
+
 def get_kis_access_token(app_key: str, app_secret: str, is_mock: bool = True) -> Tuple[str, str]:
     if not app_key or not app_secret:
         return "", "Missing Keys"
-    domain = "[https://openapivts.koreainvestment.com:29443](https://openapivts.koreainvestment.com:29443)" if is_mock else "[https://openapi.koreainvestment.com:9443](https://openapi.koreainvestment.com:9443)"
-    url = f"{domain}/oauth2/tokenP"
+    domain = _get_clean_domain(is_mock)
+    url = f"{domain}/oauth2/tokenP".strip()
+    
     try:
-        res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps({"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}), timeout=10)
+        res = requests.post(
+            url, 
+            headers={"content-type": "application/json"}, 
+            data=json.dumps({"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}), 
+            timeout=10
+        )
         if res.status_code == 200:
             return res.json().get("access_token", ""), "OK"
-        return "", f"Auth Failed: {res.text}"
+        return "", f"Auth Failed (HTTP {res.status_code}): {res.text}"
     except Exception as e:
         return "", str(e)
 
 def fetch_kis_current_price_ext(app_key, app_secret, ticker, token, is_mock=True) -> Tuple[float, float, float, bool, str]:
     if not token:
         return 0.0, 0.0, 0.0, False, "No Token"
-    domain = "[https://openapivts.koreainvestment.com:29443](https://openapivts.koreainvestment.com:29443)" if is_mock else "[https://openapi.koreainvestment.com:9443](https://openapi.koreainvestment.com:9443)"
-    url = f"{domain}/uapi/domestic-stock/v1/quotations/inquire-price"
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST01010100"}
+    domain = _get_clean_domain(is_mock)
+    url = f"{domain}/uapi/domestic-stock/v1/quotations/inquire-price".strip()
+    headers = {
+        "content-type": "application/json; charset=utf-8", 
+        "authorization": f"Bearer {token}", 
+        "appkey": app_key, 
+        "appsecret": app_secret, 
+        "tr_id": "FHKST01010100"
+    }
     try:
         res = requests.get(url, headers=headers, params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).zfill(6)}, timeout=5)
         if res.status_code == 200 and res.json().get('rt_cd') == '0':
@@ -33,10 +51,22 @@ def fetch_kis_current_price_ext(app_key, app_secret, ticker, token, is_mock=True
 def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True) -> Tuple[List, List, str]:
     if not token:
         return [], [], "No Token"
-    domain = "[https://openapivts.koreainvestment.com:29443](https://openapivts.koreainvestment.com:29443)" if is_mock else "[https://openapi.koreainvestment.com:9443](https://openapi.koreainvestment.com:9443)"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-balance"
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "VTTC8434R" if is_mock else "TTTC8434R", "custtype": "P"}
-    params = {"CANO": str(cano)[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).zfill(2), "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
+    domain = _get_clean_domain(is_mock)
+    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-balance".strip()
+    headers = {
+        "content-type": "application/json; charset=utf-8", 
+        "authorization": f"Bearer {token}", 
+        "appkey": app_key, 
+        "appsecret": app_secret, 
+        "tr_id": "VTTC8434R" if is_mock else "TTTC8434R", 
+        "custtype": "P"
+    }
+    params = {
+        "CANO": str(cano)[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).zfill(2), 
+        "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01", 
+        "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01", 
+        "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+    }
     
     stocks = []
     summary = []
@@ -64,9 +94,16 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
 def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True) -> float:
     if not token:
         return 0.0
-    domain = "[https://openapivts.koreainvestment.com:29443](https://openapivts.koreainvestment.com:29443)" if is_mock else "[https://openapi.koreainvestment.com:9443](https://openapi.koreainvestment.com:9443)"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "VTTC8908R" if is_mock else "TTTC8908R", "custtype": "P"}
+    domain = _get_clean_domain(is_mock)
+    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-psbl-order".strip()
+    headers = {
+        "content-type": "application/json; charset=utf-8", 
+        "authorization": f"Bearer {token}", 
+        "appkey": app_key, 
+        "appsecret": app_secret, 
+        "tr_id": "VTTC8908R" if is_mock else "TTTC8908R", 
+        "custtype": "P"
+    }
     params = {"CANO": str(cano)[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).zfill(2), "PDNO": "005930", "ORD_UNPR": "0", "ORD_DVSN": "01", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"}
     try:
         res = requests.get(url, headers=headers, params=params, timeout=5)
@@ -77,10 +114,17 @@ def fetch_kis_orderable_cash(app_key, app_secret, cano, acnt_prdt_cd, token, is_
     return 0.0
 
 def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is_buy, qty, price=0, is_mock=True) -> Tuple[str, str, str, str, str]:
-    domain = "[https://openapivts.koreainvestment.com:29443](https://openapivts.koreainvestment.com:29443)" if is_mock else "[https://openapi.koreainvestment.com:9443](https://openapi.koreainvestment.com:9443)"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash"
+    domain = _get_clean_domain(is_mock)
+    url = f"{domain}/uapi/domestic-stock/v1/trading/order-cash".strip()
     tr_id = ("VTTC0802U" if is_buy else "VTTC0801U") if is_mock else ("TTTC0802U" if is_buy else "TTTC0801U")
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
+    headers = {
+        "content-type": "application/json; charset=utf-8", 
+        "authorization": f"Bearer {token}", 
+        "appkey": app_key, 
+        "appsecret": app_secret, 
+        "tr_id": tr_id, 
+        "custtype": "P"
+    }
     
     ord_dvsn = "01" if price == 0 else "00"
     unpr = "0" if price == 0 else str(int(price))
@@ -98,9 +142,16 @@ def execute_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, ticker, is
         return "UNKNOWN", str(e), "", "", ""
 
 def cancel_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, odno, branch, is_mock=True) -> Tuple[str, str]:
-    domain = "[https://openapivts.koreainvestment.com:29443](https://openapivts.koreainvestment.com:29443)" if is_mock else "[https://openapi.koreainvestment.com:9443](https://openapi.koreainvestment.com:9443)"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/order-rvsecncl"
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "VTTC0803U" if is_mock else "TTTC0803U", "custtype": "P"}
+    domain = _get_clean_domain(is_mock)
+    url = f"{domain}/uapi/domestic-stock/v1/trading/order-rvsecncl".strip()
+    headers = {
+        "content-type": "application/json; charset=utf-8", 
+        "authorization": f"Bearer {token}", 
+        "appkey": app_key, 
+        "appsecret": app_secret, 
+        "tr_id": "VTTC0803U" if is_mock else "TTTC0803U", 
+        "custtype": "P"
+    }
     body = {"CANO": str(cano)[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).zfill(2), "KRX_FWDG_ORD_ORGNO": str(branch), "ORGN_ODNO": str(odno), "ORD_DVSN": "01", "RVSE_CNCL_DVSN": "02", "ORD_QTY": "0", "ORD_UNPR": "0"}
     try:
         res = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
@@ -111,9 +162,16 @@ def cancel_kis_order(app_key, app_secret, cano, acnt_prdt_cd, token, odno, branc
         return "CANCEL_UNKNOWN", str(e)
 
 def fetch_kis_order_executions(app_key, app_secret, cano, acnt_prdt_cd, token, is_mock=True) -> Dict[str, Dict]:
-    domain = "[https://openapivts.koreainvestment.com:29443](https://openapivts.koreainvestment.com:29443)" if is_mock else "[https://openapi.koreainvestment.com:9443](https://openapi.koreainvestment.com:9443)"
-    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "VTTC8001R" if is_mock else "TTTC8001R", "custtype": "P"}
+    domain = _get_clean_domain(is_mock)
+    url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-daily-ccld".strip()
+    headers = {
+        "content-type": "application/json; charset=utf-8", 
+        "authorization": f"Bearer {token}", 
+        "appkey": app_key, 
+        "appsecret": app_secret, 
+        "tr_id": "VTTC8001R" if is_mock else "TTTC8001R", 
+        "custtype": "P"
+    }
     from datetime import datetime
     today = datetime.now().strftime("%Y%m%d")
     params = {"CANO": str(cano)[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).zfill(2), "INQR_STRT_DT": today, "INQR_END_DT": today, "SLL_BUY_DVSN": "00", "INQR_DVSN": "00", "PDNO": "", "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_FIID_COND": "", "INQR_FIID_DATA": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
