@@ -41,8 +41,9 @@ def fetch_kis_account_balance(app_key, app_secret, cano, acnt_prdt_cd, token, is
                 if rj.get('rt_cd') == '0': 
                     stocks.extend(rj.get('output1', []))
                     if not summary: summary = rj.get('output2', [])
-                    if rj.get('tr_cont') in ['F', 'M']:
-                        params['CTX_AREA_FK100'], params['CTX_AREA_NK100'] = rj.get('ctx_area_fk100', ''), rj.get('ctx_area_nk100', '')
+                    if res.headers.get('tr_cont') in ['F', 'M']:
+                        params['CTX_AREA_FK100'] = rj.get('ctx_area_fk100', '')
+                        params['CTX_AREA_NK100'] = rj.get('ctx_area_nk100', '')
                         headers['tr_cont'] = 'N'
                         continue
                     return stocks, summary, "OK"
@@ -95,7 +96,6 @@ def fetch_kis_order_executions(app_key, app_secret, cano, acnt_prdt_cd, token, i
     domain = "https://openapivts.koreainvestment.com:29443" if is_mock else "https://openapi.koreainvestment.com:9443"
     url = f"{domain}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
     headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "VTTC8001R" if is_mock else "TTTC8001R", "custtype": "P"}
-    from datetime import datetime
     today = datetime.now().strftime("%Y%m%d")
     params = {"CANO": str(cano)[:8], "ACNT_PRDT_CD": str(acnt_prdt_cd).zfill(2), "INQR_STRT_DT": today, "INQR_END_DT": today, "SLL_BUY_DVSN": "00", "INQR_DVSN": "00", "PDNO": "", "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_FIID_COND": "", "INQR_FIID_DATA": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
     
@@ -108,7 +108,7 @@ def fetch_kis_order_executions(app_key, app_secret, cano, acnt_prdt_cd, token, i
                 for order in rj.get('output1', []):
                     odno = order.get('odno')
                     if odno: exec_dict[odno] = {'cum_qty': int(order.get('tot_ccld_qty', 0)), 'avg_price': float(order.get('avg_prvs', 0))}
-                if rj.get('tr_cont') in ['F', 'M']:
+                if res.headers.get('tr_cont') in ['F', 'M']:
                     params['CTX_AREA_FK100'], params['CTX_AREA_NK100'] = rj.get('ctx_area_fk100', ''), rj.get('ctx_area_nk100', '')
                     headers['tr_cont'] = 'N'
                     continue
