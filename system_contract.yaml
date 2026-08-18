@@ -38,7 +38,7 @@ execution_rules:
   quote_freshness_ttl_sec: 15
   intent_ttl_sec: 300
   market_buy_reservation_buffer: 1.05
-  real_approval_status: "BLOCKED" # 🚨 필수: 100% 테스트 검증 전까지 REAL 계좌 전면 차단
+  real_approval_status: "BLOCKED" # 🚨 MOCK/E2E 테스트 100% 통과 전까지 REAL 강제 차단
 
 cost_model:
   broker_fee_rate: 0.00015
@@ -53,7 +53,6 @@ cost_model:
     2025: {"KOSPI": 0.0015, "KOSDAQ": 0.0015}
     2026: {"KOSPI": 0.0020, "KOSDAQ": 0.0020}
 
-# 🚨 16 State DAG
 allowed_state_transitions:
   INTENT_CREATED: ["CLAIMED", "CANCELED", "QUARANTINED", "EXPIRED"]
   CLAIMED: ["SUBMITTING", "CANCELED", "RISK_REJECTED"]
