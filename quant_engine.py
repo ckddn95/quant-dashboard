@@ -379,7 +379,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         nav_df = pd.DataFrame(nav_history)
         final_asset = nav_df['NAV'].iloc[-1]
         
-        # 🛑 고급 리스크 지표 연산 적용
+        # 🛑 고급 리스크 지표 연산 적용 완료본
         nav_df['Return'] = nav_df['NAV'].pct_change().fillna(0)
         rf_daily = 0.03 / 252 # 무위험 수익률 연 3% 가정
         

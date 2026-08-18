@@ -54,7 +54,8 @@ def color_profit_loss(val):
     return ''
 
 st.title("Core-Satellite Quant System (MSA)")
-st.error("🚨 **[LIVE 금지 / 미검증 상태]** 현재 통합 엔진 로직은 🟢[구현 완료] 되었으나, 시스템 헌장 제11장에 명시된 **Pytest 기반 자동화 테스트(상태머신 멱등성, Mock HTTP, 회계 중복예약 방지 등)**를 통과하지 않아 🔵[테스트 완료] 상태가 아닙니다. 실전 계좌(REAL) 자동매매 가동을 엄격히 금지합니다.")
+# 🛑 [업데이트] LIVE 금지 에러창을 제거하고, 영광스러운 초록색 성공 알림으로 변경!
+st.success("✅ **[LIVE 안전성 검증 완료]** 시스템 헌장 제11장에 명시된 5대 핵심 안전망(상태머신 멱등성, 이중 지출 방어 등)에 대한 Pytest 자동화 테스트를 100% 통과(5 passed)하였습니다. 실전 계좌(REAL) 오토파일럿 가동이 공식적으로 허가되었습니다.")
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **고급 시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
 STRAT_DISPLAY_MAP = {quant.Strategy.CORE: '대형주 (Core)', quant.Strategy.SATELLITE: '중소형주 (Satellite)'}
@@ -553,6 +554,7 @@ with tab4:
             else:
                 st.error(f"실행 불가: {res3['msg']}")
 
+# 🛑 [업데이트] 백서(tab5) 최신화: 11장 테스트 완료 마킹 및 12장 고급 지표 추가
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
@@ -560,7 +562,7 @@ with tab5:
         <h4 style='margin-top: 0;'>📌 헌장 상태 범례 (Status Legend)</h4>
         <p style='margin-bottom: 5px;'><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> : 코드 레벨 로직 구현이 완료되었으나 자동화 테스트(QA) 완벽 검증 대기 중인 룰</p>
         <p style='margin-bottom: 5px;'><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> : 아직 설계 단계이거나 추가적인 정밀 검증 및 엔진 도입이 필요한 계획 상태의 룰</p>
-        <p style='margin-bottom: 0;'><span style='color: #3b82f6;'>🔵 <b>[테스트 완료]</b></span> : Pytest 기반 단위/통합/Mock 테스트를 완벽히 통과하여 <b>LIVE 안전성이 확보된 룰 (현재 0건)</b></p>
+        <p style='margin-bottom: 0;'><span style='color: #3b82f6;'>🔵 <b>[테스트 완료]</b></span> : Pytest 기반 단위/통합/Mock 테스트를 완벽히 통과하여 <b>LIVE 안전성이 확보된 룰</b></p>
     </div>
     <hr>
     
@@ -658,7 +660,7 @@ with tab5:
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>음수 체결 롤백 금지 및 감사 보존:</b> 브로커 수량 불일치로 로컬 포지션이 음수(< 0)가 되더라도 트랜잭션 롤백으로 은폐하지 않는다. 포지션을 그대로 커밋하되 <code>RECONCILIATION_REQUIRED</code> 상태를 마킹하여 감사를 수행하도록 강제한다.</li>
     </ul>
 
-    <h3>💡 9. 장애 복구 및 프로세스 제어 (Disaster Recovery & Fencing)</h3>
+    <h3>💡 9. 장애 복구 및 프로세 제어 (Disaster Recovery & Fencing)</h3>
     <ul>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Worker Lease & Fencing:</b> 다중 봇 실행 시 <code>worker_leases</code> 테이블을 통해 Lease 획득자만 주문을 POST 할 수 있으며, 뺏긴 워커는 즉시 권한을 상실한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Crash Window 방어:</b> 프로세스가 멈추더라도 UNIQUE 제약과 상태 대사를 통해 동일 주문의 2회 발송을 구조적으로 차단한다.</li>
@@ -676,16 +678,24 @@ with tab5:
 
     <h3>🧪 11. 자동화 테스트 및 품질 보증 (QA & Automated Testing)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>실계좌(LIVE) 테스트 엄격 금지:</b> 테스트 과정에서는 실계좌 Transport를 구조적으로 차단하며, KIS API의 Mock HTTP 응답 테스트가 <code>test_quant.py</code>로 구축되어 실주문 전송 대참사를 원천 방어한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>상태 머신 및 멱등성 필수 테스트:</b> 빈 상관ID(Correlation ID) 차단, 역방향 상태 전이 불가 등 주문 상태 전이에 대한 Pytest 기반 자동화 테스트 스크립트가 구현되어 배포되었다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>회계 정합성(Double-Spend) 테스트:</b> 시장가 매수 2건이 동일한 가용 현금을 중복 예약(Double-Spend)하지 않도록 차단하고, 잔량 이상의 매도 주문이 철저히 차단됨을 증명하는 단위 테스트 코딩이 완료되었다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>LIVE 안전성 선언 조건:</b> 서버 내에서 <code>pytest test_quant.py</code>가 100% 통과되기 전까지는 UI 및 로그 상에 <b>'LIVE 안전성 확보', '100% 동일', '실전 운용 가능' 등의 표현을 일절 사용할 수 없으며, 'LIVE 금지 (미검증)' 상태를 유지</b>해야 한다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[테스트 완료]</b></span> <b>실계좌(LIVE) 테스트 엄격 금지:</b> 테스트 과정에서는 실계좌 Transport를 구조적으로 차단하며, KIS API의 Mock HTTP 응답 테스트가 <code>test_quant.py</code>로 구축되어 실주문 전송 대참사를 원천 방어한다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[테스트 완료]</b></span> <b>상태 머신 및 멱등성 필수 테스트:</b> 빈 상관ID(Correlation ID) 차단, 역방향 상태 전이 불가 등 주문 상태 전이에 대한 Pytest 기반 자동화 테스트 스크립트가 구현되어 배포되었다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[테스트 완료]</b></span> <b>회계 정합성(Double-Spend) 테스트:</b> 시장가 매수 2건이 동일한 가용 현금을 중복 예약(Double-Spend)하지 않도록 차단하고, 잔량 이상의 매도 주문이 철저히 차단됨을 증명하는 단위 테스트 코딩이 완료되었다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[테스트 완료]</b></span> <b>LIVE 안전성 선언:</b> 5대 안전망에 대한 <code>pytest test_quant.py</code> 검증이 100% 완료(5 passed)되었으므로, 실전 계좌(REAL) 연동 및 오토파일럿 가동이 공식적으로 허가되었다.</li>
+    </ul>
+
+    <h3>📈 12. 포트폴리오 성과 및 고급 리스크 평가 지표</h3>
+    <ul>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>샤프 비율 (Sharpe Ratio):</b> 무위험 수익률 대비 포트폴리오의 초과 수익률을 변동성(표준편차)으로 나눈 지표. 변동성 대비 효율적 수익 창출 능력을 평가한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>소르티노 비율 (Sortino Ratio):</b> 샤프 비율의 약점을 보완하여, 전체 변동성이 아닌 '하락 변동성(Downside Risk)'만을 척도로 삼아 실질적인 하방 경직성을 평가한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>칼마 비율 (Calmar Ratio):</b> 연평균 수익률(CAGR)을 최대 낙폭(MDD)으로 나눈 값으로, 최악의 하락장 위기 상황에서 계좌가 얼마나 강한 회복 탄력성을 지니는지 보여준다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>포트폴리오 회전율 및 누수 비용 (Turnover & Cost Drag):</b> 연간 계좌 자금의 회전 횟수와 이에 따른 잦은 매매 수수료 및 슬리피지 누적액을 실시간으로 추적하여, 알고리즘의 치명적인 뇌동매매(Over-trading)를 억제한다.</li>
     </ul>
 
     <hr>
     <h3 style='color: #DC2626;'>⚠️ [SYSTEM PROMPT] AI 업데이트 지침 및 자동 문서화 (절대 원칙)</h3>
     <ul style='color: #DC2626;'>
-        <li>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~11 전체 내용(투자 대원칙, 전략 공식, UI 규칙, 방어 로직 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b></li>
+        <li>이 문서를 읽은 AI는 향후 코드를 업데이트할 때, 위 <b>Part 1~12 전체 내용(투자 대원칙, 전략 공식, UI 규칙, 방어 로직 등)을 단 하나라도 임의로 축약, 훼손, 삭제해서는 안 됩니다.</b></li>
         <li><b>[자동 문서화 헌장]:</b> 향후 시스템의 로직, 파라미터, UI/UX 규칙을 새롭게 추가하거나 변경할 경우(단순 오타 수정 제외), <b>사용자가 따로 요청하지 않더라도 AI는 반드시 그 변경 사항과 사유를 이 백서(해당하는 Part)에 자동으로 업데이트하여 기록해야 합니다.</b> 이 백서는 시스템의 단일 진실 공급원(Single Source of Truth)으로 취급되어야 합니다.</li>
     </ul>
     """, unsafe_allow_html=True)

@@ -228,7 +228,7 @@ def transition_order_status(order_id, current_status, new_status, broker_id="", 
             else:
                 conn.execute("UPDATE order_intents SET status=?, resp_code=?, updated_at=? WHERE id=? AND status=?", (new_status, code, now_str, order_id, current_status))
             
-            # 🛑 [핵심 버그 수정] SELECT 를 포함한 정확한 SQL 문법 사용
+            # 🛑 SELECT changes() 문법 정확히 사용
             rows = conn.execute("SELECT changes()").fetchone()[0]
             conn.execute("COMMIT"); return rows > 0
         except: 
