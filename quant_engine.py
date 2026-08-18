@@ -34,6 +34,14 @@ class StrategyConfig:
 class StockSnapshot:
     ticker: str; current_price: float; high_price: float; low_price: float; ma20: float; ma60: float; ma200: float; m60_up: bool
     as_of: datetime.datetime; source: str; is_valid: bool; is_complete_bar: bool; reason: str; executable: bool
+    
+    def validate(self, is_halted: bool = False):
+        if not self.is_valid: return 
+        if math.isnan(self.current_price) or self.current_price <= 0:
+            self.is_valid, self.reason, self.executable = False, "Invalid Price", False; return
+        if is_halted:
+            self.is_valid, self.reason, self.executable = False, "Halted", False; return
+        self.is_valid, self.reason = True, "OK"
 
 @dataclass
 class RiskContext:
@@ -92,18 +100,21 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
     if ctx.is_kill_switch_on: return False, "KILL_SWITCH ON"
     if not ctx.is_auto_trade_on and ctx.env == "REAL": return False, "AUTO_TRADE OFF"
     if not snap.is_valid: return False, f"Invalid Quote: {snap.reason}"
-    
+    if not snap.executable: return False, f"Not Executable Source: {snap.source}"
+
     if order_spec.side == "BUY":
         if ctx.usable_cash <= 0: return False, "Zero Usable Cash"
         buffer = db.CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05)
         expected_val = order_spec.quantity * order_spec.reference_price * buffer
         if ctx.usable_cash < expected_val: return False, "Insufficient Cash (Reserved)"
         if ctx.daily_pnl_pct < -0.05: return False, "Daily PnL < -5%"
-        target_max = ctx.max_exposure
+        
         projected_exposure = ctx.current_exposure + (order_spec.quantity * order_spec.reference_price)
-        if projected_exposure > target_max: return False, "Exceeds Portfolio Exposure Limit"
+        if projected_exposure > ctx.max_exposure: return False, "Exceeds Total Portfolio Exposure Limit"
+        
     elif order_spec.side == "SELL":
         if ctx.managed_sell_qty < order_spec.quantity: return False, "Insufficient Managed Qty"
+
     return True, "PASS"
 
 def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: float, ma60: float, ma200: float, m60_up: bool) -> tuple[bool, float, str]:
@@ -122,6 +133,7 @@ def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: 
 def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float) -> tuple[bool, float, ExitReason]:
     sl_target = buy_p * (1.0 + cfg.sl)
     ts_target = max(highest_p, high_p) * (1.0 + cfg.ts_drp)
+    
     hit_sl = low_p <= sl_target
     hit_ts = (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (low_p <= ts_target)
     
@@ -140,8 +152,8 @@ _fdr_cache = {}
 
 def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy_price: float=0, highest_price: float=0, c_price: float=0, high_p: float=0, low_p: float=0, is_halted: bool=False, days_held: int=0):
     try:
-        start_d = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
-        end_d = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        start_d = (datetime.datetime.now(KST) - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
+        end_d = (datetime.datetime.now(KST) - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         cache_key = f"{ticker}_{end_d}"
         
         if cache_key in _fdr_cache: df = _fdr_cache[cache_key]
@@ -156,7 +168,7 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         m60_up = True if len(df) < 60 else (ma60 > df['Close'].rolling(60).mean().iloc[-11])
         
         is_kis = c_price > 0
-        snap = StockSnapshot(ticker=ticker, current_price=c_price if is_kis else fdr_close, high_price=high_p if is_kis else fdr_high, low_price=low_p if is_kis else fdr_low, ma20=ma20, ma60=ma60, ma200=ma200, m60_up=m60_up, as_of=datetime.datetime.now(), source="KIS" if is_kis else "FDR", is_valid=True, is_complete_bar=False, reason="OK", executable=is_kis)
+        snap = StockSnapshot(ticker=ticker, current_price=c_price if is_kis else fdr_close, high_price=high_p if is_kis else fdr_high, low_price=low_p if is_kis else fdr_low, ma20=ma20, ma60=ma60, ma200=ma200, m60_up=m60_up, as_of=datetime.datetime.now(KST), source="KIS" if is_kis else "FDR", is_valid=True, is_complete_bar=False, reason="OK", executable=is_kis)
         snap.validate(is_halted)
         if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, snap.reason
             
@@ -236,9 +248,12 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         total_traded_value = 0.0
         total_cost_drag = 0.0
         twr_index = 1.0 
+        loss_streak_sim = {}
         
         for i, current_date in enumerate(calendar):
             current_date_str = current_date.strftime('%Y-%m-%d')
+            
+            # 비례 매도 처리
             if current_date_str in external_cash_flows:
                 cash_flow = external_cash_flows[current_date_str]
                 cash += cash_flow
@@ -264,6 +279,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                                 pos['qty'] -= sell_qty
                                 if pos['qty'] == 0: del positions[tk]
                     
+            # T+1 체결
             for order in pending_orders:
                 tk = order['ticker']
                 if tk not in dfs or current_date not in dfs[tk].index: continue 
@@ -285,7 +301,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                             old_qty, old_bp = positions[tk]['qty'], positions[tk]['buy_price']
                             new_qty = old_qty + executable_qty
                             new_bp = ((old_qty * old_bp) + (executable_qty * cost_price_per_share)) / new_qty
-                            positions[tk].update({"qty": new_qty, "buy_price": new_bp, "highest": cost_price_per_share})
+                            positions[tk].update({"qty": new_qty, "buy_price": new_bp, "highest": max(positions[tk]['highest'], cost_price_per_share)})
                         else: positions[tk] = {"qty": executable_qty, "buy_price": cost_price_per_share, "highest": cost_price_per_share, "days": 0, "entry_date": current_date}
                 elif order['side'] == 'SELL' and tk in positions:
                     cost_inc, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "SELL", open_p, positions[tk]['qty'], use_legacy_cost)
@@ -293,7 +309,15 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     profit_pct = (sell_price_per_share / positions[tk]['buy_price']) - 1.0
                     profit_amt = (sell_price_per_share - positions[tk]['buy_price']) * positions[tk]['qty']
                     trade_log.append(profit_pct)
-                    if profit_pct < 0: cooldown_tracker[tk] = current_date 
+                    
+                    # 쿨다운 로직 (2회 연속 손실)
+                    if profit_pct < 0:
+                        loss_streak_sim[tk] = loss_streak_sim.get(tk, 0) + 1
+                        if loss_streak_sim[tk] >= 2:
+                            cooldown_tracker[tk] = i + cfg.cd # i는 calendar index (KRX 거래일 기준)
+                    else:
+                        loss_streak_sim[tk] = 0
+                        
                     total_cost_drag += cost_inc
                     total_traded_value += open_p * positions[tk]['qty']
                     closed_trades_log.append({"종목명": ticker_to_name.get(tk, tk), "진입일": positions[tk]["entry_date"].strftime('%Y-%m-%d'), "청산일": current_date_str, "보유일수": f"{positions[tk]['days']}일", "진입단가": positions[tk]['buy_price'], "청산단가": sell_price_per_share, "수량": positions[tk]['qty'], "손익금": profit_amt, "수익률": f"{profit_pct*100:+.2f}%", "사유": order.get('reason', ExitReason.TREND_EXIT.value)})
@@ -301,6 +325,8 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     del positions[tk]
             
             pending_orders, sell_signals = [], []
+            
+            # 장중 위험 감시
             for tk, pos in list(positions.items()):
                 if current_date not in dfs[tk].index: continue
                 row = dfs[tk].loc[current_date]
@@ -316,7 +342,12 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     profit_pct = (real_sell_price / pos['buy_price']) - 1.0
                     profit_amt = (real_sell_price - pos['buy_price']) * pos['qty']
                     trade_log.append(profit_pct)
-                    if profit_pct < 0: cooldown_tracker[tk] = current_date
+                    
+                    if profit_pct < 0:
+                        loss_streak_sim[tk] = loss_streak_sim.get(tk, 0) + 1
+                        if loss_streak_sim[tk] >= 2: cooldown_tracker[tk] = i + cfg.cd
+                    else: loss_streak_sim[tk] = 0
+                    
                     total_cost_drag += cost_inc
                     total_traded_value += trigger_price * pos['qty']
                     closed_trades_log.append({"종목명": ticker_to_name.get(tk, tk), "진입일": pos["entry_date"].strftime('%Y-%m-%d'), "청산일": current_date_str, "보유일수": f"{pos['days']}일", "진입단가": pos['buy_price'], "청산단가": real_sell_price, "수량": pos['qty'], "손익금": profit_amt, "수익률": f"{profit_pct*100:+.2f}%", "사유": exit_reason.value})
@@ -352,34 +383,45 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             else: is_weekly_scan_day = True 
                 
             if is_weekly_scan_day and daily_pnl_pct >= -0.05:
-                alloc_mult = 1.0
-                if cfg.boost and not market_df.empty and current_date in market_df.index and pd.notna(market_df.loc[current_date, 'MA200']) and market_df.loc[current_date, 'Close'] > market_df.loc[current_date, 'MA200']:
-                    booster_val = db.CONTRACT.get('booster_policy', {}).get('value', 0.10)
-                    alloc_mult = 1.0 + booster_val
+                # 🚨 부스터 적용 (종목당 한도는 그대로 두고 총 노출액을 +10%p 확대)
+                booster_val = db.CONTRACT.get('booster_policy', {}).get('value', 0.10) if (cfg.boost and not market_df.empty and current_date in market_df.index and pd.notna(market_df.loc[current_date, 'MA200']) and market_df.loc[current_date, 'Close'] > market_df.loc[current_date, 'MA200']) else 0.0
+                max_portfolio_exposure = daily_eval * (1.0 + booster_val)
+                current_exposure = sum([pos['qty'] * pos['highest'] for pos in positions.values()])
+                available_budget = max(0.0, max_portfolio_exposure - current_exposure)
 
                 buy_candidates = []
                 for tk in tickers:
-                    if tk in positions or tk not in dfs or current_date not in dfs[tk].index: continue
-                    if tk in cooldown_tracker and (current_date - cooldown_tracker[tk]).days < cfg.cd: continue 
+                    if tk not in dfs or current_date not in dfs[tk].index: continue
+                    if tk in cooldown_tracker and i < cooldown_tracker[tk]: continue 
                     row = dfs[tk].loc[current_date]
                     if pd.isna(row['MA200']) or row['Close'] <= 0: continue
                     is_buy, score, reason = calc_buy_signal(strat, cfg, row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_UP'])
+                    
+                    # 이미 보유 중이라도 신호가 재무장(Rearm)된 상태면 추가 매수 허용
                     if is_buy: buy_candidates.append({"ticker": tk, "score": score, "close": row['Close'], "reason": reason})
                 
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
-                target_alloc_amt = daily_eval * min(1.0, cfg.alloc * alloc_mult) 
                 
                 available_cash = cash
                 for cand in buy_candidates:
-                    if available_cash <= 0: break
-                    alloc_amt = min(available_cash, target_alloc_amt)
-                    mkt = ticker_to_market.get(cand['ticker'], "KOSDAQ")
-                    cost_inc, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "BUY", cand['close'], 1, use_legacy_cost)
-                    cost_price_per_share = cand['close'] + cost_inc
-                    qty = int(alloc_amt // cost_price_per_share)
-                    if qty > 0:
-                        pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty, "reason": cand['reason']})
-                        available_cash -= qty * cost_price_per_share
+                    if available_budget <= 0 or available_cash <= 0: break
+                    
+                    # 종목당 한도는 그대로 유지
+                    stock_alloc_limit = daily_eval * cfg.alloc
+                    held_val = positions[cand['ticker']]['qty'] * cand['close'] if cand['ticker'] in positions else 0.0
+                    room_for_stock = max(0.0, stock_alloc_limit - held_val)
+                    
+                    alloc_amt = min(available_cash, available_budget, room_for_stock)
+                    if alloc_amt > 0:
+                        mkt = ticker_to_market.get(cand['ticker'], "KOSDAQ")
+                        cost_inc, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "BUY", cand['close'], 1, use_legacy_cost)
+                        cost_price_per_share = cand['close'] + cost_inc
+                        qty = int(alloc_amt // cost_price_per_share)
+                        if qty > 0:
+                            pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty, "reason": cand['reason']})
+                            deduct_amt = qty * cost_price_per_share
+                            available_cash -= deduct_amt
+                            available_budget -= deduct_amt
 
         for tk, pos in positions.items():
             last_close = dfs[tk]['Close'].loc[:end_date].dropna().iloc[-1] if tk in dfs else pos['buy_price']

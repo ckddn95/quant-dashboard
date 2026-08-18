@@ -1,12 +1,19 @@
+# Database & Backups
+*.db
+*.db-wal
+*.db-shm
+*.bak
+*.sql
+
+# Logs
+*.log
+
+# Secrets & Environments
+.streamlit/secrets.toml
+.env
+secrets.json
+
 # Python Cache
 __pycache__/
-*.pyc
-.pytest_cache/
-
-# Database & Backups
-quant_system.db
-*.bak
-
-# Environment Variables & Secrets
-.env
-secrets.toml
+*.py[cod]
+*$py.class

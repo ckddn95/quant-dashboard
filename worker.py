@@ -1,9 +1,11 @@
 import time
 import logging
 import uuid
-import sys
 import datetime
 import traceback
+import os
+try: import toml
+except ImportError: import tomllib as toml
 import database as db
 import broker.kis_client as kis
 
@@ -13,19 +15,24 @@ logger = logging.getLogger("ExecWorker")
 WORKER_ID = f"worker_{uuid.uuid4().hex[:8]}"
 
 def get_account_secrets(portfolio_id):
-    import streamlit as st
+    """🚨 Streamlit 종속성을 제거한 독립적인 TOML 파서"""
     try:
+        secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
+        with open(secrets_path, "r", encoding="utf-8") as f:
+            config = toml.load(f) if hasattr(toml, 'load') else toml.loads(f.read())
         acc_key = "core" if portfolio_id == "CORE" else "satellite"
-        config = st.secrets["kis_accounts"][acc_key]
-        return config["app_key"], config["app_secret"], str(config["cano"]).strip(), str(config.get("is_mock", "True")).lower() == 'true', str(config.get("acnt_prdt", "01")).strip()
-    except Exception: return None, None, None, True, "01"
+        c = config["kis_accounts"][acc_key]
+        return c["app_key"], c["app_secret"], str(c["cano"]).strip(), str(c.get("is_mock", "true")).lower() == 'true', str(c.get("acnt_prdt", "01")).strip()
+    except Exception as e:
+        logger.error(f"Secrets Load Error: {e}")
+        return None, None, None, True, "01"
 
 def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, portfolio_id, is_mock):
     open_statuses = ['CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED']
     pending_orders = db.get_orders_by_status_and_env(open_statuses, "KIS", env, acc_fp, portfolio_id)
     if not pending_orders: return
     
-    executions = kis.fetch_daily_executions(app_key, app_sec, cano, acnt_prdt, token, is_mock)
+    executions = kis.fetch_daily_executions_0081(app_key, app_sec, cano, acnt_prdt, token, is_mock)
     
     for order in pending_orders:
         if not order['broker_order_id']: continue
@@ -70,16 +77,15 @@ def run_worker_loop():
                 order = db.claim_next_order("KIS", env, acc_fp, portfolio_id, WORKER_ID, token)
                 if not order: continue
 
-                actual_cash = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], is_mock)
-                passed, msg = db.atomic_preflight_and_claim("KIS", env, acc_fp, portfolio_id, WORKER_ID, token, order['id'], actual_cash)
+                actual_cash = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], order['ticker'], order['reference_price'], order['order_kind'], is_mock)
+                order_updated, passed, msg = db.claim_and_authorize_submission("KIS", env, acc_fp, acnt_prdt, portfolio_id, WORKER_ID, actual_cash)
                 
                 if not passed:
                     logger.warning(f"⚠️ 주문 게이트 차단 (ID: {order['id']}): {msg}")
-                    db.transition_order_status(order['id'], 'CLAIMED', 'CANCELED', code=msg)
                     continue
 
                 logger.info(f"[{portfolio_id}] 001x API 발송: {order['side']} {order['ticker']} {order['qty']}주")
-                status, msg, odno, krx_odno, resp_code = kis.execute_kis_order_current_001x(
+                status, msg, odno, krx_odno, resp_code = kis.execute_kis_order_001x(
                     app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], 
                     order['ticker'], order['side'].upper() == "BUY", order['qty'], order['limit_price'], is_mock
                 )

@@ -1,8 +1,8 @@
-whitepaper_version: "2.1.0"
-contract_version: "2.1.0"
-schema_version: 7
+whitepaper_version: "2.2.0"
+contract_version: "2.2.0"
+schema_version: 8
 strategy_version: "1.0.0"
-cost_model_version: "2.1.0"
+cost_model_version: "2.2.0"
 
 strategy:
   CORE:
@@ -38,6 +38,7 @@ execution_rules:
   quote_freshness_ttl_sec: 15
   intent_ttl_sec: 300
   market_buy_reservation_buffer: 1.05
+  real_approval_status: "BLOCKED" # 🚨 필수: 100% 테스트 검증 전까지 REAL 계좌 전면 차단
 
 cost_model:
   broker_fee_rate: 0.00015
@@ -52,9 +53,10 @@ cost_model:
     2025: {"KOSPI": 0.0015, "KOSDAQ": 0.0015}
     2026: {"KOSPI": 0.0020, "KOSDAQ": 0.0020}
 
+# 🚨 16 State DAG
 allowed_state_transitions:
-  INTENT_CREATED: ["CLAIMED", "CANCELED"]
-  CLAIMED: ["SUBMITTING", "CANCELED"]
+  INTENT_CREATED: ["CLAIMED", "CANCELED", "QUARANTINED", "EXPIRED"]
+  CLAIMED: ["SUBMITTING", "CANCELED", "RISK_REJECTED"]
   SUBMITTING: ["ACKNOWLEDGED", "REJECTED", "UNKNOWN"]
   ACKNOWLEDGED: ["PARTIALLY_FILLED", "FILLED", "CANCEL_REQUESTED"]
   PARTIALLY_FILLED: ["FILLED", "CANCEL_REQUESTED"]
@@ -62,3 +64,10 @@ allowed_state_transitions:
   CANCEL_REQUESTED: ["CANCEL_ACKNOWLEDGED", "CANCEL_UNKNOWN", "FILLED"]
   CANCEL_UNKNOWN: ["CANCELED", "FILLED", "CANCEL_ACKNOWLEDGED"]
   CANCEL_ACKNOWLEDGED: ["CANCELED"]
+  RECONCILIATION_REQUIRED: []
+  FILLED: []
+  CANCELED: []
+  REJECTED: []
+  RISK_REJECTED: []
+  QUARANTINED: []
+  EXPIRED: []
