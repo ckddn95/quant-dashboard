@@ -21,7 +21,6 @@ def get_account_secrets(portfolio_id):
     except Exception: return None, None, None, True, "01"
 
 def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, portfolio_id, is_mock):
-    """✅ 0081R 기반 체결 대사 (Delta 반영)"""
     open_statuses = ['CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED']
     pending_orders = db.get_orders_by_status_and_env(open_statuses, "KIS", env, acc_fp, portfolio_id)
     if not pending_orders: return
@@ -30,18 +29,14 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
     
     for order in pending_orders:
         if not order['broker_order_id']: continue
-        
-        # ODNO(주문번호)가 일치하는 체결 내역 필터링
         matched_execs = [e for e in executions if e.get('odno') == order['broker_order_id']]
         if not matched_execs: continue
         
-        # 증권사 누적 체결 수량 및 단가 산출
         broker_cum_qty = sum(int(e.get('ccld_qty', 0)) for e in matched_execs)
         if broker_cum_qty > order['cum_filled_qty']:
             broker_cum_amt = sum(int(e.get('ccld_qty', 0)) * float(e.get('ccld_unpr', 0)) for e in matched_execs)
             broker_avg_price = broker_cum_amt / broker_cum_qty if broker_cum_qty > 0 else 0
             
-            # Delta 원자적 갱신
             db.apply_fill_delta_exactly_once(
                 order['id'], order['ticker'], order['side'], "KIS", env, acc_fp, portfolio_id, 
                 order['strategy_id'], broker_cum_qty, broker_avg_price
@@ -61,25 +56,20 @@ def run_worker_loop():
                 env = "MOCK" if is_mock else "REAL"
                 acc_fp = db.hashlib.sha256(cano.encode()).hexdigest()[:16] if cano != "MOCK_ACCOUNT" else "MOCK_ACCOUNT"
                 
-                # Token 관리
                 token_key = f"{env}_{portfolio_id}"
                 if token_key not in kis_tokens or kis_tokens[token_key]['expire'] < time.time():
                     t, _ = kis.get_kis_access_token(app_key, app_sec, is_mock)
                     if t: kis_tokens[token_key] = {'token': t, 'expire': time.time() + 40000}
                     else: continue
                 
-                # 1. 체결 대사 (Reconciliation) 우선 수행
                 reconcile_executions(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], env, acc_fp, portfolio_id, is_mock)
 
-                # 2. Worker Lease 확보
                 lease_ok, token = db.acquire_worker_lease("KIS", env, acc_fp, portfolio_id, WORKER_ID, ttl=10)
                 if not lease_ok: continue
                 
-                # 3. 신규 의도 Claim
                 order = db.claim_next_order("KIS", env, acc_fp, portfolio_id, WORKER_ID, token)
                 if not order: continue
 
-                # 4. Atomic Pre-flight Gate (가장 엄격한 제출 전 최종 검사)
                 actual_cash = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], is_mock)
                 passed, msg = db.atomic_preflight_and_claim("KIS", env, acc_fp, portfolio_id, WORKER_ID, token, order['id'], actual_cash)
                 
@@ -88,7 +78,6 @@ def run_worker_loop():
                     db.transition_order_status(order['id'], 'CLAIMED', 'CANCELED', code=msg)
                     continue
 
-                # 5. KIS 001x 전송 (POST 1회 제한)
                 logger.info(f"[{portfolio_id}] 001x API 발송: {order['side']} {order['ticker']} {order['qty']}주")
                 status, msg, odno, krx_odno, resp_code = kis.execute_kis_order_current_001x(
                     app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], 
@@ -102,10 +91,11 @@ def run_worker_loop():
                 else:
                     db.transition_order_status(order['id'], 'SUBMITTING', 'UNKNOWN', code=msg)
 
-            time.sleep(1) # Rate limit 방어
+            time.sleep(1) 
             
         except Exception as e:
             logger.error(f"Worker Error: {e}")
+            logger.error(traceback.format_exc())
             time.sleep(5)
 
 if __name__ == "__main__":

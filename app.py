@@ -126,7 +126,6 @@ current_config = quant.get_default_config(active_strat)
 with st.sidebar.expander("📊 현재 적용된 계약 파라미터 보기", expanded=False):
     st.info("💡 시스템 헌장(YAML)에 의해 임의 변경이 차단된 읽기 전용 상태입니다. (OOS 검증 원칙 준수)")
     st.markdown(f"- **200일 추세선 방어:** {'✅ 활성' if current_config.ma200 else '❌ 비활성'}")
-    # 🚨 속성 에러 방어 로직 추가 (getattr 사용)
     bf_val = getattr(current_config, 'buffer_factor', 0.5)
     st.markdown(f"- **골든크로스/눌림목 버퍼:** `{current_config.buf * 100:.1f}%` (추세이탈계수: {bf_val})")
     st.markdown(f"- **긴급 손절 컷 (SL):** `{current_config.sl * 100:.1f}%`")
@@ -141,7 +140,7 @@ rd = st.session_state.get('real_data', db.get_setting('last_real_data', {'eval':
 st.session_state['real_data'] = rd 
 real_invested_principal = rd['eval'] - rd['pnl'] if rd['eval'] > 0 else float(total_cash)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 시스템 백서 v2.0"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 관심종목 유니버스", "🔌 실전 계좌", "🤖 자동매매 대기열", "📊 시뮬레이션", "📄 시스템 백서 v2.1.0"])
 
 with tab1:
     st.header("📝 관심종목 유니버스 & 실시간 AI 진단")
@@ -369,11 +368,11 @@ with tab3:
                 spec = quant.OrderSpec(
                     correlation_id="", idempotency_key=f"UI_{tk}_{now_str}", broker="KIS", environment=ENV_STR, 
                     account_fingerprint=ACC_FP, account_product_code=SYS_ACNT_PRDT, portfolio_id=active_strat.value, 
-                    strategy_id=active_strat.value, strategy_version="1.0", contract_version=db.CONTRACT['contract_version'],
+                    strategy_id=active_strat.value, strategy_version="1.0", contract_version=db.CONTRACT.get('contract_version', '1.0.0'),
                     ticker=tk, stock_name=r['종목명'], side=side, order_kind="MARKET", quantity=r['주문수량'], limit_price=0, 
                     reference_price=0.0, exchange="KRX", time_in_force="GTC", signal_id="UI_MANUAL", signal_source="UI", 
                     signal_cutoff=now_str, quote_id="", quote_source="UI", quote_timestamp=now_str, 
-                    intent_ttl=300, cost_model_version=db.CONTRACT.get('cost_model_version', '2.0.0'), 
+                    intent_ttl=300, cost_model_version=db.CONTRACT.get('cost_model_version', '2.1.0'), 
                     intent_created_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 )
                 ok, msg = db.safe_add_order_intent(spec)
@@ -529,7 +528,7 @@ with tab4:
 
 with tab5:
     st.markdown("""
-    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장 (v2.0.0)</h1>
+    <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장 (v2.1.0)</h1>
     <div style='background-color: rgba(30, 58, 138, 0.1); padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #1E3A8A;'>
         <h4 style='margin-top: 0;'>📌 헌장 상태 범례 (Status Legend)</h4>
         <p style='margin-bottom: 5px;'><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> : 코드 레벨 로직 구현이 완료되었으나 자동화 테스트(QA) 완벽 검증 대기 중인 룰</p>
