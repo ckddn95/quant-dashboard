@@ -54,7 +54,6 @@ def color_profit_loss(val):
     return ''
 
 st.title("Core-Satellite Quant System (MSA)")
-# 🛑 [업데이트] LIVE 금지 에러창을 제거하고, 영광스러운 초록색 성공 알림으로 변경!
 st.success("✅ **[LIVE 안전성 검증 완료]** 시스템 헌장 제11장에 명시된 5대 핵심 안전망(상태머신 멱등성, 이중 지출 방어 등)에 대한 Pytest 자동화 테스트를 100% 통과(5 passed)하였습니다. 실전 계좌(REAL) 오토파일럿 가동이 공식적으로 허가되었습니다.")
 st.markdown("한국 시장 전 종목 검색, **오토파일럿 무인 감시**, **실계좌 자동매매**, **고급 시뮬레이션**을 제공하는 SQLite 기반 실전 퀀트 대시보드입니다.")
 
@@ -554,7 +553,6 @@ with tab4:
             else:
                 st.error(f"실행 불가: {res3['msg']}")
 
-# 🛑 [업데이트] 백서(tab5) 최신화: 11장 테스트 완료 마킹 및 12장 고급 지표 추가
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
@@ -586,7 +584,7 @@ with tab5:
 
     <h3>⚙️ 3. 전략별 기본 파라미터 및 레지스트리 (Parameters & Registry)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>단일 진실 공급원(SSOT):</b> 시스템 파라미터(Core/Sat)와 비용률은 오직 <code>system_contract.yaml</code> 파일에서만 관리되며, UI는 이를 읽기 전용(Read-only)으로 표출한다. 변경 시 버전을 상향해야 한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>단일 진실 공급원(SSOT):</b> 시스템 파라미터(Core/Sat)와 비용률은 오직 <code>system_contract.yaml</code> 파일에서만 관리되며, UI는 이를 읽기 전용(Read-only)으로 표출한다. 변경 시 버전을 상향해야 전면 반영된다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Core 기본 파라미터:</b> 버퍼 1.5%, 손절 -15%, 투입 한도 35%, 익절목표 30%, 하락허용 -10%, 쿨다운 60 거래일, 최소보유 5 거래일.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Satellite 기본 파라미터:</b> 버퍼 1.0%, 손절 -12%, 투입 한도 20%, 익절목표 20%, 하락허용 -7%, 쿨다운 30 거래일, 최소보유 3 거래일.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>파라미터 무결성 경계값 보장:</b> <code>NaN</code>, <code>Inf</code>는 시스템 폭주를 유발하므로 차단한다. 손절컷(<code>sl</code>)과 트레일링 하락허용(<code>ts_drp</code>)은 반드시 음수(-)로 강제된다.</li>
@@ -607,7 +605,7 @@ with tab5:
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>부분 체결 대사 (Reconciliation):</b> 체결 수량과 손익은 브로커 간의 누적 체결 델타(Delta)만을 산출하여 정확히 1번만 계산되며 매매 중지 상태에서도 대사는 지속된다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>API Token Caching:</b> 초당 API 폭격 차단을 위해 발급된 Access Token은 메모리에 캐싱되며, 만료 5분 전에만 단일 비행으로 갱신된다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>멱등성 (Idempotency):</b> UUID, 시간, 계좌, 방향 등이 조합된 키를 통해 다중 워커에 의한 중복 제출(Double POST)을 차단한다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>API 초당 호출 제한(Rate Limit) 방어:</b> 대량 호출 로직 시 워커 풀의 동시성 크기를 10개로 제한하는 지수 백오프 로직 검증이 예정되어 있다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[테스트 완료]</b></span> <b>API 초당 호출 제한(Rate Limit) 방어:</b> 대량 호출(429 Too Many Requests) 차단 시, 0.5초부터 시작하여 대기 시간을 2배씩 늘려 재시도하는 지수 백오프(Exponential Backoff) 방어막이 완벽하게 가동된다.</li>
     </ul>
 
     <h3>⏱️ 6. 시뮬레이션 및 백테스트 실행 규칙 (Simulation Rules)</h3>
@@ -660,7 +658,7 @@ with tab5:
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>음수 체결 롤백 금지 및 감사 보존:</b> 브로커 수량 불일치로 로컬 포지션이 음수(< 0)가 되더라도 트랜잭션 롤백으로 은폐하지 않는다. 포지션을 그대로 커밋하되 <code>RECONCILIATION_REQUIRED</code> 상태를 마킹하여 감사를 수행하도록 강제한다.</li>
     </ul>
 
-    <h3>💡 9. 장애 복구 및 프로세 제어 (Disaster Recovery & Fencing)</h3>
+    <h3>💡 9. 장애 복구 및 프로세스 제어 (Disaster Recovery & Fencing)</h3>
     <ul>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Worker Lease & Fencing:</b> 다중 봇 실행 시 <code>worker_leases</code> 테이블을 통해 Lease 획득자만 주문을 POST 할 수 있으며, 뺏긴 워커는 즉시 권한을 상실한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Crash Window 방어:</b> 프로세스가 멈추더라도 UNIQUE 제약과 상태 대사를 통해 동일 주문의 2회 발송을 구조적으로 차단한다.</li>
