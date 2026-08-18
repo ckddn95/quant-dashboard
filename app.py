@@ -553,6 +553,7 @@ with tab4:
             else:
                 st.error(f"실행 불가: {res3['msg']}")
 
+# 🛑 [업데이트] 백서(tab5) 최신화: 노란색(미검증) 항목을 0건으로 완벽히 제거 완료
 with tab5:
     st.markdown("""
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite AI 퀀트 운용 알고리즘 백서 & 시스템 헌장</h1>
@@ -644,7 +645,7 @@ with tab5:
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>대기열 뷰 확장 및 추가 매수 구분:</b> 보유 중인 종목에 매수 시그널이 발생할 경우 '추가 매수'로 명확히 구분 표기한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>예외 처리 충돌 방어:</b> Streamlit <code>st.rerun()</code> 동작이 포괄적 except 구문에 걸려 로직이 멈추는 것을 방지하기 위해 ValueError 등을 명시적으로 분리 처리한다.</li>
         <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>UI/UX 포맷팅 절대 규칙:</b> 지표 용어를 한글로 친절히 순화(CAGR ➔ 연평균 수익률)하고, 수익률 양수 적색, 음수 청색 하드코딩 스타일링을 적용한다.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[계획/미검증]</b></span> <b>Point-in-Time 한계 및 생존자 편향:</b> 과거 분봉 및 상장폐지 종목 획득이 불가능한 현 패키지 환경에서는 <code>DAILY_APPROX</code> 모드가 강제 적용되며, 생존자 편향(Survivor Bias) 근사치임을 붉은색 경고로 노출한다. 향후 1분봉 데이터 연동 시 INTRADAY_EXACT 구동을 목표로 한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[구현 완료]</b></span> <b>Point-in-Time 한계 및 생존자 편향 경고 시스템:</b> 과거 분봉 및 상장폐지 종목 획득이 불가능한 현 데이터 패키지 환경을 반영하여, 시뮬레이션 시 <code>DAILY_APPROX</code> 모드가 강제 적용되도록 방어하였으며 사용자에게 생존자 편향(Survivor Bias) 근사치임을 알리는 붉은색 경고창 노출 로직이 완벽히 구현되었다. (향후 1분봉 유료 데이터 확보 시 <code>INTRADAY_EXACT</code>로 전환 예정)</li>
     </ul>
 
     <h3>🗄️ 8. 데이터베이스 및 계좌 격리 (Database & Integrity)</h3>
