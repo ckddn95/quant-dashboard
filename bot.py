@@ -1,137 +1,158 @@
 import time
+import logging
+import sys
 import uuid
-import os
-import hashlib
-from datetime import datetime, timedelta
-import pandas as pd
+import datetime
+import traceback
 import database as db
 import broker.kis_client as kis
 import quant_engine as quant
 
-WORKER_ID = str(uuid.uuid4())
-TOKEN_CACHE = {"token": "", "expires_at": 0}
-BOUND_STRATEGY = os.getenv('STRATEGY', 'CORE') 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger("SignalBot")
 
-def get_valid_token(api_key, api_sec, is_mock):
-    now = time.time()
-    if TOKEN_CACHE["token"] and TOKEN_CACHE["expires_at"] > now + 300: return TOKEN_CACHE["token"]
-    token, _ = kis.get_kis_access_token(api_key, api_sec, is_mock)
-    if token: TOKEN_CACHE["token"], TOKEN_CACHE["expires_at"] = token, now + 43200
-    return token
+KST = datetime.timezone(datetime.timedelta(hours=9))
 
-def load_t_minus_1_data(ticker):
-    # 🛑 [Step 2 패치] 무조건 어제(T-1)까지의 데이터만 로드하여 Look-ahead 편향 원천 봉쇄
-    start_d = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-    end_d = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+def get_account_secrets(portfolio_id):
+    import streamlit as st
     try:
-        df = quant.fdr.DataReader(str(ticker).zfill(6), start=start_d, end=end_d)
-        if not df.empty:
-            ma20 = df['Close'].rolling(20).mean().iloc[-1]
-            ma60 = df['Close'].rolling(60).mean().iloc[-1]
-            ma200 = df['Close'].rolling(200).mean().iloc[-1]
-            m60_up = True if len(df) < 60 else (ma60 > df['Close'].rolling(60).mean().iloc[-11])
-            return ma20, ma60, ma200, m60_up
-    except: pass
-    return 0, 0, 0, False
+        acc_key = "core" if portfolio_id == "CORE" else "satellite"
+        config = st.secrets["kis_accounts"][acc_key]
+        return config["app_key"], config["app_secret"], str(config["cano"]).strip(), str(config.get("is_mock", "True")).lower() == 'true'
+    except Exception: return None, None, None, True
 
-def main_loop():
-    print(f"🤖 {BOUND_STRATEGY} Quant Worker Started... (Worker ID: {WORKER_ID})")
-    api_key, api_sec, cano = os.getenv('KIS_APP_KEY'), os.getenv('KIS_APP_SECRET'), os.getenv('KIS_CANO')
-    acnt_prdt, is_mock = os.getenv('KIS_ACNT_PRDT', '01'), os.getenv('KIS_IS_MOCK', 'True').lower() == 'true'
-    env_str = "MOCK" if is_mock else "REAL"
-
-    if not api_key or not api_sec or not cano: print("🚨 Fatal: Missing Config."); return
-    acc_fp = hashlib.sha256(cano.encode()).hexdigest()[:16]
-    
-    cfg = quant.get_default_config(quant.Strategy(BOUND_STRATEGY))
+def run_bot_loop():
+    logger.info("📡 Signal Bot 가동 시작 (시장 감시 및 INTENT 생성 전담)")
+    kis_tokens = {}
 
     while True:
         try:
-            token = get_valid_token(api_key, api_sec, is_mock)
-            if not token: time.sleep(10); continue
-            
-            sys_status = db.get_system_status("KIS", env_str, acc_fp, BOUND_STRATEGY)
-            if sys_status["kill_switch"] or not sys_status["auto_pilot"]: time.sleep(5); continue
-            
-            lease_ok, lease_token = db.acquire_worker_lease("KIS", env_str, acc_fp, BOUND_STRATEGY, WORKER_ID)
-            if not lease_ok: time.sleep(10); continue
+            now_kst = datetime.datetime.now(KST)
+            # 시장 시간 체크 (보수적)
+            if now_kst.weekday() >= 5 or now_kst.hour < 9 or now_kst.hour >= 16:
+                time.sleep(60); continue
 
-            watchlist = db.get_watchlist("KIS", env_str, acc_fp, BOUND_STRATEGY, BOUND_STRATEGY)
-            positions = {p['ticker']: p for p in db.get_positions("KIS", env_str, acc_fp, BOUND_STRATEGY, BOUND_STRATEGY)}
-            eval_tickers = set([w['티커'] for w in watchlist] + list(positions.keys()))
-
-            # 🛑 1분봉 실시간 스캔 (Regime Engine)
-            for tk in eval_tickers:
-                tk = str(tk).zfill(6)
+            for portfolio_id in ["CORE", "SATELLITE"]:
+                strat = quant.Strategy(portfolio_id)
+                cfg = quant.get_default_config(strat)
                 
-                # 1. 고정된 T-1 지표 로드
-                ma20, ma60, ma200, m60_up = load_t_minus_1_data(tk)
-                if ma200 == 0: continue
+                app_key, app_sec, cano, is_mock = get_account_secrets(portfolio_id)
+                if not app_key: continue
                 
-                # 2. 실시간 현재가(1분봉 종가), 고가, 저가 로드
-                c_price, h_price, l_price, is_halted, rsn = kis.fetch_kis_current_price_ext(api_key, api_sec, tk, token, is_mock)
-                if c_price <= 0 or is_halted: continue
+                env = "MOCK" if is_mock else "REAL"
+                acc_fp = db.hashlib.sha256(cano.encode()).hexdigest()[:16] if cano != "MOCK_ACCOUNT" else "MOCK_ACCOUNT"
                 
-                # 3. 상태 테이블 조회
-                regime = db.get_signal_state("KIS", env_str, acc_fp, BOUND_STRATEGY, BOUND_STRATEGY, tk)
-                count = regime['consecutive_count'] if regime else 0
-                curr_sig = regime['current_signal'] if regime else "NONE"
-                
-                pos = positions.get(tk)
-                new_signal = "NONE"
-                reason_str = ""
-                
-                # 4. 실시간 판단
-                if pos:
-                    days_held = (datetime.now() - pd.to_datetime(pos['buy_date'])).days
-                    is_sell, s_price, s_reason = quant.calc_sell_signal(quant.Strategy(BOUND_STRATEGY), cfg, c_price, h_price, l_price, c_price, pos['buy_price'], max(pos['highest_price'], h_price), days_held, ma20, ma60)
-                    
-                    if is_sell:
-                        if "즉각" in s_reason or "손절" in s_reason or "트레일링" in s_reason:
-                            new_signal = "SELL_IMMEDIATE" # 즉시 관통
-                            reason_str = s_reason
-                        else:
-                            new_signal = "SELL_TREND" # 2분 검증 필요
-                            reason_str = s_reason
-                else:
-                    is_buy, score, b_reason = quant.calc_buy_signal(quant.Strategy(BOUND_STRATEGY), cfg, c_price, ma20, ma60, ma200, m60_up)
-                    if is_buy:
-                        new_signal = "BUY"
-                        reason_str = b_reason
-                
-                # 5. Signal Regime 2분속 확인기 (State Machine)
-                if new_signal == "NONE":
-                    if count > 0: db.update_signal_state("KIS", env_str, acc_fp, BOUND_STRATEGY, BOUND_STRATEGY, tk, "NONE", "NONE", 0)
+                sys_status = db.get_system_status("KIS", env, acc_fp, portfolio_id)
+                if sys_status['kill_switch'] or (not sys_status['auto_pilot'] and env == "REAL"):
                     continue
+
+                token_key = f"{env}_{portfolio_id}"
+                if token_key not in kis_tokens or kis_tokens[token_key]['expire'] < time.time():
+                    t, _ = kis.get_kis_access_token(app_key, app_sec, is_mock)
+                    if t: kis_tokens[token_key] = {'token': t, 'expire': time.time() + (3600 * 12)}
+                    else: continue
+
+                # 리스크 컨텍스트 생성 (자산/현금 조회)
+                bal_h, bal_s, _ = kis.fetch_kis_account_balance(app_key, app_sec, cano, "01", kis_tokens[token_key]['token'], is_mock)
+                raw_cash = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, "01", kis_tokens[token_key]['token'], is_mock)
                 
-                if new_signal == "SELL_IMMEDIATE":
-                    # 즉시 실행 (Delay 없음)
-                    now_str = datetime.now(KST).strftime('%Y%m%d_%H%M%S')
-                    spec = quant.OrderSpec("", f"BOT_{tk}_SELL_{now_str}", "KIS", env_str, acc_fp, acnt_prdt, BOUND_STRATEGY, BOUND_STRATEGY, "1.0", db.CONTRACT['contract_version'], tk, tk, "SELL", "MARKET", pos['managed_qty'], 0, c_price, "KRX", "GTC", f"SIG_{now_str}", "BOT", now_str, "", "KIS", now_str, 300, db.CONTRACT.get('cost_model_version', '1.0.0'), now_str)
-                    db.safe_add_order_intent(spec)
-                    db.update_signal_state("KIS", env_str, acc_fp, BOUND_STRATEGY, BOUND_STRATEGY, tk, "NONE", "NONE", 0) # Rearm
-                    print(f"⚡ [IMMEDIATE SELL] {tk}: {reason_str}")
+                total_eval = float(bal_s[0]['tot_evlu_amt']) if bal_s else 10000000.0
+                locked_cash, _ = db.get_locked_cash_and_qty("KIS", env, acc_fp, portfolio_id)
+                usable_cash = max(0.0, raw_cash - locked_cash)
                 
-                elif new_signal in ["BUY", "SELL_TREND"]:
-                    if curr_sig == new_signal: count += 1
-                    else: count = 1
+                # 강세장 부스터 (ABSOLUTE_ADDITION +10%p)
+                boost_addon = db.CONTRACT.get('booster_policy', {}).get('value', 0.10) if cfg.boost else 0.0
+                target_max_exposure = total_eval * (1.0 + boost_addon)
+
+                ctx = quant.RiskContext(
+                    account_id=acc_fp, env=env, usable_cash=usable_cash, locked_buy_cash=locked_cash, managed_sell_qty=0,
+                    current_exposure=sum([float(b['prpr']) * int(b['hldg_qty']) for b in bal_h]),
+                    max_exposure=target_max_exposure, daily_pnl_pct=0.0, 
+                    is_kill_switch_on=sys_status['kill_switch'], is_auto_trade_on=sys_status['auto_trade']
+                )
+
+                positions = db.get_positions("KIS", env, acc_fp, portfolio_id, portfolio_id)
+                watchlist = db.get_watchlist("KIS", env, acc_fp, portfolio_id, portfolio_id)
+                targets = list(set([p['ticker'] for p in positions] + [w['티커'] for w in watchlist]))
+
+                for tk in targets:
+                    tk = str(tk).zfill(6)
+                    cp, hp, lp, halted, _ = kis.fetch_kis_current_price_ext(app_key, app_sec, tk, kis_tokens[token_key]['token'], is_mock)
+                    if cp <= 0: continue
+
+                    # 스냅샷 생성
+                    snap = quant.StockSnapshot(tk, cp, hp, lp, 0, 0, 0, True, now_kst, "KIS", True, False, "OK", True)
+                    # 1분봉 대사용 가상 Timestamp
+                    current_bar_ts = now_kst.replace(second=0, microsecond=0)
+
+                    p_row = next((x for x in positions if x['ticker'] == tk), None)
+                    sig_state = db.get_signal_state("KIS", env, acc_fp, portfolio_id, portfolio_id, tk) or {}
                     
-                    db.update_signal_state("KIS", env_str, acc_fp, BOUND_STRATEGY, BOUND_STRATEGY, tk, str(uuid.uuid4())[:8], new_signal, count)
-                    
-                    # 🛑 2분(2연속 틱) 확인 시 주문 발생
-                    if count == db.CONTRACT['execution_rules']['signal_confirmation_candles']:
-                        print(f"🎯 [REGIME CONFIRMED] {tk} {new_signal} (Count: {count})")
-                        qty = 10 # 임시 수량 (실제로는 목표 예산 산식 적용 필요)
-                        side = "BUY" if new_signal == "BUY" else "SELL"
-                        if side == "SELL": qty = pos['managed_qty']
+                    managed_qty = p_row['managed_qty'] if p_row else 0
+                    buy_price = p_row['buy_price'] if p_row else 0.0
+                    highest_price = max(p_row['highest_price'], cp) if p_row else cp
+
+                    # (1) 보유 중: 매도 평가
+                    if managed_qty > 0:
+                        ctx.managed_sell_qty = managed_qty
+                        is_sell, _, reason = quant.calc_sell_signal(strat, cfg, cp, hp, lp, cp, buy_price, highest_price, 5, cp, cp) # MA는 근사치 처리 (Intraday 엔진 한계상 임시 조치)
                         
-                        now_str = datetime.now(KST).strftime('%Y%m%d_%H%M%S')
-                        spec = quant.OrderSpec("", f"BOT_{tk}_{side}_{now_str}", "KIS", env_str, acc_fp, acnt_prdt, BOUND_STRATEGY, BOUND_STRATEGY, "1.0", db.CONTRACT['contract_version'], tk, tk, side, "MARKET", qty, 0, c_price, "KRX", "GTC", f"SIG_{now_str}", "BOT", now_str, "", "KIS", now_str, 300, db.CONTRACT.get('cost_model_version', '1.0.0'), now_str)
-                        db.safe_add_order_intent(spec)
-                        # 제출 후 쿨다운 대기 상태로 변경 (추가 중복 발주 방지)
-                        db.update_signal_state("KIS", env_str, acc_fp, BOUND_STRATEGY, BOUND_STRATEGY, tk, "WAIT_REARM", "WAIT", 0)
+                        if is_sell:
+                            # 즉각 판정 (손절, 트레일링) vs 버퍼 검증 (추세이탈)
+                            if reason in [quant.ExitReason.STOP_LOSS, quant.ExitReason.TRAILING_STOP]:
+                                fire = True
+                            else:
+                                # TREND_EXIT: 2연속 분봉 확인
+                                prev_ts_str = sig_state.get('last_updated', '')
+                                prev_sig = sig_state.get('current_signal', '')
+                                count = sig_state.get('consecutive_count', 0)
+                                
+                                if prev_sig == reason.value and prev_ts_str and datetime.datetime.strptime(prev_ts_str, '%Y-%m-%d %H:%M:%S') < current_bar_ts:
+                                    count += 1
+                                else: count = 1
+                                db.update_signal_state("KIS", env, acc_fp, portfolio_id, portfolio_id, tk, "REGIME", reason.value, count)
+                                fire = (count >= 2)
 
-            time.sleep(60) # 1분마다 스캔 (실제는 초단위 루프로 1분봉 API 찌르도록 고도화 가능)
-        except Exception as e: print(f"Bot Error: {e}"); time.sleep(10)
+                            if fire:
+                                spec = quant.OrderSpec("", f"SIG_SELL_{tk}_{now_kst.strftime('%H%M')}", "KIS", env, acc_fp, "01", portfolio_id, portfolio_id, "1.0", db.CONTRACT['contract_version'], tk, "", "SELL", "MARKET", managed_qty, 0, cp, "KRX", "GTC", "BOT", "SYSTEM", now_kst.strftime('%H%M'), "Q", "KIS", now_kst.strftime('%H%M'), 300, db.CONTRACT['cost_model_version'], now_kst.strftime('%Y-%m-%d %H:%M:%S'))
+                                if quant.pre_flight_risk_check(spec, snap, ctx)[0]:
+                                    db.safe_add_order_intent(spec)
+                                    db.update_signal_state("KIS", env, acc_fp, portfolio_id, portfolio_id, tk, "REGIME", "NONE", 0) # 상태 초기화
+                        continue
 
-if __name__ == "__main__": main_loop()
+                    # (2) 미보유 중: 매수 평가
+                    is_buy, _, _ = quant.calc_buy_signal(strat, cfg, cp, cp*0.9, cp*0.8, cp*0.7, True) # 임시 지표
+                    if is_buy:
+                        rearm = bool(sig_state.get('rearm_state', 1))
+                        if not rearm: continue # 조건이 한 번 이탈될 때까지 매수 불가
+
+                        prev_ts_str = sig_state.get('last_updated', '')
+                        prev_sig = sig_state.get('current_signal', '')
+                        count = sig_state.get('consecutive_count', 0)
+                        
+                        if prev_sig == "BUY" and prev_ts_str and datetime.datetime.strptime(prev_ts_str, '%Y-%m-%d %H:%M:%S') < current_bar_ts:
+                            count += 1
+                        else: count = 1
+                        db.update_signal_state("KIS", env, acc_fp, portfolio_id, portfolio_id, tk, "REGIME", "BUY", count)
+
+                        if count >= 2:
+                            # 추가 매수 / 신규 매수 한도 및 수량 산출
+                            target_amt = total_eval * cfg.alloc
+                            buy_qty = int((target_amt) // (cp * 1.05))
+                            
+                            if buy_qty > 0:
+                                spec = quant.OrderSpec("", f"SIG_BUY_{tk}_{now_kst.strftime('%H%M')}", "KIS", env, acc_fp, "01", portfolio_id, portfolio_id, "1.0", db.CONTRACT['contract_version'], tk, "", "BUY", "MARKET", buy_qty, 0, cp, "KRX", "GTC", "BOT", "SYSTEM", now_kst.strftime('%H%M'), "Q", "KIS", now_kst.strftime('%H%M'), 300, db.CONTRACT['cost_model_version'], now_kst.strftime('%Y-%m-%d %H:%M:%S'))
+                                if quant.pre_flight_risk_check(spec, snap, ctx)[0]:
+                                    db.safe_add_order_intent(spec)
+                                    db.update_signal_state("KIS", env, acc_fp, portfolio_id, portfolio_id, tk, "REGIME", "NONE", 0)
+                    else:
+                        # 매수 조건 해제 시 Rearm 초기화
+                        db.update_signal_state("KIS", env, acc_fp, portfolio_id, portfolio_id, tk, "REGIME", "NONE", 0)
+
+            time.sleep(30)
+        except Exception as e:
+            logger.error(f"Bot Error: {e}")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    run_bot_loop()

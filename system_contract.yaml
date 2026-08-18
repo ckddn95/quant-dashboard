@@ -1,33 +1,56 @@
-contract_version: "2.0.0"
-cost_model_version: "2.0.0"
+whitepaper_version: "2.1.0"
+contract_version: "2.1.0"
+schema_version: 7
+strategy_version: "1.0.0"
+cost_model_version: "2.1.0"
 
 strategy:
   CORE:
     ma200: true
     buf: 0.015
     sl: -0.15
-    alloc: 0.35
+    alloc: 0.35        # 종목당 한도 35% 유지
     ts_tgt: 0.30
     ts_drp: -0.10
-    cd: 60
+    cd: 60             # KRX 거래일 기준 쿨다운
     min_h: 5
     boost: true
   SATELLITE:
     ma200: true
     buf: 0.010
     sl: -0.12
-    alloc: 0.20
+    alloc: 0.20        # 종목당 한도 20% 유지
     ts_tgt: 0.20
     ts_drp: -0.07
     cd: 30
     min_h: 3
     boost: true
 
-trend_exit:
-  buffer_factor: 0.5
+booster_policy:
+  mode: "ABSOLUTE_ADDITION"
+  value: 0.10          # 강세장 시 전략 계좌 목표 총투자비중 +10%p 확대
 
-simulation_rules:
-  assumed_cost_pct_per_side: 0.0025 # 레거시 비교 모드용
+trend_exit:
+  buffer_factor: 0.5   # 휩쏘 방지용 노이즈 필터 계수
+
+execution_rules:
+  require_two_distinct_1min_bars: true  # 실시간 분봉 2연속 확인 룰
+  quote_freshness_ttl_sec: 15
+  intent_ttl_sec: 300
+  market_buy_reservation_buffer: 1.05   # 시장가 매수 예약금 계산 시 상한가/여유분 버퍼
+
+cost_model:
+  broker_fee_rate: 0.00015     # 증권사 수수료 (0.015%)
+  org_fee_rate: 0.000036       # 유관기관 제비용
+  buy_slippage_rate: 0.001     # 매수 슬리피지 (0.1%)
+  sell_slippage_rate: 0.001    # 매도 슬리피지 (0.1%)
+  legacy_all_in_025_mode: false # True 시 기존 고정 0.25% 편도 적용
+  tax_schedule:                # 연도 및 시장별 법정 매도세율 (농특세 포함)
+    2022: {"KOSPI": 0.0023, "KOSDAQ": 0.0023}
+    2023: {"KOSPI": 0.0020, "KOSDAQ": 0.0020}
+    2024: {"KOSPI": 0.0018, "KOSDAQ": 0.0018}
+    2025: {"KOSPI": 0.0015, "KOSDAQ": 0.0015}
+    2026: {"KOSPI": 0.0020, "KOSDAQ": 0.0020}
 
 allowed_state_transitions:
   INTENT_CREATED: ["CLAIMED", "CANCELED"]
