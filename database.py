@@ -82,6 +82,22 @@ def set_setting(key, value):
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, json.dumps(value)))
         conn.execute("COMMIT")
 
+def get_system_status(broker, env, account_fingerprint, portfolio_id):
+    """워커 및 대시보드 상태 동기화용 핵심 함수"""
+    master_ks = bool(get_setting('master_kill_switch', False))
+    acc_ks_key = f"kill_switch_{broker}_{env}_{account_fingerprint}_{portfolio_id}"
+    acc_ks = bool(get_setting(acc_ks_key, False))
+    acc_at_key = f"auto_trade_{broker}_{env}_{account_fingerprint}_{portfolio_id}"
+    acc_ap_key = f"auto_pilot_{broker}_{env}_{account_fingerprint}_{portfolio_id}"
+    
+    return {
+        "auto_trade": bool(get_setting(acc_at_key, False)),
+        "auto_pilot": bool(get_setting(acc_ap_key, False)),
+        "kill_switch": master_ks or acc_ks,
+        "contract_version": CONTRACT['contract_version'],
+        "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+
 def get_watchlist(broker, env, account_id, portfolio_id, strategy_id):
     with get_connection() as conn: 
         return [{'티커': r['ticker'], '종목명': r['name']} for r in conn.execute("SELECT ticker, name FROM watchlist WHERE broker=? AND environment=? AND account_id=? AND portfolio_id=? AND strategy_id=?", (broker, env, account_id, portfolio_id, strategy_id)).fetchall()]
@@ -134,7 +150,7 @@ def get_locked_cash_and_qty(broker, env, account_id, portfolio_id, ticker=None):
         locked_cash = float(r1['locked_cash']) if r1['locked_cash'] else 0.0
         locked_sell_qty = 0
         if ticker:
-            r2 = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as locked_qty FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND portfolio_id=? AND ticker=? AND side='SELL' AND status IN {open_states}", (broker, env, account_id, portfolio_id, ticker)).fetchone()
+            r2 = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as locked_qty FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND portfolio_id=? AND ticker=? AND side='SELL' AND status IN {open_states}", (broker, env, account_fingerprint, portfolio_id, ticker)).fetchone()
             locked_sell_qty = int(r2['locked_qty']) if r2['locked_qty'] else 0
         return locked_cash, locked_sell_qty
 
@@ -286,3 +302,14 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc
         except Exception:
             conn.execute("ROLLBACK")
             return False
+
+def get_signal_state(broker, env, acc_fp, port_id, strat_id, ticker):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM signal_states WHERE broker=? AND environment=? AND account_fingerprint=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
+                           (broker, env, acc_fp, port_id, strat_id, ticker)).fetchone()
+        return dict(row) if row else None
+
+def update_signal_state(broker, env, acc_fp, port_id, strat_id, ticker, regime_id, signal, count):
+    with get_connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO signal_states (broker, environment, account_fingerprint, portfolio_id, strategy_id, ticker, regime_id, current_signal, consecutive_count, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                     (broker, env, acc_fp, port_id, strat_id, ticker, regime_id, signal, count, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
