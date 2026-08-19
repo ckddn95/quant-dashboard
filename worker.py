@@ -183,6 +183,13 @@ def run_worker_loop():
                     t, _ = kis.get_kis_access_token(app_key, app_sec, is_mock)
                     if t: kis_tokens[token_key] = {'token': t, 'expire': time.time() + 40000}
                     else: continue
+
+                # 🚨 패치 1: 체결 대사 & 취소 처리는 잔고 조회 성공 여부와 무관하게 가장 먼저 실행 (무결성 보장)
+                try:
+                    reconcile_executions(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], env, acc_fp, portfolio_id, is_mock)
+                    process_cancellations(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], env, acc_fp, portfolio_id, is_mock)
+                except Exception as e:
+                    logger.error(f"⚠️ [Worker] 체결 대사/취소 프로세스 에러 (진행 유지): {e}")
                 
                 b_res = kis.fetch_kis_account_balance(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], is_mock)
                 if b_res.state == "SUCCESS_DATA":
@@ -199,9 +206,13 @@ def run_worker_loop():
                             db.set_setting(last_principal_key, current_principal)
                         except Exception as e: logger.error(f"DB Error record_cash_flow: {e}")
                     
+                    # 🚨 패치 2: 주문가능금액 조회 실패 시 continue로 도망가지 않고 0원으로 락다운
                     c_res = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], "", 0, "00", is_mock)
-                    if c_res.state != "SUCCESS_DATA": continue 
-                    raw_cash = c_res.data
+                    if c_res.state == "SUCCESS_DATA": 
+                        raw_cash = float(c_res.data)
+                    else:
+                        logger.warning(f"⚠️ 주문가능금액 조회 실패. 가용 현금을 0으로 제한: {c_res.msg}")
+                        raw_cash = 0.0
                     
                     try: db.record_daily_account_equity("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, total_eval, raw_cash)
                     except Exception as e: logger.error(f"DB Error record_equity: {e}")
@@ -211,11 +222,10 @@ def run_worker_loop():
                     boost_addon = db.CONTRACT.get('booster_policy', {}).get('value', 0.10) if strat_cfg.boost else 0.0
                     max_exposure = total_eval * min(1.0, 0.90 + boost_addon)
                     current_exposure = sum([float(b['prpr']) * int(b['hldg_qty']) for b in bal_h])
-                else: continue
+                else: 
+                    # 잔고 조회가 아예 실패하면 위험 통제(노출도, 손실률 계산)가 불가능하므로 주문 처리를 스킵
+                    continue
                 
-                reconcile_executions(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], env, acc_fp, portfolio_id, is_mock)
-                process_cancellations(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], env, acc_fp, portfolio_id, is_mock)
-
                 try:
                     sys_status = db.get_system_status("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id)
                 except Exception as e:
@@ -233,12 +243,14 @@ def run_worker_loop():
                 
                 db.renew_worker_lease("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, WORKER_ID, lease_tok, 10)
                 
+                # 🚨 패치 3: 특정 주문건 현금 조회 실패 시 무시(continue)하지 않고 0원 처리하여 정상적으로 REJECTED 처리되도록 유도
                 target_price = order['reference_price'] if order['order_kind'] == 'MARKET' else order['limit_price']
-                c_res = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], order['ticker'], target_price, order['order_kind'], is_mock)
-                if c_res.state != "SUCCESS_DATA":
-                    logger.warning(f"주문가능금액 조회 실패 (ID: {order['id']}): {c_res.msg}")
-                    continue
-                actual_cash = c_res.data
+                c_res_order = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], order['ticker'], target_price, order['order_kind'], is_mock)
+                if c_res_order.state != "SUCCESS_DATA":
+                    logger.warning(f"⚠️ 주문건 현금 조회 실패 (ID: {order['id']}) - 0원 처리: {c_res_order.msg}")
+                    actual_cash = 0.0
+                else:
+                    actual_cash = float(c_res_order.data)
                 
                 db.renew_worker_lease("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, WORKER_ID, lease_tok, 10)
                 
