@@ -517,7 +517,6 @@ with tab4:
                 hist_uni = build_historical_universe(start_d, end_d)
                 c_flows = db.get_cash_flows_by_date("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value, start_d, end_d)
                 
-                # 🚨 교정 2: 과거 DB 이력이 없을 경우, '현재 관심종목'을 기준으로 시뮬레이션을 돌리도록 폴백(Fallback) 방어코드 작성
                 if not hist_uni or all(len(v) == 0 for v in hist_uni.values()):
                     wl_df = pd.DataFrame(current_watchlist) if current_watchlist else pd.DataFrame()
                     res_user = quant.run_quant_simulation(wl_df, active_strat, total_cash, start_d, end_d, current_config, is_weekly_scan=False, use_legacy_cost=use_legacy, external_cash_flows=c_flows)
@@ -557,7 +556,15 @@ with tab4:
     if st.button("Test 3 실행 (생존자 편향 통제)", use_container_width=True):
         with st.spinner(f"{test_year}년도 현실성 검증 중..."):
             res_t3 = quant.run_yearly_realistic_backtest(active_strat, total_cash, test_year, current_config)
-            st.error(f"🚨 {res_t3.get('msg')}")
+            
+            if res_t3.get('status') == 'success':
+                st.warning(res_t3.get('msg', '완료'))
+                st.markdown(mts_metric_html(f"Test 3 ({test_year}년) 수익률", f"{res_t3['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                st.dataframe(pd.DataFrame(res_t3['summary_rows']), use_container_width=True, hide_index=True)
+                with st.expander("📝 상세 매매 내역 보기"):
+                    st.dataframe(pd.DataFrame(res_t3['trade_logs']), use_container_width=True)
+            else:
+                st.error(f"🚨 {res_t3.get('msg')}")
 
 with tab5:
     st.markdown("""
