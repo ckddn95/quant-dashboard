@@ -145,7 +145,6 @@ with tab1:
         if not scan_df.empty:
             st.success(f"조건을 만족하는 {len(scan_df)}개 종목을 발견했습니다. 편입할 종목을 선택해주세요.")
             
-            # 🚨 체크박스 기본값을 명시적 선택을 유도하기 위해 모두 해제(False) 상태로 렌더링
             display_df = scan_df.copy()
             if '선택' not in display_df.columns:
                 display_df.insert(0, '선택', False)
@@ -380,7 +379,37 @@ def build_historical_universe(start_date_sim, end_date_sim):
     return hist_uni
 
 with tab4:
-    st.header("🧪 Test 2: AI 자율운용 vs 사용자 개입 vs 실제 계좌 (3중 비교선)")
+    st.header("📊 시뮬레이터 및 백테스트 엔진")
+
+    # 🚨 교정 완료: Test 1 복구
+    st.subheader("🧪 Test 1: 현재 관심종목 그룹 순수 백테스트")
+    st.markdown("현재 `📝 관심종목`에 등록된 종목들을 대상으로 지정한 기간 동안 AI 시그널에 따른 순수 성과를 측정합니다.")
+    t1_c1, t1_c2, t1_c3, t1_c4 = st.columns([2, 2, 2, 2])
+    with t1_c1: t1_start = st.date_input("시작일", datetime.datetime.now(KST).date() - datetime.timedelta(days=180), key="t1_start")
+    with t1_c2: t1_end = st.date_input("종료일", datetime.datetime.now(KST).date(), key="t1_end")
+    with t1_c3: t1_legacy = st.checkbox("고정 0.25% 모드", value=False, key="t1_leg")
+
+    if st.button("Test 1 실행 (관심종목 백테스트)", use_container_width=True):
+        if not current_watchlist:
+            st.warning("관심종목이 비어있습니다. 먼저 종목을 추가해주세요.")
+        elif t1_start >= t1_end:
+            st.warning("종료일은 시작일 이후여야 합니다.")
+        else:
+            with st.spinner("AI 백테스트 분석 중..."):
+                wl_df = pd.DataFrame(current_watchlist)
+                res_t1 = quant.run_quant_simulation(wl_df, active_strat, total_cash, t1_start, t1_end, current_config, is_weekly_scan=False, use_legacy_cost=t1_legacy)
+                
+                if res_t1.get('status') == 'success':
+                    st.markdown(mts_metric_html("Test 1 TWR", f"{res_t1['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res_t1['summary_rows']), use_container_width=True)
+                    with st.expander("매매 내역 보기"):
+                        st.dataframe(pd.DataFrame(res_t1['trade_logs']), use_container_width=True)
+                else:
+                    st.error(res_t1.get('msg', '오류 발생'))
+
+    st.divider()
+
+    st.subheader("🧪 Test 2: AI 자율운용 vs 사용자 개입 vs 실제 계좌 (3중 비교선)")
     t4_c1, t4_c2, t4_c3, t4_c4 = st.columns([2, 2, 2, 3])
     with t4_c1: start_d = st.date_input("시작일", datetime.datetime.now(KST).date() - datetime.timedelta(days=365), key="t4_start")
     with t4_c2: end_d = st.date_input("종료일", datetime.datetime.now(KST).date(), key="t4_end")
@@ -419,6 +448,19 @@ with tab4:
             with cc3:
                 st.markdown("<h4 style='color:#10b981;'>🏦 3. 실제 계좌 원장</h4>", unsafe_allow_html=True)
                 st.markdown(mts_metric_html("실제 누적 수익률", f"{actual_ret_pct:+.2f}%"), unsafe_allow_html=True)
+
+    st.divider()
+
+    # 🚨 교정 완료: Test 3 복구
+    st.subheader("🧪 Test 3: 과거 연도별 현실성 검증 (Point-in-Time)")
+    st.markdown("과거 특정 연도의 KOSPI/KOSDAQ 실제 구성종목(상장폐지 포함)을 기준으로 생존자 편향(Survivor Bias)이 통제된 환경에서 테스트합니다.")
+    t3_c1, t3_c2 = st.columns([2, 8])
+    with t3_c1: test_year = st.selectbox("테스트 대상 연도", [2022, 2023, 2024, 2025])
+    
+    if st.button("Test 3 실행 (생존자 편향 통제)", use_container_width=True):
+        with st.spinner(f"{test_year}년도 현실성 검증 중..."):
+            res_t3 = quant.run_yearly_realistic_backtest(active_strat, total_cash, test_year, current_config)
+            st.error(f"🚨 {res_t3.get('msg')}")
 
 with tab5:
     st.markdown("""
