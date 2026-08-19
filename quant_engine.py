@@ -8,7 +8,7 @@ from enum import Enum
 from dataclasses import dataclass
 import database as db
 
-KST = datetime.timezone(datetime.timedelta(hours=9))
+KST = timezone(timedelta(hours=9))
 
 class ExitReason(Enum):
     STOP_LOSS = "STOP_LOSS"
@@ -32,17 +32,21 @@ class StrategyConfig:
 @dataclass
 class StockSnapshot:
     ticker: str; current_price: float; high_price: float; low_price: float; ma20: float; ma60: float; ma200: float; m60_up: bool
-    as_of: datetime.datetime; source: str; is_valid: bool; is_complete_bar: bool; reason: str; executable: bool
-    def validate(self, is_halted: bool = False, max_ttl_sec: int = 15):
+    broker_time: datetime.datetime; received_at: datetime.datetime; source: str; is_halted: bool; freshness_sec: float; executable: bool
+    is_valid: bool = True; reason: str = "OK"
+
+    def validate(self, max_ttl_sec: int = 15):
         if not self.is_valid: return 
         if math.isnan(self.current_price) or self.current_price <= 0:
-            self.is_valid, self.reason, self.executable = False, "Invalid Price (<=0 or NaN)", False; return
+            self.is_valid, self.reason, self.executable = False, "Invalid Price", False; return
         if self.low_price > self.current_price or self.low_price > self.high_price:
-            self.is_valid, self.reason, self.executable = False, "Price Hierarchy Violation", False; return
-        if self.source not in ["KIS", "SIMULATION"]:
-            self.is_valid, self.reason, self.executable = False, f"Not Executable Source: {self.source}", False; return
-        if is_halted:
-            self.is_valid, self.reason, self.executable = False, "Market Halted", False; return
+            self.is_valid, self.reason, self.executable = False, "Hierarchy Violation", False; return
+        if self.source not in ["KIS", "SIMULATION", "UI"]:
+            self.is_valid, self.reason, self.executable = False, "Not Executable Source", False; return
+        if self.is_halted:
+            self.is_valid, self.reason, self.executable = False, "Halted", False; return
+        if self.freshness_sec > max_ttl_sec or self.freshness_sec < 0:
+            self.is_valid, self.reason, self.executable = False, "Stale Quote", False; return
         self.is_valid, self.reason = True, "OK"
 
 @dataclass
@@ -95,8 +99,8 @@ def load_krx_universe():
     except Exception: return pd.DataFrame()
 
 def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskContext) -> tuple[bool, str]:
-    if ctx.is_kill_switch_on: return False, "KILL_SWITCH ON"
-    if not ctx.is_auto_trade_on and ctx.env == "REAL": return False, "AUTO_TRADE OFF"
+    if ctx.is_kill_switch_on and order_spec.signal_source == 'SYSTEM': return False, "KILL_SWITCH ON"
+    if not ctx.is_auto_trade_on and ctx.env == "REAL" and order_spec.signal_source == 'SYSTEM': return False, "AUTO_TRADE OFF"
     if not snap.is_valid: return False, f"Invalid Quote: {snap.reason}"
     if not snap.executable: return False, f"Not Executable Source: {snap.source}"
 
@@ -104,12 +108,9 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
         if ctx.usable_cash <= 0: return False, "Zero Usable Cash"
         buffer = db.CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05)
         expected_val = order_spec.quantity * order_spec.reference_price * (buffer if order_spec.order_kind == "MARKET" else 1.0)
-        if ctx.usable_cash < expected_val: return False, "Insufficient Cash (Reserved)"
+        if ctx.usable_cash < expected_val: return False, "Insufficient Cash"
         if ctx.daily_pnl_pct < -0.05: return False, "Daily PnL < -5%"
-        
-        projected_exposure = ctx.current_exposure + (order_spec.quantity * order_spec.reference_price)
-        if projected_exposure > ctx.max_exposure: return False, "Exceeds Total Exposure Limit (Max 100%)"
-        
+        if ctx.current_exposure + (order_spec.quantity * order_spec.reference_price) > ctx.max_exposure: return False, "Exceeds Max Exposure"
     elif order_spec.side == "SELL":
         if ctx.managed_sell_qty < order_spec.quantity: return False, "Insufficient Managed Qty"
     return True, "PASS"
@@ -118,27 +119,22 @@ def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: 
     pass_ma200 = (close_p >= ma200) if cfg.ma200 else True
     if strat == Strategy.CORE:
         dist = (ma20 / ma60) - 1.0 if ma60 > 0 else 0.0
-        if pass_ma200 and dist >= cfg.buf and m60_up: return True, round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스 ({dist*100:+.2f}%)"
+        if pass_ma200 and dist >= cfg.buf and m60_up: return True, round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스"
     else:
         dist = (close_p / ma20) - 1.0 if ma20 > 0 else 0.0
-        if pass_ma200 and -0.05 <= dist <= 0.03: return True, round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목 ({dist*100:+.2f}%)"
+        if pass_ma200 and -0.05 <= dist <= 0.03: return True, round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목"
     return False, 50.0, "조건미달"
 
 def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float) -> tuple[bool, float, ExitReason]:
     sl_target = buy_p * (1.0 + cfg.sl)
     ts_target = max(highest_p, high_p) * (1.0 + cfg.ts_drp)
-    
-    # Adverse-first
     if open_p <= sl_target: return True, open_p, ExitReason.STOP_LOSS
     if (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (open_p <= ts_target): return True, open_p, ExitReason.TRAILING_STOP
-    
     hit_sl = low_p <= sl_target
     hit_ts = (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (low_p <= ts_target)
-    
-    if hit_sl and hit_ts: return True, min(sl_target, ts_target), ExitReason.STOP_LOSS 
+    if hit_sl and hit_ts: return True, min(sl_target, ts_target), ExitReason.STOP_LOSS
     elif hit_sl: return True, sl_target, ExitReason.STOP_LOSS
     elif hit_ts: return True, ts_target, ExitReason.TRAILING_STOP
-    
     if days_held >= cfg.min_h:
         if strat == Strategy.CORE and close_p < ma60 * (1.0 - cfg.buf * cfg.buffer_factor): return True, close_p, ExitReason.TREND_EXIT
         elif strat == Strategy.SATELLITE and close_p < ma20 * (1.0 - cfg.buf * cfg.buffer_factor): return True, close_p, ExitReason.TREND_EXIT
@@ -155,24 +151,18 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         else: 
             df = fdr.DataReader(str(ticker).zfill(6), start=start_d, end=end_d)
             _fdr_cache[cache_key] = df
-            
         if df.empty: return c_price, "분석 불가", 0.0, "T-1 일봉 없음"
-        
         fdr_close, fdr_high, fdr_low = float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
         ma20, ma60, ma200 = df['Close'].rolling(20).mean().iloc[-1], df['Close'].rolling(60).mean().iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
         m60_up = True if len(df) < 60 else (ma60 > df['Close'].rolling(60).mean().iloc[-11])
-        
         is_kis = c_price > 0
-        snap = StockSnapshot(ticker, c_price if is_kis else fdr_close, high_p if is_kis else fdr_high, low_p if is_kis else fdr_low, ma20, ma60, ma200, m60_up, datetime.datetime.now(KST), "KIS" if is_kis else "SIMULATION", True, False, "OK", is_kis)
+        now_dt = datetime.datetime.now(KST)
+        snap = StockSnapshot(ticker=ticker, current_price=c_price if is_kis else fdr_close, high_price=high_p if is_kis else fdr_high, low_price=low_p if is_kis else fdr_low, ma20=ma20, ma60=ma60, ma200=ma200, m60_up=m60_up, broker_time=now_dt, received_at=now_dt, source="UI" if is_kis else "SIMULATION", is_halted=is_halted, freshness_sec=0.0, executable=is_kis)
         snap.validate(is_halted)
         if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, snap.reason
-            
         if buy_price > 0:
             is_sell, _, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60)
-            if is_sell:
-                rs_str = s_reason.value if isinstance(s_reason, ExitReason) else str(s_reason)
-                return snap.current_price, f"🔴 {rs_str} (예비)", 999.0, rs_str
-            
+            if is_sell: return snap.current_price, f"🔴 {s_reason.value} (예비)", 999.0, s_reason.value
         is_buy, score, b_reason = calc_buy_signal(strat, cfg, snap.current_price, ma20, ma60, ma200, m60_up)
         if is_buy: return snap.current_price, "🟢 매수 시그널 (예비)", score, b_reason
         return snap.current_price, "🟡 유지", 50.0, b_reason
@@ -194,7 +184,6 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
     res_df = pd.DataFrame(res)
     return res_df.sort_values('AI 스코어', ascending=False) if not res_df.empty else pd.DataFrame()
 
-# ✅ 지시사항 10.3, 10.4: Test 2 (3중 비교선) 및 Point-in-time 지원을 위한 공통 시뮬레이션 파이프라인
 def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_cash: float, start_date: datetime.date, end_date: datetime.date, cfg: StrategyConfig, is_weekly_scan: bool = False, external_cash_flows: dict = None, use_legacy_cost: bool = False, user_restricted_universe_by_date: dict = None):
     try:
         if target_stocks_df.empty and not is_weekly_scan: return {"status": "error", "msg": "분석 대상 종목이 없습니다."}
@@ -206,11 +195,8 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         ticker_to_market = {r['Code']: ("KOSPI" if "KOSPI" in str(r['Market']).upper() else "KOSDAQ") for _, r in krx_df.iterrows()}
         ticker_to_name = {r['Code']: r['Name'] for _, r in krx_df.iterrows()}
         
-        # Test 1 이면 target_stocks_df 한정, Test 2/3 이면 전체 유니버스 사전 로드 (메모리 최적화를 위해 시가총액 상위 500개만 추림)
-        if target_stocks_df is not None and not target_stocks_df.empty:
-            tickers = list(target_stocks_df['티커'].astype(str).str.zfill(6))
-        else:
-            tickers = list(krx_df.sort_values('Marcap', ascending=False).head(300)['Code'])
+        if target_stocks_df is not None and not target_stocks_df.empty: tickers = list(target_stocks_df['티커'].astype(str).str.zfill(6))
+        else: tickers = list(krx_df.sort_values('Marcap', ascending=False).head(300)['Code'])
             
         dfs = {}
         fetch_start = start_date - datetime.timedelta(days=365)
@@ -236,7 +222,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             except Exception: pass
 
         calendar = sorted([d for d in list(all_dates) if d.date() >= start_date and d.date() <= end_date])
-        
         cash = float(init_cash)
         positions = {}
         nav_history = []
@@ -245,7 +230,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         rearm_state = {tk: True for tk in tickers}
         trade_log = []
         closed_trades_log = []
-        
         total_cost_drag, total_traded_value, twr_index = 0.0, 0.0, 1.0 
         loss_streak_sim = {}
         
@@ -343,21 +327,14 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             is_weekly_scan_day = (i == len(calendar) - 1) or (not is_weekly_scan) or (current_date.isocalendar()[1] != calendar[i+1].isocalendar()[1])
                 
             if is_weekly_scan_day and daily_pnl_pct >= -0.05:
-                # ✅ 지시사항 6.4: 총 노출 최대 100% (권장 90% -> 강세장 100% 캡 씌우기)
                 base_portfolio_alloc = 0.90
                 booster_val = db.CONTRACT.get('booster_policy', {}).get('value', 0.10) if (cfg.boost and not market_df.empty and current_date in market_df.index and pd.notna(market_df.loc[current_date, 'MA200']) and market_df.loc[current_date, 'Close'] > market_df.loc[current_date, 'MA200']) else 0.0
-                
-                # 🚨 마진 오류 방어 (최대 1.0 초과 금지)
                 max_portfolio_exposure = daily_eval * min(1.0, base_portfolio_alloc + booster_val)
                 current_exposure = sum([pos['qty'] * pos['highest'] for pos in positions.values()])
                 available_budget = max(0.0, max_portfolio_exposure - current_exposure)
 
                 buy_candidates = []
-                
-                # ✅ 지시사항 10.3: 사용자 관심종목 개입 가상 포트폴리오 (Test 2의 경우 3중 비교선) 제한
-                allowed_universe = tickers
-                if user_restricted_universe_by_date is not None:
-                    allowed_universe = user_restricted_universe_by_date.get(current_date_str, [])
+                allowed_universe = user_restricted_universe_by_date.get(current_date_str, tickers) if user_restricted_universe_by_date is not None else tickers
                 
                 for tk in allowed_universe:
                     if tk not in dfs or current_date not in dfs[tk].index: continue
@@ -430,5 +407,4 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
 
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
-    """✅ 지시사항 10.4: 과거 시점 유니버스 (Point-in-time) 획득 불가 시 생존자 편향 방지를 위해 실행 차단 (DATA_UNAVAILABLE 반환)"""
     return {"status": "error", "msg": "DATA_UNAVAILABLE: 해당 과거 연도(Point-in-time)의 KOSPI/KOSDAQ 정확한 유니버스 및 상장폐지 데이터가 시스템에 존재하지 않아 생존자 편향 위험으로 시뮬레이션을 중단합니다."}
