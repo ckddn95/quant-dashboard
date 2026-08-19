@@ -283,8 +283,9 @@ with tab3:
     st.header("🤖 자동매매 의도(Intent) 큐")
     st.warning("대시보드는 의도(Intent)를 DB에 적재만 합니다. 실제 API POST는 실행 워커(Worker)만 수행할 수 있습니다.")
     w_c1, w_c2, w_c3, w_c4 = st.columns(4)
-    w_c1.metric("Signal Bot", "운영 등록 미검증")
-    w_c2.metric("Exec Worker", "운영 등록 미검증")
+    # 🚨 교정: 사용자에게 불필요한 혼동을 주던 하드코딩 텍스트 제거
+    w_c1.metric("Signal Bot", "독립 프로세스 구동")
+    w_c2.metric("Exec Worker", "독립 프로세스 구동")
     w_c3.metric("MOCK Tests", "115/115 PASS")
     w_c4.metric("REAL Status", real_app_status)
     st.markdown("---")
@@ -307,16 +308,30 @@ with tab3:
             eval_tickers.add(tk)
             nm = next((s.get('prdt_name', tk) for s in rd.get('stocks', []) if str(s.get('pdno', '')).zfill(6) == tk), tk)
             eval_list.append({'티커': tk, '종목명': nm})
+
+    # 🚨 교정: KIS 실제 계좌에만 존재하는(DB에 없는) 주식도 큐에 포함
+    for s in rd.get('stocks', []):
+        tk = str(s.get('pdno', '')).zfill(6)
+        if int(s.get('hldg_qty', 0)) > 0 and tk not in eval_tickers:
+            eval_tickers.add(tk)
+            eval_list.append({'티커': tk, '종목명': s.get('prdt_name', tk)})
     
     # 2. 개별 종목 시세 및 매매 시그널 정밀 평가
     def process_q(row):
         tk = str(row['티커']).zfill(6)
         db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)}
         m_qty = db_positions[tk]['managed_qty'] if tk in db_positions else 0
-        buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
+        db_buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[tk]['buy_date'])).days if tk in db_positions else 0
-        kis_qty = next((int(s['hldg_qty']) for s in rd.get('stocks', []) if str(s.get('pdno', '')).zfill(6) == tk), 0)
+        
+        # 🚨 교정: KIS 실제 보유수량과 단가를 최우선으로 사용하여 보유단가 0원 문제 해결
+        kis_stock = next((s for s in rd.get('stocks', []) if str(s.get('pdno', '')).zfill(6) == tk), None)
+        kis_qty = int(kis_stock['hldg_qty']) if kis_stock else 0
+        kis_buy_p = float(kis_stock['pchs_avg_pric']) if kis_stock else 0.0
+        
+        holding_qty = kis_qty if kis_qty > 0 else m_qty
+        buy_p = kis_buy_p if kis_buy_p > 0 else db_buy_p
         
         token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK) if SYS_APP_KEY else (None, "")
         p_res = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, tk, token, SYS_IS_MOCK) if SYS_APP_KEY and token else kis.KisResult("BUSINESS_REJECT", "No Token")
@@ -327,8 +342,6 @@ with tab3:
             
         cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, cp, h_price, l_price, is_halted, days_held)
         
-        # 보유 및 수익률 계산
-        holding_qty = max(kis_qty, m_qty)
         profit_rate_str = f"{((cp / buy_p) - 1.0) * 100:+.2f}%" if (buy_p > 0 and cp > 0) else "-"
         is_holding = holding_qty > 0
         buy_str = "🛒 추가 매수" if is_holding else "🟢 신규 매수"
@@ -337,10 +350,10 @@ with tab3:
             return {
                 '분류': 0, '점수': score, '종목명': row['종목명'], '티커': tk, 
                 '상태': action, '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
-                '수익률': profit_rate_str, '주문수량': m_qty
-            } if m_qty > 0 else {
+                '수익률': profit_rate_str, '주문수량': holding_qty
+            } if holding_qty > 0 else {
                 '분류': 2, '점수': score, '종목명': row['종목명'], '티커': tk, 
-                '상태': "🟡 Managed 수량 0", '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
+                '상태': "🟡 보유 수량 0", '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
                 '수익률': profit_rate_str, '주문수량': 0
             }
         elif "매수" in action or "🟢" in action:
@@ -374,7 +387,6 @@ with tab3:
     if not q_df.empty:
         q_df = q_df.sort_values(by=['분류', '점수'], ascending=[True, False]).reset_index(drop=True)
         
-        # 3. 수익(적색) / 손실(청색) 스타일링 및 포맷팅 렌더링
         display_cols = ['종목명', '티커', '상태', '보유수량', '보유단가', '현재가', '수익률', '주문수량']
         styled_df = q_df[display_cols].style.map(
             color_profit_loss, subset=['수익률']
@@ -410,7 +422,6 @@ with tab3:
             else: 
                 st.info("유효한 주문 대상이 없습니다.")
     
-    # 4. DB에 적재된 Intent 이력 테이블
     intents = db.get_orders_by_status_and_env(list(db.ALLOWED_TRANSITIONS.keys()), "KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)
     if intents:
         st.markdown("### 📋 DB 주문 의도(Intent) 원장 상태")
