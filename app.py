@@ -138,6 +138,35 @@ with tab1:
             with st.spinner("AI 스캔 중..."):
                 st.session_state[scan_res_key] = quant.run_scanner_safe(active_strat, current_config)
                 st.session_state[show_scan_key] = True
+
+    # 🚨 교정 완료: 저장된 스캔 결과를 화면에 렌더링하고 DB에 일괄 추가하는 로직 반영
+    if st.session_state.get(show_scan_key, False):
+        scan_df = st.session_state.get(scan_res_key, pd.DataFrame())
+        st.markdown("### 🎯 AI 유니버스 스캔 결과")
+        if not scan_df.empty:
+            st.success(f"조건을 만족하는 {len(scan_df)}개 종목을 발견했습니다.")
+            st.dataframe(scan_df, use_container_width=True)
+            col_btn1, col_btn2 = st.columns([1, 1])
+            with col_btn1:
+                if st.button("📥 스캔 종목 일괄 편입", type="primary", use_container_width=True):
+                    new_items = [{'티커': str(r['티커']).zfill(6), '종목명': r['종목명']} for _, r in scan_df.iterrows()]
+                    current_watchlist = db.get_watchlist("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)
+                    curr_tk = [w['티커'] for w in current_watchlist]
+                    filtered_new = [item for item in new_items if item['티커'] not in curr_tk]
+                    try:
+                        db.clear_and_update_watchlist("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value, current_watchlist + filtered_new, source="UI", provenance="MANUAL_SCAN_ADD")
+                        st.session_state[show_scan_key] = False
+                        st.rerun()
+                    except Exception as e: st.error(f"DB Error: {e}")
+            with col_btn2:
+                if st.button("✖️ 닫기", use_container_width=True):
+                    st.session_state[show_scan_key] = False
+                    st.rerun()
+        else:
+            st.info("조건을 만족하는 종목이 없습니다.")
+            if st.button("✖️ 닫기"):
+                st.session_state[show_scan_key] = False
+                st.rerun()
     
     with st.form("manual_search_form"):
         search_query = st.text_input("종목명/코드 입력", value=st.session_state.get(search_q_key, ''))
@@ -304,7 +333,6 @@ with tab3:
                 try:
                     tk, side = r['티커'], "BUY" if "매수" in r['상태'] or "🛒" in r['상태'] else "SELL"
                     now_str = datetime.datetime.now(KST).strftime('%H%M%S')
-                    # 🚨 지시사항 반영: UI 수동 제출 시 signal_source="UI_MANUAL" 마킹으로 Kill Switch 면제 대상이 됨
                     spec = quant.OrderSpec("", f"UI_{SCOPE_KEY}_{tk}_{side}_{now_str}", "KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value, db.CONTRACT['strategy_version'], db.CONTRACT['contract_version'], tk, r['종목명'], side, "MARKET", r['수량'], 0, r['기준가'], "KRX", "GTC", "UI_MANUAL", "UI_MANUAL", now_str, "Q", "KIS", datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'), db.CONTRACT['execution_rules']['intent_ttl_sec'], db.CONTRACT['cost_model_version'], datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'))
                     if db.safe_add_order_intent(spec)[0]: success_count += 1
                 except Exception as e: st.error(f"DB Error on {r['종목명']}: {e}")
