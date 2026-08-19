@@ -720,11 +720,24 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
             if not lease or lease['expires_at'] < now_str or lease['token'] != order['fencing_token']:
                 return reject('QUARANTINED', 'INVALID_LEASE', 'Invalid fencing token or lease expired')
 
+            # 🚨 1. 절대 방어선: 킬스위치는 출처(SYSTEM, UI_MANUAL) 불문하고 무조건 최우선 검사 (if문 밖으로 뺌)
+            m_ks = conn.execute("SELECT value FROM settings WHERE key='master_kill_switch'").fetchone()
+            a_ks = conn.execute("SELECT value FROM settings WHERE key=?", (f"kill_switch_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
+            if (m_ks and json.loads(m_ks['value'])) or (a_ks and json.loads(a_ks['value'])):
+                return reject('RISK_REJECTED', 'KILL_SWITCH', 'Kill Switch ON')
+
+            # 🚨 2. 절대 방어선: REAL 계좌 주문 하드블록도 무조건 최우선 검사
+            if env == "REAL":
+                real_status = CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
+                if real_status != 'APPROVED':
+                    return reject('RISK_REJECTED', 'POST_BLOCKED', 'REAL POST Strictly Blocked')
+
+            # -------------------------------------------------------------
+            
+            # 🟡 3. 선택적 방어선: SYSTEM(봇) 주문일 때만 추가 검사 (Auto Trade 등)
             if order['signal_source'] == 'SYSTEM':
-                m_ks = conn.execute("SELECT value FROM settings WHERE key='master_kill_switch'").fetchone()
-                a_ks = conn.execute("SELECT value FROM settings WHERE key=?", (f"kill_switch_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
-                if (m_ks and json.loads(m_ks['value'])) or (a_ks and json.loads(a_ks['value'])):
-                    return reject('RISK_REJECTED', 'KILL_SWITCH', 'Kill Switch ON')
+                # 이곳에는 기존처럼 봇에게만 적용할 제약사항(예: auto_trade=False 이면 거절 등)이 위치합니다.
+                pass # (기존에 킬스위치 외에 다른 SYSTEM 전용 검사가 있었다면 이 아래에 유지)
 
                 ap = conn.execute("SELECT value FROM settings WHERE key=?", (f"auto_pilot_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
                 if not ap or not json.loads(ap['value']):
