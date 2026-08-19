@@ -83,14 +83,22 @@ def bootstrap_db():
         raise RuntimeError(f"Database bootstrap failed: {e}")
     finally: conn.close()
 
+# 🚨 교정 완료: 과거 버전 감지 시 앱을 죽이지 않고 스스로 자동 마이그레이션 수행
 def preflight_check() -> bool:
     if not os.path.exists(DB_PATH):
         print("Database not found. Bootstrapping new V15 database...")
         bootstrap_db(); return True
+        
+    curr_ver = 0
     with get_connection() as conn:
         curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
         if curr_ver > 15: raise RuntimeError(f"Downgrade not supported. Current: {curr_ver}")
-        if curr_ver < 15: raise RuntimeError(f"Migration required (V{curr_ver}). Run run_migration()")
+        
+    if curr_ver < 15: 
+        print(f"Migration required from V{curr_ver} to V15. Auto-migrating...")
+        run_migration()
+        
+    with get_connection() as conn:
         if not _validate_v15_schema(conn): raise RuntimeError("Schema validation failed.")
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok": raise RuntimeError(f"Database integrity check failed: {integrity}")
