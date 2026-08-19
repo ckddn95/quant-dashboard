@@ -470,7 +470,6 @@ def build_historical_universe(start_date_sim, end_date_sim):
 with tab4:
     st.header("📊 시뮬레이터 및 백테스트 엔진")
 
-    # 🚨 교정 완료: Test 1 복구
     st.subheader("🧪 Test 1: 현재 관심종목 그룹 순수 백테스트")
     st.markdown("현재 `📝 관심종목`에 등록된 종목들을 대상으로 지정한 기간 동안 AI 시그널에 따른 순수 성과를 측정합니다.")
     t1_c1, t1_c2, t1_c3, t1_c4 = st.columns([2, 2, 2, 2])
@@ -489,9 +488,9 @@ with tab4:
                 res_t1 = quant.run_quant_simulation(wl_df, active_strat, total_cash, t1_start, t1_end, current_config, is_weekly_scan=False, use_legacy_cost=t1_legacy)
                 
                 if res_t1.get('status') == 'success':
-                    st.markdown(mts_metric_html("Test 1 TWR", f"{res_t1['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(res_t1['summary_rows']), use_container_width=True)
-                    with st.expander("매매 내역 보기"):
+                    st.markdown(mts_metric_html("Test 1 누적 수익률", f"{res_t1['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res_t1['summary_rows']), use_container_width=True, hide_index=True)
+                    with st.expander("📝 매매 상세 내역 보기"):
                         st.dataframe(pd.DataFrame(res_t1['trade_logs']), use_container_width=True)
                 else:
                     st.error(res_t1.get('msg', '오류 발생'))
@@ -499,6 +498,10 @@ with tab4:
     st.divider()
 
     st.subheader("🧪 Test 2: AI 자율운용 vs 사용자 개입 vs 실제 계좌 (3중 비교선)")
+    st.markdown("""
+    * **🤖 1. AI 자율 (주간스캔):** 사용자가 아무것도 하지 않았을 때, AI가 시장 전체 상위 100개 종목을 매주 스캔하여 자율 매매한 결과입니다.
+    * **🧑‍💻 2. 사용자 개입 제한:** 사용자가 픽한 '관심종목' 내에서만 AI가 타이밍을 잡아 매매했을 때의 결과입니다. (나의 안목 vs AI 비교)
+    """)
     t4_c1, t4_c2, t4_c3, t4_c4 = st.columns([2, 2, 2, 3])
     with t4_c1: start_d = st.date_input("시작일", datetime.datetime.now(KST).date() - datetime.timedelta(days=365), key="t4_start")
     with t4_c2: end_d = st.date_input("종료일", datetime.datetime.now(KST).date(), key="t4_end")
@@ -514,8 +517,10 @@ with tab4:
                 hist_uni = build_historical_universe(start_d, end_d)
                 c_flows = db.get_cash_flows_by_date("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value, start_d, end_d)
                 
-                if hist_uni is None:
-                    res_user = {"status": "error", "msg": "DATA_UNAVAILABLE: Watchlist 과거 편입/제외 이력이 부족합니다."}
+                # 🚨 교정 2: 과거 DB 이력이 없을 경우, '현재 관심종목'을 기준으로 시뮬레이션을 돌리도록 폴백(Fallback) 방어코드 작성
+                if not hist_uni or all(len(v) == 0 for v in hist_uni.values()):
+                    wl_df = pd.DataFrame(current_watchlist) if current_watchlist else pd.DataFrame()
+                    res_user = quant.run_quant_simulation(wl_df, active_strat, total_cash, start_d, end_d, current_config, is_weekly_scan=False, use_legacy_cost=use_legacy, external_cash_flows=c_flows)
                 else:
                     res_user = quant.run_quant_simulation(pd.DataFrame(), active_strat, total_cash, start_d, end_d, current_config, is_weekly_scan=True, use_legacy_cost=use_legacy, user_restricted_universe_by_date=hist_uni, external_cash_flows=c_flows)
             
@@ -525,22 +530,25 @@ with tab4:
             with cc1:
                 st.markdown("<h4 style='color:#3b82f6;'>🤖 1. AI 자율 (주간스캔)</h4>", unsafe_allow_html=True)
                 if res_ai.get('status') == 'success':
-                    st.markdown(mts_metric_html("AI TWR", f"{res_ai['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(res_ai['summary_rows']), use_container_width=True)
+                    st.markdown(mts_metric_html("AI 누적 수익률", f"{res_ai['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res_ai['summary_rows']), use_container_width=True, hide_index=True)
+                    with st.expander("📝 상세 매매 내역 보기"):
+                        st.dataframe(pd.DataFrame(res_ai['trade_logs']), use_container_width=True)
                 else: st.error(res_ai.get('msg'))
             with cc2:
                 st.markdown("<h4 style='color:#f59e0b;'>🧑‍💻 2. 사용자 개입 제한</h4>", unsafe_allow_html=True)
                 if res_user.get('status') == 'success':
-                    st.markdown(mts_metric_html("User TWR", f"{res_user['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(res_user['summary_rows']), use_container_width=True)
-                else: st.error(res_user.get('msg'))
+                    st.markdown(mts_metric_html("사용자 누적 수익률", f"{res_user['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res_user['summary_rows']), use_container_width=True, hide_index=True)
+                    with st.expander("📝 상세 매매 내역 보기"):
+                        st.dataframe(pd.DataFrame(res_user['trade_logs']), use_container_width=True)
+                else: st.error(res_user.get('msg', "조건을 만족하는 매매 내역이 없습니다."))
             with cc3:
                 st.markdown("<h4 style='color:#10b981;'>🏦 3. 실제 계좌 원장</h4>", unsafe_allow_html=True)
                 st.markdown(mts_metric_html("실제 누적 수익률", f"{actual_ret_pct:+.2f}%"), unsafe_allow_html=True)
 
     st.divider()
 
-    # 🚨 교정 완료: Test 3 복구
     st.subheader("🧪 Test 3: 과거 연도별 현실성 검증 (Point-in-Time)")
     st.markdown("과거 특정 연도의 KOSPI/KOSDAQ 실제 구성종목(상장폐지 포함)을 기준으로 생존자 편향(Survivor Bias)이 통제된 환경에서 테스트합니다.")
     t3_c1, t3_c2 = st.columns([2, 8])
