@@ -196,7 +196,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         ticker_to_market = {r['Code']: ("KOSPI" if "KOSPI" in str(r['Market']).upper() else "KOSDAQ") for _, r in krx_df.iterrows()}
         ticker_to_name = {r['Code']: r['Name'] for _, r in krx_df.iterrows()}
         
-        # 🚨 병목 10배속 최적화: 유니버스 300 -> 100개 축소 및 시장별 분리
         if target_stocks_df is not None and not target_stocks_df.empty: 
             tickers = list(target_stocks_df['티커'].astype(str).str.zfill(6))
         else: 
@@ -210,7 +209,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         fetch_start = start_date - datetime.timedelta(days=365)
         all_dates = set()
         
-        # 🚨 병목 10배속 최적화: 멀티스레드 병렬 다운로드 
         def fetch_data(tk):
             try:
                 df = fdr.DataReader(tk, start=fetch_start, end=end_date)
@@ -231,7 +229,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     dfs[tk] = df
                     all_dates.update(df.index)
         
-        if not dfs: return {"status": "error", "msg": "DATA_UNAVAILABLE: 유효한 1분봉/일봉 데이터가 존재하지 않습니다."}
+        if not dfs: return {"status": "error", "msg": "유효한 주가 데이터가 없습니다."}
         
         market_df = pd.DataFrame()
         if cfg.boost:
@@ -392,7 +390,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         for tk, pos in positions.items():
             last_close = dfs[tk]['Close'].loc[:end_date].dropna().iloc[-1] if tk in dfs else pos['buy_price']
             profit_pct = (last_close / pos['buy_price']) - 1.0 if pos['buy_price'] > 0 else 0
-            closed_trades_log.append({"종목명": ticker_to_name.get(tk, tk), "진입일": pos["entry_date"].strftime('%Y-%m-%d'), "청산일": "-", "보유일수": pos['days'], "진입단가": pos['buy_price'], "청산단가": last_close, "수량": pos['qty'], "손익금": (last_close - pos['buy_price']) * pos['qty'], "수익률": f"{profit_pct*100:+.2f}%", "사유": "보유 중 (MTM 평가)"})
+            closed_trades_log.append({"종목명": ticker_to_name.get(tk, tk), "진입일": pos["entry_date"].strftime('%Y-%m-%d'), "청산일": "-", "보유일수": pos['days'], "진입단가": pos['buy_price'], "청산단가": last_close, "수량": pos['qty'], "손익금": (last_close - pos['buy_price']) * pos['qty'], "수익률": f"{profit_pct*100:+.2f}%", "사유": "보유 중 (현재가 평가)"})
 
         if len(nav_history) < 2: return {"status": "error", "msg": "데이터 부족"}
         
@@ -407,24 +405,23 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         sortino_ratio = (excess_returns.mean() / downside_std * np.sqrt(252)) if downside_std > 0 else 0.0
         cagr = (twr_index) ** (252 / len(nav_df)) - 1 if len(nav_df) > 0 else 0
         mdd = (nav_df['NAV'] / nav_df['NAV'].cummax() - 1).min()
-        calmar_ratio = (cagr / abs(mdd)) if mdd < 0 else 0.0
+        turnover_rate = (total_traded_value / 2.0) / nav_df['NAV'].mean() if nav_df['NAV'].mean() > 0 else 0.0
         win_rate = (sum(1 for p in trade_log if p > 0) / len(trade_log) * 100) if trade_log else 0.0
-        avg_nav = nav_df['NAV'].mean()
-        turnover_rate = (total_traded_value / 2.0) / avg_nav if avg_nav > 0 else 0.0
         
+        # 🚨 교정 1: 무한대/오류값 방어 및 알아듣기 쉬운 우리말 전문용어로 교체
+        disp_sharpe = f"{sharpe_ratio:.2f}" if -100 < sharpe_ratio < 100 else "측정 불가(변동성 낮음)"
+        disp_sortino = f"{sortino_ratio:.2f}" if -100 < sortino_ratio < 100 else "측정 불가(변동성 낮음)"
+
         return {
             "status": "success", "final_asset": final_asset, "final_port_ret": (final_asset / init_cash - 1) * 100, 
-            "metrics": {"CAGR": cagr, "MDD": mdd, "TWR": (twr_index - 1) * 100, "Turnover": turnover_rate * 100, "Cost_Drag": total_cost_drag},
+            "metrics": {"TWR": (twr_index - 1) * 100},
             "trade_logs": closed_trades_log, "nav_history": nav_df,
             "summary_rows": [
-                {"항목": "시간가중수익률 (TWR)", "값": f"{(twr_index - 1) * 100:+.2f} %"},
-                {"항목": "포트폴리오 회전율", "값": f"{turnover_rate * 100:.1f} %"},
-                {"항목": "총 누수 비용 (Drag)", "값": f"{total_cost_drag:,.0f} 원"},
-                {"항목": "승률", "값": f"{win_rate:.1f} % (총 {len(trade_log)}회)"},
-                {"항목": "Sharpe / Sortino", "값": f"{sharpe_ratio:.2f} / {sortino_ratio:.2f}"}
+                {"분석 지표": "누적 수익률 (복리)", "결과값": f"{(twr_index - 1) * 100:+.2f} %"},
+                {"분석 지표": "자금 회전율 (매매 빈도)", "결과값": f"{turnover_rate * 100:.1f} %"},
+                {"분석 지표": "세금/수수료/슬리피지 비용", "결과값": f"{total_cost_drag:,.0f} 원"},
+                {"분석 지표": "매매 승률 (성공 횟수)", "결과값": f"{win_rate:.1f} % (총 {len(trade_log)}회 거래)"},
+                {"분석 지표": "위험 대비 수익성 (샤프/소르티노)", "결과값": f"{disp_sharpe} / {disp_sortino}"}
             ]
         }
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
-
-def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
-    return {"status": "error", "msg": "DATA_UNAVAILABLE: 해당 과거 연도(Point-in-time)의 KOSPI/KOSDAQ 정확한 유니버스 및 상장폐지 데이터가 시스템에 존재하지 않아 생존자 편향 위험으로 시뮬레이션을 중단합니다."}
