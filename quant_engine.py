@@ -396,21 +396,39 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         
         nav_df = pd.DataFrame(nav_history)
         final_asset = nav_df['NAV'].iloc[-1]
-        nav_df['Return'] = nav_df['NAV'].pct_change().fillna(0)
-        rf_daily = 0.03 / 252 
-        excess_returns = nav_df['Return'] - rf_daily
-        sharpe_ratio = (excess_returns.mean() / excess_returns.std() * np.sqrt(252)) if excess_returns.std() > 0 else 0.0
-        downside_returns = excess_returns[excess_returns < 0]
-        downside_std = np.sqrt((downside_returns**2).mean()) if len(downside_returns) > 0 else 0.0
-        sortino_ratio = (excess_returns.mean() / downside_std * np.sqrt(252)) if downside_std > 0 else 0.0
-        cagr = (twr_index) ** (252 / len(nav_df)) - 1 if len(nav_df) > 0 else 0
-        mdd = (nav_df['NAV'] / nav_df['NAV'].cummax() - 1).min()
-        turnover_rate = (total_traded_value / 2.0) / nav_df['NAV'].mean() if nav_df['NAV'].mean() > 0 else 0.0
-        win_rate = (sum(1 for p in trade_log if p > 0) / len(trade_log) * 100) if trade_log else 0.0
         
-        # 🚨 교정 1: 무한대/오류값 방어 및 알아듣기 쉬운 우리말 전문용어로 교체
-        disp_sharpe = f"{sharpe_ratio:.2f}" if -100 < sharpe_ratio < 100 else "측정 불가(변동성 낮음)"
-        disp_sortino = f"{sortino_ratio:.2f}" if -100 < sortino_ratio < 100 else "측정 불가(변동성 낮음)"
+        # 🚨 패치: 거래가 0건일 때 수학적 오류(-15.87)를 원천 차단하는 로직 강화
+        if len(trade_log) == 0 and len(positions) == 0:
+            cagr = 0.0
+            turnover_rate = 0.0
+            win_rate = 0.0
+            disp_sharpe = "거래 내역 없음"
+            disp_sortino = "거래 내역 없음"
+        else:
+            nav_df['Return'] = nav_df['NAV'].pct_change().fillna(0)
+            rf_daily = 0.03 / 252 
+            excess_returns = nav_df['Return'] - rf_daily
+            
+            if excess_returns.std() > 0:
+                sharpe_ratio = (excess_returns.mean() / excess_returns.std() * np.sqrt(252))
+                disp_sharpe = f"{sharpe_ratio:.2f}"
+            else:
+                disp_sharpe = "변동성 없음"
+                
+            downside_returns = excess_returns[excess_returns < 0]
+            if len(downside_returns) > 0:
+                downside_std = np.sqrt((downside_returns**2).mean())
+                if downside_std > 0:
+                    sortino_ratio = (excess_returns.mean() / downside_std * np.sqrt(252))
+                    disp_sortino = f"{sortino_ratio:.2f}"
+                else:
+                    disp_sortino = "변동성 없음"
+            else:
+                disp_sortino = "손실 구간 없음"
+                
+            cagr = (twr_index) ** (252 / len(nav_df)) - 1 if len(nav_df) > 0 else 0
+            turnover_rate = (total_traded_value / 2.0) / nav_df['NAV'].mean() if nav_df['NAV'].mean() > 0 else 0.0
+            win_rate = (sum(1 for p in trade_log if p > 0) / len(trade_log) * 100) if trade_log else 0.0
 
         return {
             "status": "success", "final_asset": final_asset, "final_port_ret": (final_asset / init_cash - 1) * 100, 
@@ -425,19 +443,14 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             ]
         }
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
-        
+
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
-    # 생존자 편향을 감안하고 현재 상장 종목 기준으로 해당 연도 1월 1일 ~ 12월 31일 백테스트를 수행하도록 잠금 해제
     try:
         start_date = datetime.date(year, 1, 1)
         end_date = datetime.date(year, 12, 31)
-        
-        # 기존 run_quant_simulation 시뮬레이터 재활용
         res = run_quant_simulation(pd.DataFrame(), strat, init_cash, start_date, end_date, cfg, is_weekly_scan=True, use_legacy_cost=use_legacy_cost)
-        
         if res.get("status") == "success":
-            res["msg"] = f"⚠️ [생존자 편향 주의] {year}년도 당시 상장폐지되거나 지수에서 편출된 종목은 제외되었습니다. 수익률이 다소 과대평가될 수 있습니다."
-            
+            res["msg"] = f"⚠️ [생존자 편향 주의] {year}년도 상장폐지 종목 미포함으로 수익률이 다소 과대평가될 수 있습니다."
         return res
     except Exception as e:
         return {"status": "error", "msg": f"연도별 테스트 오류: {str(e)}"}
