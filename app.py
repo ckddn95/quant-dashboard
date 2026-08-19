@@ -475,8 +475,10 @@ with tab4:
                 
                 if res_t1.get('status') == 'success':
                     st.markdown(mts_metric_html("Test 1 누적 수익률", f"{res_t1['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    if res_t1['metrics']['TWR'] == 0.0 and len(res_t1['trade_logs']) == 0:
+                        st.info("💡 지정한 기간 동안 관심종목 내에서는 AI가 판단한 매수 조건(장기 추세 돌파 등)이 한 번도 발생하지 않았습니다. (거래 0건)")
                     st.dataframe(pd.DataFrame(res_t1['summary_rows']), use_container_width=True, hide_index=True)
-                    with st.expander("📝 매매 상세 내역 보기"):
+                    with st.expander("📝 상세 매매 내역 보기"):
                         st.dataframe(style_trade_log(res_t1['trade_logs']), use_container_width=True, hide_index=True)
                 else:
                     st.error(res_t1.get('msg', '오류 발생'))
@@ -524,6 +526,9 @@ with tab4:
                 st.markdown("<h4 style='color:#f59e0b;'>🧑‍💻 2. 사용자 개입 제한</h4>", unsafe_allow_html=True)
                 if res_user.get('status') == 'success':
                     st.markdown(mts_metric_html("사용자 누적 수익률", f"{res_user['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    # 🚨 패치: 거래가 0건일 때 UI에 안내 메시지 표출
+                    if res_user['metrics']['TWR'] == 0.0 and len(res_user['trade_logs']) == 0:
+                        st.info("💡 지정한 기간 동안 사용자의 관심종목 내에서는 AI가 판단한 매수 조건(골든크로스 등)이 한 번도 발생하지 않았습니다. (거래 0건)")
                     st.dataframe(pd.DataFrame(res_user['summary_rows']), use_container_width=True, hide_index=True)
                     with st.expander("📝 상세 매매 내역 보기"):
                         st.dataframe(style_trade_log(res_user['trade_logs']), use_container_width=True, hide_index=True)
@@ -546,6 +551,8 @@ with tab4:
             if res_t3.get('status') == 'success':
                 st.warning(res_t3.get('msg', '완료'))
                 st.markdown(mts_metric_html(f"Test 3 ({test_year}년) 수익률", f"{res_t3['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                if res_t3['metrics']['TWR'] == 0.0 and len(res_t3['trade_logs']) == 0:
+                    st.info("💡 해당 연도에 매수 조건을 만족하는 종목이 한 번도 발생하지 않았습니다. (거래 0건)")
                 st.dataframe(pd.DataFrame(res_t3['summary_rows']), use_container_width=True, hide_index=True)
                 with st.expander("📝 상세 매매 내역 보기"):
                     st.dataframe(style_trade_log(res_t3['trade_logs']), use_container_width=True, hide_index=True)
