@@ -294,9 +294,13 @@ with tab3:
     locked_cash, _ = db.get_locked_cash_and_qty("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
     
+    # 1. 관심종목 + 보유종목 전체 리스트 취합
     temp_q, eval_list, eval_tickers = [], [], set()
     for w in db.get_watchlist("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value):
-        tk = str(w['티커']).zfill(6); eval_tickers.add(tk); eval_list.append({'티커': tk, '종목명': w['종목명']})
+        tk = str(w['티커']).zfill(6)
+        eval_tickers.add(tk)
+        eval_list.append({'티커': tk, '종목명': w['종목명']})
+        
     for p in db.get_positions("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value):
         tk = str(p['ticker']).zfill(6)
         if tk not in eval_tickers:
@@ -304,6 +308,7 @@ with tab3:
             nm = next((s.get('prdt_name', tk) for s in rd.get('stocks', []) if str(s.get('pdno', '')).zfill(6) == tk), tk)
             eval_list.append({'티커': tk, '종목명': nm})
     
+    # 2. 개별 종목 시세 및 매매 시그널 정밀 평가
     def process_q(row):
         tk = str(row['티커']).zfill(6)
         db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)}
@@ -312,8 +317,8 @@ with tab3:
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[tk]['buy_date'])).days if tk in db_positions else 0
         kis_qty = next((int(s['hldg_qty']) for s in rd.get('stocks', []) if str(s.get('pdno', '')).zfill(6) == tk), 0)
-        token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK) if SYS_APP_KEY else (None, "")
         
+        token, _ = kis.get_kis_access_token(SYS_APP_KEY, SYS_APP_SEC, SYS_IS_MOCK) if SYS_APP_KEY else (None, "")
         p_res = kis.fetch_kis_current_price_ext(SYS_APP_KEY, SYS_APP_SEC, tk, token, SYS_IS_MOCK) if SYS_APP_KEY and token else kis.KisResult("BUSINESS_REJECT", "No Token")
         if p_res.state == "SUCCESS_DATA":
             cp, h_price, l_price, is_halted = p_res.data['price'], p_res.data['high'], p_res.data['low'], p_res.data['is_halted']
@@ -322,61 +327,94 @@ with tab3:
             
         cp, action, score, _ = quant.evaluate_stock_for_ui(tk, active_strat, current_config, buy_p, high_p, cp, h_price, l_price, is_halted, days_held)
         
-        is_holding = kis_qty > 0 or m_qty > 0
-        buy_str = "추가 매수" if is_holding else "신규 매수"
+        # 보유 및 수익률 계산
+        holding_qty = max(kis_qty, m_qty)
+        profit_rate_str = f"{((cp / buy_p) - 1.0) * 100:+.2f}%" if (buy_p > 0 and cp > 0) else "-"
+        is_holding = holding_qty > 0
+        buy_str = "🛒 추가 매수" if is_holding else "🟢 신규 매수"
+        
         if "매도" in action or "🔴" in action:
-            return {'분류': 0, '점수': score, '종목명': row['종목명'], '티커': tk, '상태': action, '기준가': cp, '수량': m_qty} if m_qty > 0 else {'분류': 2, '점수': score, '종목명': row['종목명'], '티커': tk, '상태': f"🟡 Managed 수량 0", '기준가': cp, '수량': 0}
+            return {
+                '분류': 0, '점수': score, '종목명': row['종목명'], '티커': tk, 
+                '상태': action, '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
+                '수익률': profit_rate_str, '주문수량': m_qty
+            } if m_qty > 0 else {
+                '분류': 2, '점수': score, '종목명': row['종목명'], '티커': tk, 
+                '상태': "🟡 Managed 수량 0", '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
+                '수익률': profit_rate_str, '주문수량': 0
+            }
         elif "매수" in action or "🟢" in action:
             c_res = kis.fetch_kis_orderable_cash(SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_ACNT_PRDT, token, tk, cp, "MARKET", SYS_IS_MOCK) if SYS_APP_KEY and token else kis.KisResult("SUCCESS_DATA", "OK", net_usable_cash)
             live_cash = c_res.data if c_res.state == "SUCCESS_DATA" else net_usable_cash
-            allow_amt = min(live_cash, max(0.0, target_buy_amt - (kis_qty * cp)))
+            allow_amt = min(live_cash, max(0.0, target_buy_amt - (holding_qty * cp)))
             add_qty = int(allow_amt // (cp * db.CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05))) if cp > 0 else 0
-            return {'분류': 1, '점수': score, '종목명': row['종목명'], '티커': tk, '상태': f"🛒 {buy_str} (대기)", '기준가': cp, '수량': add_qty} if add_qty > 0 else {'분류': 2, '점수': score, '종목명': row['종목명'], '티커': tk, '상태': "🟡 현금/한도 부족", '기준가': cp, '수량': 0}
-        return {'분류': 2, '점수': score, '종목명': row['종목명'], '티커': tk, '상태': action, '기준가': cp, '수량': 0}
+            
+            return {
+                '분류': 1, '점수': score, '종목명': row['종목명'], '티커': tk, 
+                '상태': f"{buy_str} (대기)", '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
+                '수익률': profit_rate_str, '주문수량': add_qty
+            } if add_qty > 0 else {
+                '분류': 2, '점수': score, '종목명': row['종목명'], '티커': tk, 
+                '상태': "🟡 현금/한도 부족", '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
+                '수익률': profit_rate_str, '주문수량': 0
+            }
+            
+        return {
+            '분류': 2, '점수': score, '종목명': row['종목명'], '티커': tk, 
+            '상태': action, '보유수량': holding_qty, '보유단가': buy_p, '현재가': cp, 
+            '수익률': profit_rate_str, '주문수량': 0
+        }
 
     if eval_list:
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
             for r in ex.map(process_q, eval_list):
                 if r: temp_q.append(r)
+                
     q_df = pd.DataFrame(temp_q)
     if not q_df.empty:
         q_df = q_df.sort_values(by=['분류', '점수'], ascending=[True, False]).reset_index(drop=True)
-        st.dataframe(q_df[['종목명', '상태', '기준가', '수량']].style.format({'기준가': '{:,.0f}', '수량': '{:,}'}), use_container_width=True)
+        
+        # 3. 수익(적색) / 손실(청색) 스타일링 및 포맷팅 렌더링
+        display_cols = ['종목명', '티커', '상태', '보유수량', '보유단가', '현재가', '수익률', '주문수량']
+        styled_df = q_df[display_cols].style.map(
+            color_profit_loss, subset=['수익률']
+        ).format({
+            '보유수량': '{:,}',
+            '보유단가': '{:,.0f}',
+            '현재가': '{:,.0f}',
+            '주문수량': '{:,}'
+        })
+        
+        st.dataframe(styled_df, use_container_width=True)
+        
         if st.button("⚡ UI 수동 의도 DB 기록", type="primary"):
             success_count = 0
-            for _, r in [row for _, row in q_df.iterrows() if row['분류'] in [0, 1] and row['수량'] > 0]:
+            for _, r in [row for _, row in q_df.iterrows() if row['분류'] in [0, 1] and row['주문수량'] > 0]:
                 try:
-                    tk, side = r['티커'], "BUY" if "매수" in r['상태'] or "🛒" in r['상태'] else "SELL"
+                    tk = r['티커']
+                    side = "BUY" if ("매수" in r['상태'] or "🛒" in r['상태']) else "SELL"
                     now_str = datetime.datetime.now(KST).strftime('%H%M%S')
-                    spec = quant.OrderSpec("", f"UI_{SCOPE_KEY}_{tk}_{side}_{now_str}", "KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value, db.CONTRACT['strategy_version'], db.CONTRACT['contract_version'], tk, r['종목명'], side, "MARKET", r['수량'], 0, r['기준가'], "KRX", "GTC", "UI_MANUAL", "UI_MANUAL", now_str, "Q", "KIS", datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'), db.CONTRACT['execution_rules']['intent_ttl_sec'], db.CONTRACT['cost_model_version'], datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'))
-                    if db.safe_add_order_intent(spec)[0]: success_count += 1
-                except Exception as e: st.error(f"DB Error on {r['종목명']}: {e}")
-            if success_count > 0: st.success(f"✅ {success_count}건 의도 적재 완료!")
-            else: st.info("유효한 시그널이 없습니다.")
+                    spec = quant.OrderSpec(
+                        "", f"UI_{SCOPE_KEY}_{tk}_{side}_{now_str}", "KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, 
+                        active_strat.value, active_strat.value, db.CONTRACT['strategy_version'], db.CONTRACT['contract_version'], 
+                        tk, r['종목명'], side, "MARKET", r['주문수량'], 0, r['현재가'], "KRX", "GTC", 
+                        "UI_MANUAL", "UI_MANUAL", now_str, "Q", "KIS", datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'), 
+                        db.CONTRACT['execution_rules']['intent_ttl_sec'], db.CONTRACT['cost_model_version'], datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+                    )
+                    if db.safe_add_order_intent(spec)[0]: 
+                        success_count += 1
+                except Exception as e: 
+                    st.error(f"DB Error on {r['종목명']}: {e}")
+            if success_count > 0: 
+                st.success(f"✅ {success_count}건 주문 의도 적재 완료!")
+            else: 
+                st.info("유효한 주문 대상이 없습니다.")
     
+    # 4. DB에 적재된 Intent 이력 테이블
     intents = db.get_orders_by_status_and_env(list(db.ALLOWED_TRANSITIONS.keys()), "KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)
-    if intents: st.dataframe(pd.DataFrame(intents)[['id', 'ticker', 'side', 'qty', 'status', 'cum_filled_qty', 'resp_code']].sort_values('id', ascending=False), use_container_width=True)
-
-def build_historical_universe(start_date_sim, end_date_sim):
-    conn = db.get_connection()
-    rows = conn.execute("SELECT ticker, event_type, effective_at FROM watchlist_events WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY effective_at ASC", ("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)).fetchall()
-    if not rows: return None 
-    hist_uni = {}
-    active = set()
-    curr_date = start_date_sim
-    idx = 0
-    while curr_date <= end_date_sim:
-        curr_str = curr_date.strftime('%Y-%m-%d')
-        while idx < len(rows):
-            evt_date = datetime.datetime.strptime(rows[idx]['effective_at'], '%Y-%m-%d %H:%M:%S').date()
-            if evt_date <= curr_date:
-                if rows[idx]['event_type'] == 'ADD': active.add(rows[idx]['ticker'])
-                elif rows[idx]['event_type'] == 'REMOVE': active.discard(rows[idx]['ticker'])
-                idx += 1
-            else: break
-        hist_uni[curr_str] = list(active)
-        curr_date += datetime.timedelta(days=1)
-    return hist_uni
+    if intents:
+        st.markdown("### 📋 DB 주문 의도(Intent) 원장 상태")
+        st.dataframe(pd.DataFrame(intents)[['id', 'ticker', 'side', 'qty', 'status', 'cum_filled_qty', 'resp_code']].sort_values('id', ascending=False), use_container_width=True)
 
 with tab4:
     st.header("📊 시뮬레이터 및 백테스트 엔진")
