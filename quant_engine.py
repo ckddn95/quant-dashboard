@@ -425,5 +425,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             ]
         }
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
-        def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
+        
+def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
     return {"status": "error", "msg": "DATA_UNAVAILABLE: 해당 과거 연도(Point-in-time)의 KOSPI/KOSDAQ 정확한 유니버스 및 상장폐지 데이터가 시스템에 존재하지 않아 생존자 편향 위험으로 시뮬레이션을 중단합니다."}
