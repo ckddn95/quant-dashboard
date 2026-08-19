@@ -426,7 +426,27 @@ with tab3:
     if intents:
         st.markdown("### 📋 DB 주문 의도(Intent) 원장 상태")
         st.dataframe(pd.DataFrame(intents)[['id', 'ticker', 'side', 'qty', 'status', 'cum_filled_qty', 'resp_code']].sort_values('id', ascending=False), use_container_width=True)
-
+def build_historical_universe(start_date_sim, end_date_sim):
+    conn = db.get_connection()
+    rows = conn.execute("SELECT ticker, event_type, effective_at FROM watchlist_events WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY effective_at ASC", ("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)).fetchall()
+    if not rows: return None 
+    hist_uni = {}
+    active = set()
+    curr_date = start_date_sim
+    idx = 0
+    while curr_date <= end_date_sim:
+        curr_str = curr_date.strftime('%Y-%m-%d')
+        while idx < len(rows):
+            evt_date = datetime.datetime.strptime(rows[idx]['effective_at'], '%Y-%m-%d %H:%M:%S').date()
+            if evt_date <= curr_date:
+                if rows[idx]['event_type'] == 'ADD': active.add(rows[idx]['ticker'])
+                elif rows[idx]['event_type'] == 'REMOVE': active.discard(rows[idx]['ticker'])
+                idx += 1
+            else: break
+        hist_uni[curr_str] = list(active)
+        curr_date += datetime.timedelta(days=1)
+    return hist_uni
+    
 with tab4:
     st.header("📊 시뮬레이터 및 백테스트 엔진")
 
