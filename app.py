@@ -139,29 +139,26 @@ with tab1:
                 st.session_state[scan_res_key] = quant.run_scanner_safe(active_strat, current_config)
                 st.session_state[show_scan_key] = True
 
-    # 🚨 교정: DataFrame을 DataEditor로 변경하여 체크박스 선택 기능 제공
     if st.session_state.get(show_scan_key, False):
         scan_df = st.session_state.get(scan_res_key, pd.DataFrame())
         st.markdown("### 🎯 AI 유니버스 스캔 결과")
         if not scan_df.empty:
             st.success(f"조건을 만족하는 {len(scan_df)}개 종목을 발견했습니다. 편입할 종목을 선택해주세요.")
             
-            # 체크박스 컬럼 추가 (기본값 True)
+            # 🚨 체크박스 기본값을 명시적 선택을 유도하기 위해 모두 해제(False) 상태로 렌더링
             display_df = scan_df.copy()
             if '선택' not in display_df.columns:
-                display_df.insert(0, '선택', True)
+                display_df.insert(0, '선택', False)
             
-            # 인터랙티브 에디터로 렌더링
             edited_scan_df = st.data_editor(
                 display_df,
                 use_container_width=True,
                 hide_index=True,
-                column_config={"선택": st.column_config.CheckboxColumn("선택", default=True)}
+                column_config={"선택": st.column_config.CheckboxColumn("선택", default=False)}
             )
             
             col_btn1, col_btn2 = st.columns([1, 1])
             with col_btn1:
-                # 선택된 종목만 편입
                 if st.button("📥 선택 종목 편입", type="primary", use_container_width=True):
                     selected_df = edited_scan_df[edited_scan_df['선택'] == True]
                     new_items = [{'티커': str(r['티커']).zfill(6), '종목명': r['종목명']} for _, r in selected_df.iterrows()]
