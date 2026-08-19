@@ -47,6 +47,37 @@ def color_profit_loss(val):
         elif val.startswith('-'): return 'color: #3b82f6; font-weight: bold;'
     return ''
 
+def style_trade_log(logs):
+    df = pd.DataFrame(logs)
+    if df.empty: return df
+    return df.style.map(color_profit_loss, subset=['수익률']).format({
+        '진입단가': '{:,.0f}',
+        '청산단가': '{:,.0f}',
+        '수량': '{:,}',
+        '손익금': '{:,.0f}'
+    })
+
+def build_historical_universe(start_date_sim, end_date_sim):
+    conn = db.get_connection()
+    rows = conn.execute("SELECT ticker, event_type, effective_at FROM watchlist_events WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY effective_at ASC", ("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)).fetchall()
+    if not rows: return None 
+    hist_uni = {}
+    active = set()
+    curr_date = start_date_sim
+    idx = 0
+    while curr_date <= end_date_sim:
+        curr_str = curr_date.strftime('%Y-%m-%d')
+        while idx < len(rows):
+            evt_date = datetime.datetime.strptime(rows[idx]['effective_at'], '%Y-%m-%d %H:%M:%S').date()
+            if evt_date <= curr_date:
+                if rows[idx]['event_type'] == 'ADD': active.add(rows[idx]['ticker'])
+                elif rows[idx]['event_type'] == 'REMOVE': active.discard(rows[idx]['ticker'])
+                idx += 1
+            else: break
+        hist_uni[curr_str] = list(active)
+        curr_date += datetime.timedelta(days=1)
+    return hist_uni
+
 real_app_status = db.CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
 is_real_post_blocked = real_app_status != "APPROVED"
 
@@ -283,7 +314,6 @@ with tab3:
     st.header("🤖 자동매매 의도(Intent) 큐")
     st.warning("대시보드는 의도(Intent)를 DB에 적재만 합니다. 실제 API POST는 실행 워커(Worker)만 수행할 수 있습니다.")
     w_c1, w_c2, w_c3, w_c4 = st.columns(4)
-    # 🚨 교정: 사용자에게 불필요한 혼동을 주던 하드코딩 텍스트 제거
     w_c1.metric("Signal Bot", "독립 프로세스 구동")
     w_c2.metric("Exec Worker", "독립 프로세스 구동")
     w_c3.metric("MOCK Tests", "115/115 PASS")
@@ -295,7 +325,6 @@ with tab3:
     locked_cash, _ = db.get_locked_cash_and_qty("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)
     net_usable_cash = max(0.0, rd['cash'] - locked_cash)
     
-    # 1. 관심종목 + 보유종목 전체 리스트 취합
     temp_q, eval_list, eval_tickers = [], [], set()
     for w in db.get_watchlist("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value):
         tk = str(w['티커']).zfill(6)
@@ -309,14 +338,12 @@ with tab3:
             nm = next((s.get('prdt_name', tk) for s in rd.get('stocks', []) if str(s.get('pdno', '')).zfill(6) == tk), tk)
             eval_list.append({'티커': tk, '종목명': nm})
 
-    # 🚨 교정: KIS 실제 계좌에만 존재하는(DB에 없는) 주식도 큐에 포함
     for s in rd.get('stocks', []):
         tk = str(s.get('pdno', '')).zfill(6)
         if int(s.get('hldg_qty', 0)) > 0 and tk not in eval_tickers:
             eval_tickers.add(tk)
             eval_list.append({'티커': tk, '종목명': s.get('prdt_name', tk)})
     
-    # 2. 개별 종목 시세 및 매매 시그널 정밀 평가
     def process_q(row):
         tk = str(row['티커']).zfill(6)
         db_positions = {p['ticker']: p for p in db.get_positions("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)}
@@ -325,7 +352,6 @@ with tab3:
         high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
         days_held = (datetime.datetime.now() - pd.to_datetime(db_positions[tk]['buy_date'])).days if tk in db_positions else 0
         
-        # 🚨 교정: KIS 실제 보유수량과 단가를 최우선으로 사용하여 보유단가 0원 문제 해결
         kis_stock = next((s for s in rd.get('stocks', []) if str(s.get('pdno', '')).zfill(6) == tk), None)
         kis_qty = int(kis_stock['hldg_qty']) if kis_stock else 0
         kis_buy_p = float(kis_stock['pchs_avg_pric']) if kis_stock else 0.0
@@ -426,48 +452,105 @@ with tab3:
     if intents:
         st.markdown("### 📋 DB 주문 의도(Intent) 원장 상태")
         st.dataframe(pd.DataFrame(intents)[['id', 'ticker', 'side', 'qty', 'status', 'cum_filled_qty', 'resp_code']].sort_values('id', ascending=False), use_container_width=True)
-def build_historical_universe(start_date_sim, end_date_sim):
-    conn = db.get_connection()
-    rows = conn.execute("SELECT ticker, event_type, effective_at FROM watchlist_events WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY effective_at ASC", ("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)).fetchall()
-    if not rows: return None 
-    hist_uni = {}
-    active = set()
-    curr_date = start_date_sim
-    idx = 0
-    while curr_date <= end_date_sim:
-        curr_str = curr_date.strftime('%Y-%m-%d')
-        while idx < len(rows):
-            evt_date = datetime.datetime.strptime(rows[idx]['effective_at'], '%Y-%m-%d %H:%M:%S').date()
-            if evt_date <= curr_date:
-                if rows[idx]['event_type'] == 'ADD': active.add(rows[idx]['ticker'])
-                elif rows[idx]['event_type'] == 'REMOVE': active.discard(rows[idx]['ticker'])
-                idx += 1
-            else: break
-        hist_uni[curr_str] = list(active)
-        curr_date += datetime.timedelta(days=1)
-    return hist_uni
-def build_historical_universe(start_date_sim, end_date_sim):
-    conn = db.get_connection()
-    rows = conn.execute("SELECT ticker, event_type, effective_at FROM watchlist_events WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY effective_at ASC", ("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)).fetchall()
-    if not rows: return None 
-    hist_uni = {}
-    active = set()
-    curr_date = start_date_sim
-    idx = 0
-    while curr_date <= end_date_sim:
-        curr_str = curr_date.strftime('%Y-%m-%d')
-        while idx < len(rows):
-            evt_date = datetime.datetime.strptime(rows[idx]['effective_at'], '%Y-%m-%d %H:%M:%S').date()
-            if evt_date <= curr_date:
-                if rows[idx]['event_type'] == 'ADD': active.add(rows[idx]['ticker'])
-                elif rows[idx]['event_type'] == 'REMOVE': active.discard(rows[idx]['ticker'])
-                idx += 1
-            else: break
-        hist_uni[curr_str] = list(active)
-        curr_date += datetime.timedelta(days=1)
-    return hist_uni
 
+with tab4:
+    st.header("📊 시뮬레이터 및 백테스트 엔진")
 
+    st.subheader("🧪 Test 1: 현재 관심종목 그룹 순수 백테스트")
+    st.markdown("현재 `📝 관심종목`에 등록된 종목들을 대상으로 지정한 기간 동안 AI 시그널에 따른 순수 성과를 측정합니다.")
+    t1_c1, t1_c2, t1_c3, t1_c4 = st.columns([2, 2, 2, 2])
+    with t1_c1: t1_start = st.date_input("시작일", datetime.datetime.now(KST).date() - datetime.timedelta(days=180), key="t1_start")
+    with t1_c2: t1_end = st.date_input("종료일", datetime.datetime.now(KST).date(), key="t1_end")
+    with t1_c3: t1_legacy = st.checkbox("고정 0.25% 모드", value=False, key="t1_leg")
+
+    if st.button("Test 1 실행 (관심종목 백테스트)", use_container_width=True):
+        if not current_watchlist:
+            st.warning("관심종목이 비어있습니다. 먼저 종목을 추가해주세요.")
+        elif t1_start >= t1_end:
+            st.warning("종료일은 시작일 이후여야 합니다.")
+        else:
+            with st.spinner("AI 백테스트 분석 중..."):
+                wl_df = pd.DataFrame(current_watchlist)
+                res_t1 = quant.run_quant_simulation(wl_df, active_strat, total_cash, t1_start, t1_end, current_config, is_weekly_scan=False, use_legacy_cost=t1_legacy)
+                
+                if res_t1.get('status') == 'success':
+                    st.markdown(mts_metric_html("Test 1 누적 수익률", f"{res_t1['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res_t1['summary_rows']), use_container_width=True, hide_index=True)
+                    with st.expander("📝 매매 상세 내역 보기"):
+                        st.dataframe(style_trade_log(res_t1['trade_logs']), use_container_width=True, hide_index=True)
+                else:
+                    st.error(res_t1.get('msg', '오류 발생'))
+
+    st.divider()
+
+    st.subheader("🧪 Test 2: AI 자율운용 vs 사용자 개입 vs 실제 계좌 (3중 비교선)")
+    st.markdown("""
+    * **🤖 1. AI 자율 (주간스캔):** 사용자가 아무것도 하지 않았을 때, AI가 시장 전체 상위 100개 종목을 매주 스캔하여 자율 매매한 결과입니다.
+    * **🧑‍💻 2. 사용자 개입 제한:** 사용자가 픽한 '관심종목' 내에서만 AI가 타이밍을 잡아 매매했을 때의 결과입니다. (나의 안목 vs AI 비교)
+    """)
+    t4_c1, t4_c2, t4_c3, t4_c4 = st.columns([2, 2, 2, 3])
+    with t4_c1: start_d = st.date_input("시작일", datetime.datetime.now(KST).date() - datetime.timedelta(days=365), key="t4_start")
+    with t4_c2: end_d = st.date_input("종료일", datetime.datetime.now(KST).date(), key="t4_end")
+    with t4_c3: use_legacy = st.checkbox("고정 0.25% 모드", value=False, key="l_sim")
+    
+    if st.button("Test 2 실행 (3중 비교)", type="primary", use_container_width=True):
+        if start_d >= end_d: st.warning("최소 하루 이상 필요합니다.")
+        else:
+            with st.spinner("1. AI 완전 자율 포트폴리오 분석 중..."):
+                res_ai = quant.run_quant_simulation(pd.DataFrame(), active_strat, total_cash, start_d, end_d, current_config, is_weekly_scan=True, use_legacy_cost=use_legacy)
+            
+            with st.spinner("2. 사용자 개입 (실제 Watchlist 이력 및 Cash Flow) 분석 중..."):
+                hist_uni = build_historical_universe(start_d, end_d)
+                c_flows = db.get_cash_flows_by_date("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value, start_d, end_d)
+                
+                if not hist_uni or all(len(v) == 0 for v in hist_uni.values()):
+                    wl_df = pd.DataFrame(current_watchlist) if current_watchlist else pd.DataFrame()
+                    res_user = quant.run_quant_simulation(wl_df, active_strat, total_cash, start_d, end_d, current_config, is_weekly_scan=False, use_legacy_cost=use_legacy, external_cash_flows=c_flows)
+                else:
+                    res_user = quant.run_quant_simulation(pd.DataFrame(), active_strat, total_cash, start_d, end_d, current_config, is_weekly_scan=True, use_legacy_cost=use_legacy, user_restricted_universe_by_date=hist_uni, external_cash_flows=c_flows)
+            
+            actual_ret_pct = (rd['pnl'] / real_invested_principal * 100) if real_invested_principal > 0 else 0.0
+            
+            cc1, cc2, cc3 = st.columns(3)
+            with cc1:
+                st.markdown("<h4 style='color:#3b82f6;'>🤖 1. AI 자율 (주간스캔)</h4>", unsafe_allow_html=True)
+                if res_ai.get('status') == 'success':
+                    st.markdown(mts_metric_html("AI 누적 수익률", f"{res_ai['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res_ai['summary_rows']), use_container_width=True, hide_index=True)
+                    with st.expander("📝 상세 매매 내역 보기"):
+                        st.dataframe(style_trade_log(res_ai['trade_logs']), use_container_width=True, hide_index=True)
+                else: st.error(res_ai.get('msg'))
+            with cc2:
+                st.markdown("<h4 style='color:#f59e0b;'>🧑‍💻 2. 사용자 개입 제한</h4>", unsafe_allow_html=True)
+                if res_user.get('status') == 'success':
+                    st.markdown(mts_metric_html("사용자 누적 수익률", f"{res_user['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(res_user['summary_rows']), use_container_width=True, hide_index=True)
+                    with st.expander("📝 상세 매매 내역 보기"):
+                        st.dataframe(style_trade_log(res_user['trade_logs']), use_container_width=True, hide_index=True)
+                else: st.error(res_user.get('msg', "조건을 만족하는 매매 내역이 없습니다."))
+            with cc3:
+                st.markdown("<h4 style='color:#10b981;'>🏦 3. 실제 계좌 원장</h4>", unsafe_allow_html=True)
+                st.markdown(mts_metric_html("실제 누적 수익률", f"{actual_ret_pct:+.2f}%"), unsafe_allow_html=True)
+
+    st.divider()
+
+    st.subheader("🧪 Test 3: 과거 연도별 현실성 검증 (Point-in-Time)")
+    st.markdown("과거 특정 연도의 KOSPI/KOSDAQ 실제 구성종목(상장폐지 포함)을 기준으로 생존자 편향(Survivor Bias)이 통제된 환경에서 테스트합니다.")
+    t3_c1, t3_c2 = st.columns([2, 8])
+    with t3_c1: test_year = st.selectbox("테스트 대상 연도", [2022, 2023, 2024, 2025])
+    
+    if st.button("Test 3 실행 (생존자 편향 통제)", use_container_width=True):
+        with st.spinner(f"{test_year}년도 현실성 검증 중..."):
+            res_t3 = quant.run_yearly_realistic_backtest(active_strat, total_cash, test_year, current_config)
+            
+            if res_t3.get('status') == 'success':
+                st.warning(res_t3.get('msg', '완료'))
+                st.markdown(mts_metric_html(f"Test 3 ({test_year}년) 수익률", f"{res_t3['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
+                st.dataframe(pd.DataFrame(res_t3['summary_rows']), use_container_width=True, hide_index=True)
+                with st.expander("📝 상세 매매 내역 보기"):
+                    st.dataframe(style_trade_log(res_t3['trade_logs']), use_container_width=True, hide_index=True)
+            else:
+                st.error(f"🚨 {res_t3.get('msg')}")
 
 with tab5:
     st.markdown("""
