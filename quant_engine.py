@@ -427,4 +427,17 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
         
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
-    return {"status": "error", "msg": "DATA_UNAVAILABLE: 해당 과거 연도(Point-in-time)의 KOSPI/KOSDAQ 정확한 유니버스 및 상장폐지 데이터가 시스템에 존재하지 않아 생존자 편향 위험으로 시뮬레이션을 중단합니다."}
+    # 생존자 편향을 감안하고 현재 상장 종목 기준으로 해당 연도 1월 1일 ~ 12월 31일 백테스트를 수행하도록 잠금 해제
+    try:
+        start_date = datetime.date(year, 1, 1)
+        end_date = datetime.date(year, 12, 31)
+        
+        # 기존 run_quant_simulation 시뮬레이터 재활용
+        res = run_quant_simulation(pd.DataFrame(), strat, init_cash, start_date, end_date, cfg, is_weekly_scan=True, use_legacy_cost=use_legacy_cost)
+        
+        if res.get("status") == "success":
+            res["msg"] = f"⚠️ [생존자 편향 주의] {year}년도 당시 상장폐지되거나 지수에서 편출된 종목은 제외되었습니다. 수익률이 다소 과대평가될 수 있습니다."
+            
+        return res
+    except Exception as e:
+        return {"status": "error", "msg": f"연도별 테스트 오류: {str(e)}"}
