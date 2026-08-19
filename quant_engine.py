@@ -8,7 +8,8 @@ from enum import Enum
 from dataclasses import dataclass
 import database as db
 
-KST = timezone(timedelta(hours=9))
+# 🚨 Hotfix: datetime 네임스페이스 명시적 지정
+KST = datetime.timezone(datetime.timedelta(hours=9))
 
 class ExitReason(Enum):
     STOP_LOSS = "STOP_LOSS"
