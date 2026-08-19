@@ -142,10 +142,13 @@ def _strict_post(url: str, headers: dict, data: dict, rate_limit_key: str = "def
         try: res_data = res.json()
         except ValueError: return KisResult("TRANSPORT_FAIL", "Invalid JSON response", None)
 
-        if res_data.get('rt_cd') == '0':
+        # 🚨 교정 완료: 토큰 API 등 rt_cd가 없는 응답도 정상 처리하도록 access_token 유무 동시 검사
+        if res_data.get('rt_cd') == '0' or 'access_token' in res_data:
             return KisResult("SUCCESS_DATA", "OK", res_data)
         else:
-            return KisResult("BUSINESS_REJECT", res_data.get('msg1', 'Business Error'), res_data)
+            # 에러 발생 시 KIS의 msg1이 없으면 error_description을 찾도록 디버깅 정보 보강
+            err_msg = res_data.get('msg1', res_data.get('error_description', 'Business Error'))
+            return KisResult("BUSINESS_REJECT", err_msg, res_data)
 
     except requests.exceptions.Timeout:
         return KisResult("TRANSPORT_FAIL", "Timeout No Retry", None)
