@@ -364,14 +364,31 @@ def test_apply_fill_delta_halts_on_qty_exceeded_and_amt_mismatch():
     halted2 = db.get_connection().execute("SELECT status FROM order_intents WHERE id=?", (order2['id'],)).fetchone()
     assert halted2['status'] == 'RECONCILIATION_REQUIRED'
 
-def test_ui_manual_bypasses_kill_switch():
+def test_ui_manual_blocked_by_kill_switch():
+    # 1. 마스터 킬스위치 ON -> UI 주문이라도 철저히 차단되어야 함
     db.set_setting("master_kill_switch", True)
     _insert_intent(801, source="UI_MANUAL")
     db.acquire_worker_lease("KIS", "MOCK", "FP1", "01", "CORE", "CORE", "W1", 30)
     order, _ = db.claim_intent("KIS", "MOCK", "FP1", "01", "CORE", "CORE", "W1")
-    auth_order, passed, _ = db.authorize_claimed_order(order['id'], "KIS", "MOCK", "FP1", "01", "CORE", "CORE", "W1", 5000000, 1000, False, 0.0, 0, 10000000)
-    assert passed is True
-    assert auth_order['status'] == 'SUBMITTING'
+    
+    auth_order, passed, msg = db.authorize_claimed_order(order['id'], "KIS", "MOCK", "FP1", "01", "CORE", "CORE", "W1", 5000000, 1000, False, 0.0, 0, 10000000)
+    
+    # 🚨 패치: 킬스위치가 켜졌으므로 통과하지 못해야(False) 정상
+    assert passed is False
+    assert auth_order['status'] == 'REJECTED'
+    assert 'Kill Switch' in msg
+
+    # 2. 마스터 킬스위치 OFF -> UI 주문은 정상적으로 통과되어야 함
+    db.set_setting("master_kill_switch", False)
+    _insert_intent(802, source="UI_MANUAL")
+    db.acquire_worker_lease("KIS", "MOCK", "FP1", "01", "CORE", "CORE", "W1", 30)
+    order2, _ = db.claim_intent("KIS", "MOCK", "FP1", "01", "CORE", "CORE", "W1")
+    
+    auth_order2, passed2, msg2 = db.authorize_claimed_order(order2['id'], "KIS", "MOCK", "FP1", "01", "CORE", "CORE", "W1", 5000000, 1000, False, 0.0, 0, 10000000)
+    
+    # 🚨 패치: 킬스위치가 꺼졌으므로 정상 통과(True)해야 함
+    assert passed2 is True
+    assert auth_order2['status'] == 'SUBMITTING'
 
 def test_transition_failure_prevents_post():
     _insert_intent(802)
