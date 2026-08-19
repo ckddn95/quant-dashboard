@@ -196,21 +196,40 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         ticker_to_market = {r['Code']: ("KOSPI" if "KOSPI" in str(r['Market']).upper() else "KOSDAQ") for _, r in krx_df.iterrows()}
         ticker_to_name = {r['Code']: r['Name'] for _, r in krx_df.iterrows()}
         
-        if target_stocks_df is not None and not target_stocks_df.empty: tickers = list(target_stocks_df['티커'].astype(str).str.zfill(6))
-        else: tickers = list(krx_df.sort_values('Marcap', ascending=False).head(300)['Code'])
+        # 🚨 병목 10배속 최적화: 유니버스 300 -> 100개 축소 및 시장별 분리
+        if target_stocks_df is not None and not target_stocks_df.empty: 
+            tickers = list(target_stocks_df['티커'].astype(str).str.zfill(6))
+        else: 
+            if strat == Strategy.CORE:
+                tickers = list(krx_df[krx_df['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(100)['Code'])
+            else:
+                tickers = list(krx_df[krx_df['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(100)['Code'])
+            if not tickers: tickers = list(krx_df.sort_values('Marcap', ascending=False).head(100)['Code'])
             
         dfs = {}
         fetch_start = start_date - datetime.timedelta(days=365)
         all_dates = set()
-        for tk in tickers:
-            df = fdr.DataReader(tk, start=fetch_start, end=end_date)
-            if not df.empty:
-                df['MA20'] = df['Close'].rolling(20).mean()
-                df['MA60'] = df['Close'].rolling(60).mean()
-                df['MA200'] = df['Close'].rolling(200).mean()
-                df['M60_UP'] = df['MA60'] > df['Close'].rolling(60).mean().shift(10)
-                dfs[tk] = df
-                all_dates.update(df.index)
+        
+        # 🚨 병목 10배속 최적화: 멀티스레드 병렬 다운로드 
+        def fetch_data(tk):
+            try:
+                df = fdr.DataReader(tk, start=fetch_start, end=end_date)
+                if not df.empty:
+                    df['MA20'] = df['Close'].rolling(20).mean()
+                    df['MA60'] = df['Close'].rolling(60).mean()
+                    df['MA200'] = df['Close'].rolling(200).mean()
+                    df['M60_UP'] = df['MA60'] > df['Close'].rolling(60).mean().shift(10)
+                    return tk, df
+            except Exception: pass
+            return tk, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(fetch_data, tk) for tk in tickers]
+            for future in concurrent.futures.as_completed(futures):
+                tk, df = future.result()
+                if df is not None:
+                    dfs[tk] = df
+                    all_dates.update(df.index)
         
         if not dfs: return {"status": "error", "msg": "DATA_UNAVAILABLE: 유효한 1분봉/일봉 데이터가 존재하지 않습니다."}
         
