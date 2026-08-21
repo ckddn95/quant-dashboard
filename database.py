@@ -526,6 +526,7 @@ def renew_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_i
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in renew_worker_lease: {e}")
+
 def safe_add_order_intent(spec):
     with get_connection() as conn:
         try:
@@ -829,7 +830,13 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
                 if (m_qty - r_qty) < order['qty']:
                     return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', f'Insufficient Qty (Mng: {m_qty}, Res: {r_qty}, Req: {order["qty"]})')
 
-            conn.execute("UPDATE order_intents SET status='SUBMITTING', updated_at=? WHERE id=?", (now_str, order_id))
+            # 🚨 패치: 상태(status)와 펜싱 토큰(fencing_token)을 쿼리 조건에 박아넣는 완벽한 원자적 승인(CAS)
+            res = conn.execute("UPDATE order_intents SET status='SUBMITTING', updated_at=? WHERE id=? AND status='CLAIMED' AND fencing_token=?", (now_str, order_id, order['fencing_token']))
+            
+            if res.rowcount == 0:
+                conn.execute("ROLLBACK")
+                return None, False, "Atomic CAS Failed: Token mismatch or order state altered by another worker"
+
             conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          (order_id, order['correlation_id'], "STATUS_CHANGE", "CLAIMED", "SUBMITTING", worker_id, order['fencing_token'], "GATE_PASSED_ALL", now_str, "Intent 11-step CAS authorized"))
             conn.execute("COMMIT")
