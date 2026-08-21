@@ -515,15 +515,17 @@ def renew_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_i
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
+            expire_str = (datetime.now(KST) + timedelta(seconds=extend_seconds)).strftime('%Y-%m-%d %H:%M:%S')
             row = conn.execute("SELECT token FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
+            
+            # 🚨 패치: 워커ID와 펜싱 토큰(token)이 정확히 일치할 때만 연장 허용
             if row and row['token'] == token:
-                conn.execute("UPDATE worker_leases SET expires_at=datetime('now', 'localtime', '+{} seconds') WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?".format(extend_seconds), (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id))
+                conn.execute("UPDATE worker_leases SET expires_at=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=? AND token=?", (expire_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id, token))
                 conn.execute("COMMIT"); return True
             conn.execute("ROLLBACK"); return False
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in renew_worker_lease: {e}")
-
 def safe_add_order_intent(spec):
     with get_connection() as conn:
         try:
