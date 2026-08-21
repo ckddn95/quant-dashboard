@@ -523,9 +523,21 @@ def safe_add_order_intent(spec):
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
+            
+            # 🚨 패치: 동일 종목(Ticker)에 대해 이미 진행 중인(Open) 주문이 있다면 새로운 주문 생성 자체를 원천 차단! (스팸 방지)
+            open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED', 'CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN')"
+            check_query = f"SELECT id, status FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND status IN {open_states}"
+            existing = conn.execute(check_query, (spec.broker, spec.environment, spec.account_fingerprint, spec.account_product_code, spec.portfolio_id, spec.strategy_id, spec.ticker)).fetchone()
+            
+            if existing:
+                conn.execute("ROLLBACK")
+                # 진행 중인 주문이 있으므로 조용히 무시함 (정상적인 보호 작동)
+                return False, f"Blocked: Open intent {existing['id']} ({existing['status']}) already exists for {spec.ticker}"
+
             corr_id = spec.correlation_id if spec.correlation_id else f"{spec.broker}_{spec.environment}_{spec.account_fingerprint}_{spec.account_product_code}_{spec.portfolio_id}_{spec.strategy_id}_{spec.ticker}_{spec.side}_{spec.intent_created_at}"
             corr_id = hashlib.sha256(corr_id.encode()).hexdigest()[:16]
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+            
             cur = conn.execute("""INSERT INTO order_intents 
                 (correlation_id, idempotency_key, broker, environment, account_fingerprint, product_code, portfolio_id, 
                  strategy_id, strategy_version, contract_version, ticker, stock_name, side, order_kind, 
@@ -536,9 +548,12 @@ def safe_add_order_intent(spec):
                  spec.strategy_id, spec.strategy_version, CONTRACT.get('contract_version','1.0.0'), spec.ticker, spec.stock_name, spec.side, spec.order_kind, 
                  spec.quantity, spec.limit_price, spec.reference_price, spec.exchange, spec.time_in_force, spec.signal_id, spec.signal_source, spec.signal_cutoff, spec.quote_id, spec.quote_source, spec.quote_timestamp,
                  spec.intent_ttl, CONTRACT.get('cost_model_version', '1.0.0'), spec.intent_created_at, spec.intent_created_at))
+                 
             conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
                          (cur.lastrowid, corr_id, "STATUS_CHANGE", None, "INTENT_CREATED", "SIGNAL_FIRED", now_str, "Intent Created"))
-            conn.execute("COMMIT"); return True, "OK"
+            conn.execute("COMMIT")
+            return True, "OK"
+            
         except sqlite3.IntegrityError as e: 
             conn.execute("ROLLBACK")
             raise RuntimeError(f"IntegrityError in safe_add_order_intent: {e}")
