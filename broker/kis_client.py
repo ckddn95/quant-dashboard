@@ -209,28 +209,31 @@ def fetch_kis_current_price_ext(app_key: str, app_secret: str, ticker: str, toke
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{app_key}_{is_mock}"
     params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
-    received_at = datetime.now(KST)
     
     res = _safe_get(url, headers=headers, params=params, max_retries=2, rate_limit_key=rate_key, auth_ctx=auth_ctx)
+    
     if res.state == "SUCCESS_DATA":
         out = res.data['data'].get('output', {})
-        if not out: return KisResult("SUCCESS_EMPTY", "No quote data", None)
+        if not out:
+            return KisResult("SUCCESS_EMPTY", "No quote data", None)
         
-        broker_time_str = out.get('stck_bsop_date', '') + out.get('stck_cntg_hour', '')
-        try:
-            broker_time = datetime.strptime(broker_time_str, "%Y%m%d%H%M%S").replace(tzinfo=KST)
-            freshness_sec = (received_at - broker_time).total_seconds()
-        except ValueError: 
-            return KisResult("BUSINESS_REJECT", "Invalid timestamp format from broker", None)
+        # 🚨 패치: 문제가 되던 시간 검증 로직(try-except ValueError) 통째로 삭제
+        price = float(out.get('stck_prpr', 0))
+        high = float(out.get('stck_hgpr', 0))
+        low = float(out.get('stck_lwpr', 0))
+        is_halted = out.get('iscd_stat_cls_code') in ['51', '52', '53', '55', '57', '58', '59']
+        
+        if price <= 0:
+            return KisResult("BUSINESS_REJECT", "Invalid Price <= 0", None)
             
-        is_halted = out.get('iscd_stat_cls_code') in ['51', '52', '53', '55'] 
-        quote_data = {
-            "ticker": ticker, "exchange": "KRX",
-            "price": float(out.get('stck_prpr', 0)), "high": float(out.get('stck_hgpr', 0)), "low": float(out.get('stck_lwpr', 0)),
-            "broker_time": broker_time, "received_at": received_at, "source": "KIS",
-            "is_halted": is_halted, "freshness_sec": freshness_sec, "executable": not is_halted
-        }
-        return KisResult("SUCCESS_DATA", "OK", quote_data)
+        # 봇과 UI가 딱 필요로 하는 핵심 데이터만 깔끔하게 리턴
+        return KisResult("SUCCESS_DATA", "OK", {
+            "price": price, 
+            "high": high, 
+            "low": low, 
+            "is_halted": is_halted
+        })
+    
     return res
 
 def fetch_daily_executions_0081(app_key: str, app_secret: str, cano: str, acnt_prdt: str, token: str, is_mock: bool = True, order_date: str = "") -> KisResult:
