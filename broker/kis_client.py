@@ -142,11 +142,9 @@ def _strict_post(url: str, headers: dict, data: dict, rate_limit_key: str = "def
         try: res_data = res.json()
         except ValueError: return KisResult("TRANSPORT_FAIL", "Invalid JSON response", None)
 
-        # 🚨 교정 완료: 토큰 API 등 rt_cd가 없는 응답도 정상 처리하도록 access_token 유무 동시 검사
         if res_data.get('rt_cd') == '0' or 'access_token' in res_data:
             return KisResult("SUCCESS_DATA", "OK", res_data)
         else:
-            # 에러 발생 시 KIS의 msg1이 없으면 error_description을 찾도록 디버깅 정보 보강
             err_msg = res_data.get('msg1', res_data.get('error_description', 'Business Error'))
             return KisResult("BUSINESS_REJECT", err_msg, res_data)
 
@@ -196,7 +194,12 @@ def fetch_kis_orderable_cash(app_key: str, app_secret: str, cano: str, acnt_prdt
     rate_key = f"{cano}_{is_mock}"
     
     dvsn = "01" if order_kind.upper() == "MARKET" else "00"
-    params = {"CANO": cano, "ACNT_PRDT_CD": acnt_prdt, "PDNO": ticker, "ORD_UNPR": str(int(price)), "ORD_DVSN": dvsn, "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"}
+    
+    # 🚨 패치: 빈 종목코드나 0원 가격이 들어오면 API가 뻗어버리므로 더미 값(삼성전자, 0원)으로 안전망 구축
+    safe_ticker = ticker if ticker.strip() != "" else "005930"
+    safe_price = str(int(price)) if price > 0 else "0"
+    
+    params = {"CANO": cano, "ACNT_PRDT_CD": acnt_prdt, "PDNO": safe_ticker, "ORD_UNPR": safe_price, "ORD_DVSN": dvsn, "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"}
     
     res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":
@@ -217,16 +220,17 @@ def fetch_kis_current_price_ext(app_key: str, app_secret: str, ticker: str, toke
         if not out:
             return KisResult("SUCCESS_EMPTY", "No quote data", None)
         
-        # 🚨 패치: 문제가 되던 시간 검증 로직(try-except ValueError) 통째로 삭제
         price = float(out.get('stck_prpr', 0))
         high = float(out.get('stck_hgpr', 0))
         low = float(out.get('stck_lwpr', 0))
-        is_halted = out.get('iscd_stat_cls_code') in ['51', '52', '53', '55', '57', '58', '59']
+        
+        # 🚨 패치: 멀쩡한 현금 100% 종목(55)이나 주의종목(53)이 차단되지 않도록 필터링 완화
+        status_code = out.get('iscd_stat_cls_code', '00')
+        is_halted = status_code in ['51', '57', '58', '59']
         
         if price <= 0:
             return KisResult("BUSINESS_REJECT", "Invalid Price <= 0", None)
             
-        # 봇과 UI가 딱 필요로 하는 핵심 데이터만 깔끔하게 리턴
         return KisResult("SUCCESS_DATA", "OK", {
             "price": price, 
             "high": high, 
@@ -277,7 +281,18 @@ def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: 
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    data = {"CANO": cano, "ACNT_PRDT_CD": acnt_prdt, "PDNO": ticker, "ORD_DVSN": "01" if price == 0 else "00", "ORD_QTY": str(int(qty)), "ORD_UNPR": str(int(price))}
+    # 🚨 패치: 주문(Order) Payload에 KIS 공식 필수 누락 필드(거래소 구분, 조건부 가격, 매도 유형) 완벽하게 추가
+    data = {
+        "CANO": cano, 
+        "ACNT_PRDT_CD": acnt_prdt, 
+        "PDNO": ticker, 
+        "ORD_DVSN": "01" if price == 0 else "00", 
+        "ORD_QTY": str(int(qty)), 
+        "ORD_UNPR": str(int(price)),
+        "SLL_TYPE": "00" if is_buy else "01",
+        "EXCG_ID_DVSN_CD": "01",
+        "CNDT_PRIC": "0"
+    }
     
     res = _strict_post(url, headers=headers, data=data, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":
@@ -294,7 +309,19 @@ def cancel_kis_order_0013(app_key: str, app_secret: str, cano: str, acnt_prdt: s
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    data = {"CANO": cano, "ACNT_PRDT_CD": acnt_prdt, "KRX_FWDG_ORD_ORGNO": org_branch, "ORGN_ODNO": org_odno, "ORD_DVSN": "00", "RVSE_CNCL_DVSN_CD": "02", "ORD_QTY": str(int(qty)), "ORD_UNPR": "0", "QTY_ALL_ORD_YN": "Y" if qty == 0 else "N"}
+    # 🚨 패치: 취소(Cancel) Payload에 KIS 공식 필수 누락 필드(거래소 구분) 추가 및 branch_no None 방어
+    data = {
+        "CANO": cano, 
+        "ACNT_PRDT_CD": acnt_prdt, 
+        "KRX_FWDG_ORD_ORGNO": org_branch if org_branch else "", 
+        "ORGN_ODNO": org_odno, 
+        "ORD_DVSN": "00", 
+        "RVSE_CNCL_DVSN_CD": "02", 
+        "ORD_QTY": str(int(qty)), 
+        "ORD_UNPR": "0", 
+        "QTY_ALL_ORD_YN": "Y" if qty == 0 else "N",
+        "EXCG_ID_DVSN_CD": "01"
+    }
     
     res = _strict_post(url, headers=headers, data=data, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":
