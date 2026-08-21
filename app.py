@@ -179,12 +179,32 @@ with tab1:
             display_df = scan_df.copy()
             if '선택' not in display_df.columns:
                 display_df.insert(0, '선택', False)
+                
+            # 🚨 패치: 관심종목/보유종목 상태 표시 로직 추가
+            current_watchlist_check = db.get_watchlist("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)
+            wl_tickers_check = [w['티커'] for w in current_watchlist_check]
+            db_positions_check = [p['ticker'] for p in db.get_positions("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)]
+            kis_stocks_check = [str(s.get('pdno', '')).zfill(6) for s in rd.get('stocks', []) if int(s.get('hldg_qty', 0)) > 0]
+            holdings_check = set(db_positions_check + kis_stocks_check)
+
+            def get_status_badge(ticker):
+                tk = str(ticker).zfill(6)
+                badges = []
+                if tk in holdings_check: badges.append("💼 보유중")
+                elif tk in wl_tickers_check: badges.append("⭐ 관심종목")
+                return ", ".join(badges) if badges else "💡 신규"
+
+            if '상태(참고)' not in display_df.columns:
+                display_df.insert(1, '상태(참고)', display_df['티커'].apply(get_status_badge))
             
             edited_scan_df = st.data_editor(
                 display_df,
                 use_container_width=True,
                 hide_index=True,
-                column_config={"선택": st.column_config.CheckboxColumn("선택", default=False)}
+                column_config={
+                    "선택": st.column_config.CheckboxColumn("선택", default=False),
+                    "상태(참고)": st.column_config.TextColumn("상태(참고)", disabled=True)
+                }
             )
             
             col_btn1, col_btn2 = st.columns([1, 1])
