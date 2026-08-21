@@ -126,12 +126,10 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
                 'ord_tmd': latest_exec.get('ord_tmd', '')
             }
             
-            try: db.update_broker_receipt(order['id'], broker_state)
-            except Exception as e: logger.error(f"DB Error updating receipt: {e}")
-            
             broker_cum_qty = broker_state['tot_ccld_qty']
             broker_cum_amt = broker_state['tot_ccld_amt']
             
+            # 🚨 패치 1-A: 델타 연산(원장 반영)을 '무조건 먼저' 실행합니다! (순서 변경됨)
             if broker_cum_qty != order['cum_filled_qty'] or broker_cum_amt != order['tot_ccld_amt']:
                 try:
                     db.apply_fill_delta_exactly_once(
@@ -139,6 +137,10 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
                         broker_cum_qty, broker_cum_amt, broker_state
                     )
                 except Exception as e: logger.error(f"DB Error applying fill: {e}")
+
+            # 🚨 패치 1-B: DB 영수증(총 누적 상태) 업데이트는 델타를 뽑아낸 이후 마지막에 덮어씁니다!
+            try: db.update_broker_receipt(order['id'], broker_state)
+            except Exception as e: logger.error(f"DB Error updating receipt: {e}")
                 
             if broker_state['cncl_yn'] == 'Y' and order['status'] not in ['CANCELED', 'FILLED']:
                 try: db.transition_order_status(order['id'], order['status'], 'CANCELED', worker_id=WORKER_ID, fencing_token=order.get('fencing_token'), reason="BROKER_CANCELED")
@@ -184,7 +186,7 @@ def run_worker_loop():
                     if t: kis_tokens[token_key] = {'token': t, 'expire': time.time() + 40000}
                     else: continue
 
-                # 🚨 패치 1: 체결 대사 & 취소 처리는 잔고 조회 성공 여부와 무관하게 가장 먼저 실행 (무결성 보장)
+                # 체결 대사 & 취소 처리는 잔고 조회 성공 여부와 무관하게 가장 먼저 실행 (무결성 보장)
                 try:
                     reconcile_executions(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], env, acc_fp, portfolio_id, is_mock)
                     process_cancellations(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], env, acc_fp, portfolio_id, is_mock)
@@ -206,7 +208,7 @@ def run_worker_loop():
                             db.set_setting(last_principal_key, current_principal)
                         except Exception as e: logger.error(f"DB Error record_cash_flow: {e}")
                     
-                    # 🚨 패치 2: 주문가능금액 조회 실패 시 continue로 도망가지 않고 0원으로 락다운
+                    # 주문가능금액 조회 실패 시 continue로 도망가지 않고 0원으로 락다운
                     c_res = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], "", 0, "00", is_mock)
                     if c_res.state == "SUCCESS_DATA": 
                         raw_cash = float(c_res.data)
@@ -243,7 +245,7 @@ def run_worker_loop():
                 
                 db.renew_worker_lease("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, WORKER_ID, lease_tok, 10)
                 
-                # 🚨 패치 3: 특정 주문건 현금 조회 실패 시 무시(continue)하지 않고 0원 처리하여 정상적으로 REJECTED 처리되도록 유도
+                # 특정 주문건 현금 조회 실패 시 무시(continue)하지 않고 0원 처리하여 정상적으로 REJECTED 처리되도록 유도
                 target_price = order['reference_price'] if order['order_kind'] == 'MARKET' else order['limit_price']
                 c_res_order = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], order['ticker'], target_price, order['order_kind'], is_mock)
                 if c_res_order.state != "SUCCESS_DATA":
