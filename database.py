@@ -48,7 +48,7 @@ def _get_db_metrics(conn):
     m['pos_qty'] = conn.execute("SELECT SUM(managed_qty + manual_qty) FROM positions").fetchone()[0] or 0 if table_exists('positions') else 0
     return m
 
-def _validate_v15_schema(conn) -> bool:
+def _validate_schema(conn) -> bool:
     req_tables = ['settings', 'watchlist', 'positions', 'worker_leases', 'order_intents', 'fills', 'watchlist_events', 'cash_flows', 'daily_account_equity', 'order_events', 'signal_states', 'reconciliation_events']
     existing = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
     if not all(t in existing for t in req_tables): return False
@@ -69,8 +69,8 @@ def bootstrap_db():
         conn.execute("BEGIN EXCLUSIVE")
         _migrate_to_v6(conn); _migrate_to_v7(conn); _migrate_to_v8(conn); _migrate_to_v9(conn)
         _migrate_to_v10(conn); _migrate_to_v11(conn); _migrate_to_v12(conn); _migrate_to_v13(conn)
-        _migrate_to_v14(conn); _migrate_to_v15(conn)
-        conn.execute("PRAGMA user_version = 15")
+        _migrate_to_v14(conn); _migrate_to_v15(conn); _migrate_to_v16(conn)
+        conn.execute("PRAGMA user_version = 16")
         conn.execute("COMMIT")
     except Exception as e:
         conn.execute("ROLLBACK")
@@ -79,20 +79,20 @@ def bootstrap_db():
 
 def preflight_check() -> bool:
     if not os.path.exists(DB_PATH):
-        print("Database not found. Bootstrapping new V15 database...")
+        print("Database not found. Bootstrapping new V16 database...")
         bootstrap_db(); return True
         
     curr_ver = 0
     with get_connection() as conn:
         curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
-        if curr_ver > 15: raise RuntimeError(f"Downgrade not supported. Current: {curr_ver}")
+        if curr_ver > 16: raise RuntimeError(f"Downgrade not supported. Current: {curr_ver}")
         
-    if curr_ver < 15: 
-        print(f"Migration required from V{curr_ver} to V15. Auto-migrating...")
+    if curr_ver < 16: 
+        print(f"Migration required from V{curr_ver} to V16. Auto-migrating...")
         run_migration()
         
     with get_connection() as conn:
-        if not _validate_v15_schema(conn): raise RuntimeError("Schema validation failed.")
+        if not _validate_schema(conn): raise RuntimeError("Schema validation failed.")
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok": raise RuntimeError(f"Database integrity check failed: {integrity}")
     return True
@@ -267,6 +267,58 @@ def _migrate_to_v15(conn):
         conn.execute('ALTER TABLE fills ADD COLUMN orgno TEXT')
         conn.execute('ALTER TABLE fills ADD COLUMN ord_tmd TEXT')
 
+# 🚨 패치 (V16): 식별체계 재바인딩, Dry-run 대조 및 데이터 무결성 검증 추가
+def _migrate_to_v16(conn):
+    import os
+    try: import tomllib as toml
+    except ImportError: import toml
+    
+    secrets_path = os.path.join(BASE_DIR, ".streamlit", "secrets.toml")
+    if not os.path.exists(secrets_path): return
+        
+    with open(secrets_path, "rb") as f: config = toml.load(f)
+    sys_secret = config.get("system", {}).get("hmac_secret")
+    
+    # 암호화 키 누락 시 절대 실행 불가 (하드 블록)
+    if not sys_secret or sys_secret == "fallback_default_secret" or sys_secret.strip() == "":
+        raise RuntimeError("CRITICAL [V16 Migration]: hmac_secret is missing in secrets.toml! Migration halted to prevent account data split.")
+        
+    cano_map = {}
+    if "kis_accounts" in config:
+        for acc_key in ["core", "satellite"]:
+            if acc_key in config["kis_accounts"]:
+                c = config["kis_accounts"][acc_key]
+                cano = str(c.get("cano", "")).strip()
+                if cano and cano != "MOCK_ACCOUNT":
+                    new_fp = generate_account_fingerprint(cano, sys_secret)
+                    cano_map[cano] = new_fp
+                    cano_map[cano.replace("-", "")] = new_fp
+
+    if not cano_map: return
+        
+    tables = ['order_intents', 'positions', 'watchlist', 'fills', 'worker_leases', 'signal_states', 'cash_flows', 'daily_account_equity', 'watchlist_events', 'reconciliation_events', 'order_events']
+    
+    for old_id, new_fp in cano_map.items():
+        if old_id == new_fp: continue
+        
+        pre_oi_qty = conn.execute("SELECT SUM(qty) FROM order_intents WHERE account_fingerprint=?", (old_id,)).fetchone()[0] or 0
+        pre_pos_qty = conn.execute("SELECT SUM(managed_qty + manual_qty) FROM positions WHERE account_fingerprint=?", (old_id,)).fetchone()[0] or 0
+        
+        if pre_oi_qty == 0 and pre_pos_qty == 0: continue
+            
+        for table in tables:
+            cols = [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if 'account_fingerprint' in cols:
+                conn.execute(f"UPDATE {table} SET account_fingerprint=? WHERE account_fingerprint=?", (new_fp, old_id))
+                
+        post_oi_qty = conn.execute("SELECT SUM(qty) FROM order_intents WHERE account_fingerprint=?", (new_fp,)).fetchone()[0] or 0
+        post_pos_qty = conn.execute("SELECT SUM(managed_qty + manual_qty) FROM positions WHERE account_fingerprint=?", (new_fp,)).fetchone()[0] or 0
+        
+        if post_oi_qty < pre_oi_qty or post_pos_qty < pre_pos_qty:
+            raise RuntimeError(f"V16 Migration Data Loss! {old_id} -> {new_fp}")
+            
+    print("✅ V16 HMAC Fingerprint Re-binding & Verification Complete.")
+
 def run_migration():
     if not os.path.exists(DB_PATH):
         print("Database not found. Bootstrapping...")
@@ -276,11 +328,11 @@ def run_migration():
     try:
         conn.execute("BEGIN EXCLUSIVE")
         curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
-        if curr_ver >= 15:
-            if not _validate_v15_schema(conn): raise RuntimeError("Schema validation failed for V15.")
-            conn.execute("COMMIT"); print("Database is already up to date (V15).")
+        if curr_ver >= 16:
+            if not _validate_schema(conn): raise RuntimeError("Schema validation failed for V16.")
+            conn.execute("COMMIT"); print("Database is already up to date (V16).")
             return
-        print(f"Starting migration from V{curr_ver} to V15...")
+        print(f"Starting migration from V{curr_ver} to V16...")
         pre_m = _get_db_metrics(conn)
         
         if curr_ver < 6: _migrate_to_v6(conn)
@@ -293,9 +345,9 @@ def run_migration():
         if curr_ver < 13: _migrate_to_v13(conn)
         if curr_ver < 14: _migrate_to_v14(conn)
         if curr_ver < 15: _migrate_to_v15(conn)
+        if curr_ver < 16: _migrate_to_v16(conn)
         post_m = _get_db_metrics(conn)
         
-        # 교정 완료: Fragile한 oi_hash 검증 완전 제거. Data 개수와 총합만으로 무결성 보장
         if pre_m['oi_count'] != post_m['oi_count']: raise RuntimeError("Lossless check failed: oi_count")
         if pre_m['pos_count'] != post_m['pos_count']: raise RuntimeError("Lossless check failed: pos_count")
         if pre_m['oi_qty'] != post_m['oi_qty']: raise RuntimeError("Lossless check failed: oi_qty")
@@ -304,20 +356,22 @@ def run_migration():
 
         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok": raise RuntimeError("Integrity check failed")
         if len(conn.execute("PRAGMA foreign_key_check").fetchall()) > 0: raise RuntimeError("Foreign Key check failed")
-        if not _validate_v15_schema(conn): raise RuntimeError("Post-migration schema validation failed.")
+        if not _validate_schema(conn): raise RuntimeError("Post-migration schema validation failed.")
 
-        conn.execute("PRAGMA user_version = 15")
+        conn.execute("PRAGMA user_version = 16")
         conn.execute("COMMIT")
-        print("Migration to V15 completed successfully.")
+        print("Migration to V16 completed successfully.")
     except Exception as e:
-        # 교정 완료: Streamlit Cloud 화면에서 에러 내용을 볼 수 있도록 Traceback을 전진 배치
         err_trace = traceback.format_exc()
         conn.execute("ROLLBACK")
         raise RuntimeError(f"DB_MIGRATE_ERROR: {e} | Backup: {backup_path} | Details: {err_trace}")
     finally: conn.close()
 
+# 🚨 패치: Fallback 문자열 원천 차단으로 Split-Brain 방지
 def generate_account_fingerprint(cano: str, secret_salt: str) -> str:
     if cano == "MOCK_ACCOUNT": return "MOCK_ACCOUNT"
+    if not secret_salt or secret_salt == "fallback_default_secret" or secret_salt.strip() == "":
+        raise RuntimeError("CRITICAL: Secret Salt is missing! System cannot generate secure fingerprint.")
     return hmac.new(secret_salt.encode('utf-8'), cano.encode('utf-8'), hashlib.sha256).hexdigest()[:16]
 
 def get_setting(key, default=None):
@@ -492,7 +546,6 @@ def acquire_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            # 🚨 패치: SQLite 시간 의존 제거, Python 기준 절대 시각 주입
             now_kst = datetime.now(KST)
             now_str = now_kst.strftime('%Y-%m-%d %H:%M:%S')
             expire_str = (now_kst + timedelta(seconds=ttl)).strftime('%Y-%m-%d %H:%M:%S')
@@ -518,7 +571,6 @@ def renew_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_i
             expire_str = (datetime.now(KST) + timedelta(seconds=extend_seconds)).strftime('%Y-%m-%d %H:%M:%S')
             row = conn.execute("SELECT token FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
             
-            # 🚨 패치: 워커ID와 펜싱 토큰(token)이 정확히 일치할 때만 연장 허용
             if row and row['token'] == token:
                 conn.execute("UPDATE worker_leases SET expires_at=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=? AND token=?", (expire_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id, token))
                 conn.execute("COMMIT"); return True
@@ -532,14 +584,12 @@ def safe_add_order_intent(spec):
         try:
             conn.execute("BEGIN IMMEDIATE")
             
-            # 🚨 패치: 동일 종목(Ticker)에 대해 이미 진행 중인(Open) 주문이 있다면 새로운 주문 생성 자체를 원천 차단! (스팸 방지)
             open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED', 'CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN')"
             check_query = f"SELECT id, status FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND status IN {open_states}"
             existing = conn.execute(check_query, (spec.broker, spec.environment, spec.account_fingerprint, spec.account_product_code, spec.portfolio_id, spec.strategy_id, spec.ticker)).fetchone()
             
             if existing:
                 conn.execute("ROLLBACK")
-                # 진행 중인 주문이 있으므로 조용히 무시함 (정상적인 보호 작동)
                 return False, f"Blocked: Open intent {existing['id']} ({existing['status']}) already exists for {spec.ticker}"
 
             corr_id = spec.correlation_id if spec.correlation_id else f"{spec.broker}_{spec.environment}_{spec.account_fingerprint}_{spec.account_product_code}_{spec.portfolio_id}_{spec.strategy_id}_{spec.ticker}_{spec.side}_{spec.intent_created_at}"
@@ -618,7 +668,6 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc
             delta_amt = new_cum_amt - o_row['tot_ccld_amt']
             delta_fill_price = delta_amt / delta_qty if delta_qty > 0 else 0
             
-            # 🚨 패치 2: AI 매매 수량을 수동 수량에 합산하지 않도록 출처 분리
             is_manual = (o_row['signal_source'] != 'SYSTEM')
             managed_qty_delta = delta_qty if is_manual else 0
             
@@ -649,7 +698,6 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc
             
             if "BUY" in order_type.upper():
                 new_p_qty = p_qty + delta_qty
-                # 🚨 AI 수량과 분리 적용
                 new_manual_qty = p_manual_qty + managed_qty_delta
                 new_p_buy = ((p_qty * p_buy) + (delta_qty * delta_fill_price)) / new_p_qty if new_p_qty > 0 else 0
                 if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_p_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
@@ -751,19 +799,16 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
             if not lease or lease['expires_at'] < now_str or lease['token'] != order['fencing_token']:
                 return reject('QUARANTINED', 'INVALID_LEASE', 'Invalid fencing token or lease expired')
 
-            # 1. 절대 방어선: 킬스위치는 출처(SYSTEM, UI_MANUAL) 불문하고 무조건 최우선 검사 (if문 밖으로 뺌)
             m_ks = conn.execute("SELECT value FROM settings WHERE key='master_kill_switch'").fetchone()
             a_ks = conn.execute("SELECT value FROM settings WHERE key=?", (f"kill_switch_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
             if (m_ks and json.loads(m_ks['value'])) or (a_ks and json.loads(a_ks['value'])):
                 return reject('RISK_REJECTED', 'KILL_SWITCH', 'Kill Switch ON')
 
-            # 2. 절대 방어선: REAL 계좌 주문 하드블록도 무조건 최우선 검사
             if env == "REAL":
                 real_status = CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
                 if real_status != 'APPROVED':
                     return reject('RISK_REJECTED', 'POST_BLOCKED', 'REAL POST Strictly Blocked')
 
-            # 3. 선택적 방어선: SYSTEM(봇) 주문일 때만 추가 검사 (Auto Trade 등)
             if order['signal_source'] == 'SYSTEM':
                 ap = conn.execute("SELECT value FROM settings WHERE key=?", (f"auto_pilot_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
                 if not ap or not json.loads(ap['value']):
@@ -830,7 +875,6 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
                 if (m_qty - r_qty) < order['qty']:
                     return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', f'Insufficient Qty (Mng: {m_qty}, Res: {r_qty}, Req: {order["qty"]})')
 
-            # 🚨 패치: 상태(status)와 펜싱 토큰(fencing_token)을 쿼리 조건에 박아넣는 완벽한 원자적 승인(CAS)
             res = conn.execute("UPDATE order_intents SET status='SUBMITTING', updated_at=? WHERE id=? AND status='CLAIMED' AND fencing_token=?", (now_str, order_id, order['fencing_token']))
             
             if res.rowcount == 0:
