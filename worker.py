@@ -154,7 +154,8 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
                 except Exception as e: logger.error(f"DB Error transitioning to REJECTED: {e}")
 
 def process_cancellations(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, portfolio_id, is_mock):
-    cancels = db.get_orders_by_status_and_env(['CANCEL_REQUESTED', 'CANCEL_UNKNOWN'], "KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id)
+    # 🚨 패치: CANCEL_UNKNOWN 상태인 주문은 API로 취소를 재요청하지 않음! (오직 체결 대사를 통해서만 상태 업데이트)
+    cancels = db.get_orders_by_status_and_env(['CANCEL_REQUESTED'], "KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id)
     for c in cancels:
         if not c['broker_order_id']: continue 
         status, msg = kis.cancel_kis_order_0013(app_key, app_sec, cano, acnt_prdt, token, c['broker_order_id'], c['branch_no'], c['qty'] - c['cum_filled_qty'], is_mock)
