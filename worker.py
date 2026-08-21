@@ -102,16 +102,20 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
                     created_dt = datetime.datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=quant.KST)
                     if (now_kst - created_dt).total_seconds() > 600:
                         if order['status'] == 'SUBMITTING':
-                            if not db.transition_order_status(order['id'], order['status'], 'REJECTED', worker_id=WORKER_ID, fencing_token=order.get('fencing_token'), reason="NO_EXEC_TIMEOUT"):
-                                logger.error(f"Failed to transition {order['id']} to REJECTED via timeout")
+                            # 🚨 패치 1: 10분이 지나도 미체결/미응답이면 REJECTED로 도망가지 않고 UNKNOWN으로 상태를 묶어 예약금을 유지시킴
+                            if not db.transition_order_status(order['id'], order['status'], 'UNKNOWN', worker_id=WORKER_ID, fencing_token=order.get('fencing_token'), reason="NO_EXEC_TIMEOUT_LOCK"):
+                                logger.error(f"Failed to transition {order['id']} to UNKNOWN via timeout")
+                            else: order['status'] = 'UNKNOWN'
                     continue
                         
             if not matched_execs:
                 created_dt = datetime.datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=quant.KST)
                 if (now_kst - created_dt).total_seconds() > 600:
                     if order['status'] == 'SUBMITTING':
-                        if not db.transition_order_status(order['id'], order['status'], 'REJECTED', worker_id=WORKER_ID, fencing_token=order.get('fencing_token'), reason="NO_EXEC_TIMEOUT"):
-                            logger.error(f"Failed to transition {order['id']} to REJECTED via timeout")
+                        # 🚨 패치 2: 10분이 지나도 미체결/미응답이면 REJECTED로 도망가지 않고 UNKNOWN으로 상태를 묶어 예약금을 유지시킴
+                        if not db.transition_order_status(order['id'], order['status'], 'UNKNOWN', worker_id=WORKER_ID, fencing_token=order.get('fencing_token'), reason="NO_EXEC_TIMEOUT_LOCK"):
+                            logger.error(f"Failed to transition {order['id']} to UNKNOWN via timeout")
+                        else: order['status'] = 'UNKNOWN'
                 continue
 
             latest_exec = matched_execs[0]
