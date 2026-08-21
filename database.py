@@ -295,7 +295,7 @@ def run_migration():
         if curr_ver < 15: _migrate_to_v15(conn)
         post_m = _get_db_metrics(conn)
         
-        # 🚨 교정 완료: Fragile한 oi_hash 검증 완전 제거. Data 개수와 총합만으로 무결성 보장
+        # 교정 완료: Fragile한 oi_hash 검증 완전 제거. Data 개수와 총합만으로 무결성 보장
         if pre_m['oi_count'] != post_m['oi_count']: raise RuntimeError("Lossless check failed: oi_count")
         if pre_m['pos_count'] != post_m['pos_count']: raise RuntimeError("Lossless check failed: pos_count")
         if pre_m['oi_qty'] != post_m['oi_qty']: raise RuntimeError("Lossless check failed: oi_qty")
@@ -310,7 +310,7 @@ def run_migration():
         conn.execute("COMMIT")
         print("Migration to V15 completed successfully.")
     except Exception as e:
-        # 🚨 교정 완료: Streamlit Cloud 화면에서 에러 내용을 볼 수 있도록 Traceback을 전진 배치
+        # 교정 완료: Streamlit Cloud 화면에서 에러 내용을 볼 수 있도록 Traceback을 전진 배치
         err_trace = traceback.format_exc()
         conn.execute("ROLLBACK")
         raise RuntimeError(f"DB_MIGRATE_ERROR: {e} | Backup: {backup_path} | Details: {err_trace}")
@@ -574,7 +574,7 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            o_row = conn.execute("SELECT qty, correlation_id, cum_filled_qty, tot_ccld_amt, avg_fill_price, status FROM order_intents WHERE id=? AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
+            o_row = conn.execute("SELECT qty, correlation_id, cum_filled_qty, tot_ccld_amt, avg_fill_price, status, signal_source FROM order_intents WHERE id=? AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
             if not o_row: conn.execute("ROLLBACK"); return False
             if new_cum_qty == o_row['cum_filled_qty'] and new_cum_amt == o_row['tot_ccld_amt']: conn.execute("ROLLBACK"); return False
                 
@@ -594,6 +594,10 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc
             delta_qty = new_cum_qty - o_row['cum_filled_qty']
             delta_amt = new_cum_amt - o_row['tot_ccld_amt']
             delta_fill_price = delta_amt / delta_qty if delta_qty > 0 else 0
+            
+            # 🚨 패치 2: AI 매매 수량을 수동 수량에 합산하지 않도록 출처 분리
+            is_manual = (o_row['signal_source'] != 'SYSTEM')
+            managed_qty_delta = delta_qty if is_manual else 0
             
             market = "KOSPI" if ticker.startswith('0') else "KOSDAQ"
             fee, slip, tax = quant.CostModel.calculate_cost(datetime.now(KST).date(), market, order_type, delta_fill_price, delta_qty, False)
@@ -618,20 +622,24 @@ def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc
             p_row = conn.execute("SELECT managed_qty, manual_qty, buy_price FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
             p_qty = p_row['managed_qty'] if p_row else 0
             p_buy = p_row['buy_price'] if p_row else 0.0
+            p_manual_qty = p_row['manual_qty'] if p_row else 0
             
             if "BUY" in order_type.upper():
                 new_p_qty = p_qty + delta_qty
+                # 🚨 AI 수량과 분리 적용
+                new_manual_qty = p_manual_qty + managed_qty_delta
                 new_p_buy = ((p_qty * p_buy) + (delta_qty * delta_fill_price)) / new_p_qty if new_p_qty > 0 else 0
-                if p_row: conn.execute("UPDATE positions SET managed_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_p_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_p_qty, delta_qty, new_p_buy, now_str))
+                if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_p_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_p_qty, new_manual_qty, new_p_buy, now_str))
             else: 
                 new_p_qty = p_qty - delta_qty
+                new_manual_qty = max(0, p_manual_qty - managed_qty_delta)
                 if new_p_qty < 0: 
                     conn.execute("UPDATE order_intents SET status='RECONCILIATION_REQUIRED' WHERE id=?", (order_id,))
                     conn.execute("INSERT INTO reconciliation_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, order_intent_id, event_type, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, 'NEGATIVE_QTY_DETECTED', ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id, now_str, f"qty: {new_p_qty}"))
                     conn.execute("COMMIT"); return False 
-                if new_p_qty == 0 and (not p_row or p_row['manual_qty'] == 0): conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                else: conn.execute("UPDATE positions SET managed_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_p_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                if new_p_qty == 0 and (not p_row or new_manual_qty == 0): conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                else: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_p_qty, new_manual_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
             conn.execute("COMMIT"); return True
         except Exception as e:
             conn.execute("ROLLBACK")
@@ -720,25 +728,20 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
             if not lease or lease['expires_at'] < now_str or lease['token'] != order['fencing_token']:
                 return reject('QUARANTINED', 'INVALID_LEASE', 'Invalid fencing token or lease expired')
 
-            # 🚨 1. 절대 방어선: 킬스위치는 출처(SYSTEM, UI_MANUAL) 불문하고 무조건 최우선 검사 (if문 밖으로 뺌)
+            # 1. 절대 방어선: 킬스위치는 출처(SYSTEM, UI_MANUAL) 불문하고 무조건 최우선 검사 (if문 밖으로 뺌)
             m_ks = conn.execute("SELECT value FROM settings WHERE key='master_kill_switch'").fetchone()
             a_ks = conn.execute("SELECT value FROM settings WHERE key=?", (f"kill_switch_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
             if (m_ks and json.loads(m_ks['value'])) or (a_ks and json.loads(a_ks['value'])):
                 return reject('RISK_REJECTED', 'KILL_SWITCH', 'Kill Switch ON')
 
-            # 🚨 2. 절대 방어선: REAL 계좌 주문 하드블록도 무조건 최우선 검사
+            # 2. 절대 방어선: REAL 계좌 주문 하드블록도 무조건 최우선 검사
             if env == "REAL":
                 real_status = CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
                 if real_status != 'APPROVED':
                     return reject('RISK_REJECTED', 'POST_BLOCKED', 'REAL POST Strictly Blocked')
 
-            # -------------------------------------------------------------
-            
-            # 🟡 3. 선택적 방어선: SYSTEM(봇) 주문일 때만 추가 검사 (Auto Trade 등)
+            # 3. 선택적 방어선: SYSTEM(봇) 주문일 때만 추가 검사 (Auto Trade 등)
             if order['signal_source'] == 'SYSTEM':
-                # 이곳에는 기존처럼 봇에게만 적용할 제약사항(예: auto_trade=False 이면 거절 등)이 위치합니다.
-                pass # (기존에 킬스위치 외에 다른 SYSTEM 전용 검사가 있었다면 이 아래에 유지)
-
                 ap = conn.execute("SELECT value FROM settings WHERE key=?", (f"auto_pilot_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
                 if not ap or not json.loads(ap['value']):
                     return reject('RISK_REJECTED', 'AUTO_PILOT_OFF', 'Auto Pilot is OFF')
