@@ -118,13 +118,26 @@ def pre_flight_risk_check(order_spec: OrderSpec, snap: StockSnapshot, ctx: RiskC
 
 def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: float, ma60: float, ma200: float, m60_up: bool) -> tuple[bool, float, str]:
     pass_ma200 = (close_p >= ma200) if cfg.ma200 else True
+    ma_status = f"[현재가 {close_p:,.0f} / MA20 {ma20:,.0f} / MA60 {ma60:,.0f} / MA200 {ma200:,.0f}]"
+    
+    if not pass_ma200:
+        return False, 50.0, f"조건미달: 장기 역배열 (현재가 < MA200) {ma_status}"
+
     if strat == Strategy.CORE:
         dist = (ma20 / ma60) - 1.0 if ma60 > 0 else 0.0
-        if pass_ma200 and dist >= cfg.buf and m60_up: return True, round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스"
+        if pass_ma200 and dist >= cfg.buf and m60_up: 
+            return True, round(min(85.0 + max(0.0, dist * 100.0), 99.0), 2), f"골든크로스 (이격도 {dist*100:+.2f}%, 상승추세) {ma_status}"
+        elif not m60_up:
+            return False, 50.0, f"조건미달: MA60 하락추세 {ma_status}"
+        else:
+            return False, 50.0, f"조건미달: 이격도 부족 (현재 {dist*100:+.2f}% < 기준 {cfg.buf*100:+.2f}%) {ma_status}"
     else:
         dist = (close_p / ma20) - 1.0 if ma20 > 0 else 0.0
-        if pass_ma200 and -0.05 <= dist <= 0.03: return True, round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목"
-    return False, 50.0, "조건미달"
+        if pass_ma200 and -0.05 <= dist <= 0.03: 
+            return True, round(min(85.0 + max(0.0, (0.03 - dist) * 100.0), 99.0), 2), f"눌림목 (MA20 이격 {dist*100:+.2f}%) {ma_status}"
+        else:
+            return False, 50.0, f"조건미달: 눌림목 범위 이탈 (MA20 이격 {dist*100:+.2f}%) {ma_status}"
+    return False, 50.0, f"조건미달 {ma_status}"
 
 def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float) -> tuple[bool, float, ExitReason]:
     sl_target = buy_p * (1.0 + cfg.sl)
@@ -159,11 +172,22 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         is_kis = c_price > 0
         now_dt = datetime.datetime.now(KST)
         snap = StockSnapshot(ticker=ticker, current_price=c_price if is_kis else fdr_close, high_price=high_p if is_kis else fdr_high, low_price=low_p if is_kis else fdr_low, ma20=ma20, ma60=ma60, ma200=ma200, m60_up=m60_up, broker_time=now_dt, received_at=now_dt, source="UI" if is_kis else "SIMULATION", is_halted=is_halted, freshness_sec=0.0, executable=is_kis)
-        snap.validate(is_halted)
-        if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, snap.reason
+        snap.validate(max_ttl_sec=99999) # 🚨 패치: 구버전의 validate(is_halted) 버그 수정
+        
+        ma_status = f"[현재가 {snap.current_price:,.0f} / MA20 {ma20:,.0f} / MA60 {ma60:,.0f} / MA200 {ma200:,.0f}]"
+        
+        if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, f"거래불가 상태 ({snap.reason}) {ma_status}"
+        
         if buy_price > 0:
-            is_sell, _, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60)
-            if is_sell: return snap.current_price, f"🔴 {s_reason.value} (예비)", 999.0, s_reason.value
+            is_sell, trigger_p, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60)
+            if is_sell:
+                detail_reason = ""
+                if s_reason == ExitReason.STOP_LOSS: detail_reason = f"손절매 (기준가 {trigger_p:,.0f}원 이탈) {ma_status}"
+                elif s_reason == ExitReason.TRAILING_STOP: detail_reason = f"트레일링스탑 (고점 {highest_price:,.0f}원 대비 하락) {ma_status}"
+                elif s_reason == ExitReason.TREND_EXIT: detail_reason = f"단기/중기 이동평균선 추세 이탈 {ma_status}"
+                else: detail_reason = f"조건 만족 {ma_status}"
+                return snap.current_price, f"🔴 {s_reason.value} (예비)", 999.0, detail_reason
+
         is_buy, score, b_reason = calc_buy_signal(strat, cfg, snap.current_price, ma20, ma60, ma200, m60_up)
         if is_buy: return snap.current_price, "🟢 매수 시그널 (예비)", score, b_reason
         return snap.current_price, "🟡 유지", 50.0, b_reason
