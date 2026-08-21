@@ -492,14 +492,19 @@ def acquire_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            now = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+            # 🚨 패치: SQLite 시간 의존 제거, Python 기준 절대 시각 주입
+            now_kst = datetime.now(KST)
+            now_str = now_kst.strftime('%Y-%m-%d %H:%M:%S')
+            expire_str = (now_kst + timedelta(seconds=ttl)).strftime('%Y-%m-%d %H:%M:%S')
+            
             row = conn.execute("SELECT worker_id, token, expires_at FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
-            if not row or row['expires_at'] < now:
+            
+            if not row or row['expires_at'] < now_str:
                 nt = (row['token'] + 1) if row else 1
-                conn.execute("INSERT OR REPLACE INTO worker_leases (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, worker_id, expires_at, token) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime', '+{} seconds'), ?)".format(ttl), (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id, nt))
+                conn.execute("INSERT OR REPLACE INTO worker_leases (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, worker_id, expires_at, token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id, expire_str, nt))
                 conn.execute("COMMIT"); return True, nt
             elif row['worker_id'] == worker_id:
-                conn.execute("UPDATE worker_leases SET expires_at=datetime('now', 'localtime', '+{} seconds') WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?".format(ttl), (broker, env, acc_fp, prdt_cd, port_id, strat_id))
+                conn.execute("UPDATE worker_leases SET expires_at=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (expire_str, broker, env, acc_fp, prdt_cd, port_id, strat_id))
                 conn.execute("COMMIT"); return True, row['token']
             conn.execute("ROLLBACK"); return False, 0
         except Exception as e:
