@@ -257,7 +257,15 @@ def fetch_daily_executions_0081(app_key: str, app_secret: str, cano: str, acnt_p
         params = {"CANO": cano, "ACNT_PRDT_CD": acnt_prdt, "INQR_STRT_DT": order_date, "INQR_END_DT": order_date, "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00", "PDNO": "", "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_DVSN_3": "00", "INQR_DVSN_1": "", "CTX_AREA_FK100": ctx_area_fk100, "CTX_AREA_NK100": ctx_area_nk100}
         
         res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
-        if res.state != "SUCCESS_DATA": break
+        
+        # 🚨 패치: 네트워크 오류나 중간 페이지 에러 시 부분 성공 처리(Silent Failure) 원천 차단
+        if res.state != "SUCCESS_DATA": 
+            if page > 0:
+                # 중간 페이지에서 끊겼다면 데이터 무결성이 깨진 것이므로 전체 조회 실패 처리
+                return KisResult("TRANSPORT_FAIL", f"Pagination failed at page {page}: {res.msg}", None)
+            else:
+                # 첫 페이지부터 실패 시 에러 상태 그대로 반환
+                return res
         
         data = res.data['data']
         if 'output1' in data and isinstance(data['output1'], list):
@@ -272,6 +280,7 @@ def fetch_daily_executions_0081(app_key: str, app_secret: str, cano: str, acnt_p
             ctx_area_fk100, ctx_area_nk100 = new_fk, new_nk
             page += 1
         else: break
+        
     return KisResult("SUCCESS_DATA", "OK", executions)
 
 def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: str, token: str, ticker: str, is_buy: bool, qty: int, price: float, is_mock: bool = True):
