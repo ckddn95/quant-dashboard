@@ -85,7 +85,6 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
                 
                 if len(candidates) == 1:
                     order['broker_order_id'] = candidates[0]['odno']
-                    # 🚨 패치 6: bcnc_ptno 대신 KIS 공식 지점 필드(ord_gno_brno)로 교체
                     order['branch_no'] = candidates[0].get('ord_gno_brno', '') 
                     try:
                         with db.get_connection() as conn:
@@ -129,7 +128,7 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
                 'rmn_qty': int(latest_exec.get('rmn_qty', 0)),
                 'cncl_yn': latest_exec.get('cncl_yn', 'N'),
                 'rjct_qty': int(latest_exec.get('rjct_qty', 0)),
-                'orgno': latest_exec.get('krx_fwdg_ord_orgno', latest_exec.get('ord_gno_brno', '')),  # 🚨 패치 6 교체 반영
+                'orgno': latest_exec.get('krx_fwdg_ord_orgno', latest_exec.get('ord_gno_brno', '')), 
                 'ord_tmd': latest_exec.get('ord_tmd', '')
             }
             
@@ -147,7 +146,6 @@ def reconcile_executions(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, 
                 try: db.transition_order_status(order['id'], order['status'], 'REJECTED', worker_id=WORKER_ID, fencing_token=order.get('fencing_token'), reason="BROKER_REJECTED")
                 except Exception as e: logger.error(f"DB Error transitioning to REJECTED: {e}")
 
-# 🚨 패치 5: 취소 요청(Cancel)도 이중 지불 방지를 위해 Claim -> Authorize(CAS) 게이트를 통과하도록 변경
 def process_cancellations(app_key, app_sec, cano, acnt_prdt, token, env, acc_fp, portfolio_id, is_mock):
     while True:
         try: lease_ok, lease_tok = db.acquire_worker_lease("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, WORKER_ID, ttl=10)
@@ -234,10 +232,27 @@ def run_worker_loop():
                         logger.warning(f"⚠️ 주문가능금액 조회 실패. 가용 현금을 0으로 제한: {c_res.msg}")
                         raw_cash = 0.0
                     
+                    # 🚨 패치: 당일 장 시작 기준 자산(Baseline Equity) 및 순수 일일 손익 계산 로직 적용
+                    today_str = datetime.datetime.now(quant.KST).strftime('%Y-%m-%d')
+                    baseline_key = f"baseline_equity_KIS_{env}_{acc_fp}_{acnt_prdt}_{portfolio_id}_{portfolio_id}_{today_str}"
+                    
+                    starting_equity = db.get_setting(baseline_key, None)
+                    if starting_equity is None:
+                        db.set_setting(baseline_key, total_eval)
+                        starting_equity = total_eval
+                    
+                    today_cash_flows = db.get_cash_flows_by_date("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, datetime.datetime.now(quant.KST).date(), datetime.datetime.now(quant.KST).date())
+                    net_cash_flow_today = sum(today_cash_flows.values()) if today_cash_flows else 0.0
+                    
+                    adjusted_start_equity = starting_equity + net_cash_flow_today
+                    if adjusted_start_equity > 0:
+                        daily_pnl_pct = (total_eval - adjusted_start_equity) / adjusted_start_equity
+                    else:
+                        daily_pnl_pct = 0.0
+
                     try: db.record_daily_account_equity("KIS", env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, total_eval, raw_cash)
                     except Exception as e: logger.error(f"DB Error record_equity: {e}")
                     
-                    daily_pnl_pct = float(bal_s[0]['evlu_pfls_smtl_amt']) / (total_eval - float(bal_s[0]['evlu_pfls_smtl_amt'])) if total_eval > float(bal_s[0]['evlu_pfls_smtl_amt']) else 0.0
                     strat_cfg = quant.get_default_config(quant.Strategy(portfolio_id))
                     boost_addon = db.CONTRACT.get('booster_policy', {}).get('value', 0.10) if strat_cfg.boost else 0.0
                     max_exposure = total_eval * min(1.0, 0.90 + boost_addon)
