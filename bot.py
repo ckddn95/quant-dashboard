@@ -43,6 +43,10 @@ def run_signal_bot():
 
     while True:
         try:
+        # [P0-4] 미완성 1분봉 반환 방지를 위해 정각에서 5초 대기 (5초 지연 호출)
+        import datetime, time
+        if datetime.datetime.now().second < 5:
+            time.sleep(5 - datetime.datetime.now().second)
             now_kst = datetime.datetime.now(KST)
             hm = now_kst.hour * 100 + now_kst.minute
 

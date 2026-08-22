@@ -259,7 +259,9 @@ def fetch_kis_current_price_ext(app_key: str, app_secret: str, ticker: str, toke
     headers = {"authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST01010100"}
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{app_key}_{is_mock}"
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker,
+            "FID_INPUT_HOUR_1": "153000",
+            "FID_PW_DATA_INCU_YN": "N"}
     
     res = _safe_get(url, headers=headers, params=params, max_retries=2, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     
@@ -288,7 +290,9 @@ def fetch_kis_minute_chart(app_key: str, app_secret: str, ticker: str, token: st
     headers = {"authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST03010200"}
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{app_key}_{is_mock}"
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker, "FID_ETC_CLS_CODE": ""}
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker,
+            "FID_INPUT_HOUR_1": "153000",
+            "FID_PW_DATA_INCU_YN": "N", "FID_ETC_CLS_CODE": ""}
     
     res = _safe_get(url, headers=headers, params=params, max_retries=2, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":

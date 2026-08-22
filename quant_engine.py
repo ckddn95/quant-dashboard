@@ -1,3 +1,11 @@
+
+def is_market_open(current_time=None):
+    """KRX 장 세션 검증 (주말/휴장일 및 시간외 블록)"""
+    import datetime
+    if current_time is None: current_time = datetime.datetime.now()
+    if current_time.weekday() >= 5: return False # 주말 차단
+    current_time_int = current_time.hour * 100 + current_time.minute
+    return 900 <= current_time_int <= 1520 # 장중 세션만 허용
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
