@@ -206,7 +206,10 @@ def fetch_kis_orderable_cash(app_key: str, app_secret: str, cano: str, acnt_prdt
     
     res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":
-        return KisResult("SUCCESS_DATA", "OK", float(res.data['data'].get('output', {}).get('ord_psbl_cash', 0.0)))
+        out = res.data['data'].get('output', {})
+        # 🚨 패치 12: 미수 방지 원칙에 따라 일반 ord_psbl_cash 대신 순수 현금 매수 가능 금액인 nrcvb_buy_amt를 최우선 사용
+        cash_val = float(out.get('nrcvb_buy_amt', out.get('ord_psbl_cash', 0.0)))
+        return KisResult("SUCCESS_DATA", "OK", cash_val)
     return res
 
 def fetch_kis_current_price_ext(app_key: str, app_secret: str, ticker: str, token: str, is_mock: bool = True) -> KisResult:

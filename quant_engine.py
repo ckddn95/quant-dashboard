@@ -92,7 +92,8 @@ class CostModel:
 def get_default_config(strat: Strategy) -> StrategyConfig:
     c = db.CONTRACT['strategy'][strat.value]
     bf = db.CONTRACT.get('trend_exit', {}).get('buffer_factor', 0.5)
-    return StrategyConfig(ma200=c['ma200'], buf=c['buf'], sl=c['sl'], alloc=c['alloc'], ts_tgt=c['ts_tgt'], ts_drp=c['ts_drp'], cd=c['cd'], min_h=c['min_h'], boost=c['boost'], buffer_factor=bf)
+    cd_sess = db.CONTRACT.get('cooldown_policy', {}).get('cooldown_sessions', c['cd'])
+    return StrategyConfig(ma200=c['ma200'], buf=c['buf'], sl=c['sl'], alloc=c['alloc'], ts_tgt=c['ts_tgt'], ts_drp=c['ts_drp'], cd=cd_sess, min_h=c['min_h'], boost=c['boost'], buffer_factor=bf)
 
 def load_krx_universe():
     try: return fdr.StockListing('KRX')
@@ -138,7 +139,6 @@ def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: 
             return False, 50.0, f"조건미달: 눌림목 범위 이탈 (MA20 이격 {dist*100:+.2f}%) {ma_status}"
     return False, 50.0, f"조건미달 {ma_status}"
 
-# 🚨 패치 7: 당일 누적 저가(low_p)를 현재가처럼 취급하던 시뮬레이션 로직을 분리. 라이브(is_live) 환경에서는 오직 순수 현재가(close_p)로만 위기 상황을 판정.
 def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float, is_live: bool = False) -> tuple[bool, float, ExitReason]:
     sl_target = buy_p * (1.0 + cfg.sl)
     ts_target = highest_p * (1.0 + cfg.ts_drp)
@@ -407,6 +407,8 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     if pd.isna(row['MA200']) or row['Close'] <= 0: continue
                     
                     is_buy, score, reason = calc_buy_signal(strat, cfg, row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_UP'])
+                    
+                    # 🚨 패치 13: 재무장(Rearm) 조건 단일화 (신호가 false에서 true로 다시 켜질 때만 재진입 허용)
                     if not is_buy:
                         rearm_state[tk] = True
                     elif is_buy and rearm_state.get(tk, True):
