@@ -160,7 +160,6 @@ def run_signal_bot():
                     
                     kis_qty = stocks_held.get(tk, 0)
                     
-                    # 🚨 패치 8: KIS 실제 수량과 DB 원장 수량(관리+수동) 불일치 시 봇 매매 원천 차단 및 대사/격리 트리거
                     if m_qty > 0 or manual_qty > 0:
                         if kis_qty != (m_qty + manual_qty):
                             print(f"⚠️ [Reconciliation Alert] {item['종목명']} ({tk}) 브로커수량({kis_qty}) != DB수량({m_qty}+{manual_qty}). 매매 보류.")
@@ -169,7 +168,6 @@ def run_signal_bot():
                             except: pass
                             continue
                             
-                    # 자동 봇은 절대 수동 수량(manual_qty)을 건드리지 않고, 오직 자기가 산 물량(m_qty)만 팔 수 있습니다.
                     bot_sell_qty = m_qty
 
                     p_res = kis.fetch_kis_current_price_ext(sys_app_key, sys_app_sec, tk, token, is_mock)
@@ -195,15 +193,22 @@ def run_signal_bot():
                             conn.execute("UPDATE positions SET highest_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
                                          (high_p, "KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk))
 
+                    # 🚨 패치 9: 쿨다운을 이유로 루프 전체를 continue 하지 않고 상태만 체크함
                     sig_state = db.get_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk)
+                    is_cooldown = False
                     if sig_state:
                         cooldown_ts = sig_state.get('cooldown_until_session')
                         if cooldown_ts and pd.to_datetime(cooldown_ts).tz_localize('UTC').tz_convert(KST) > now_kst:
-                            continue
+                            is_cooldown = True
 
                     cp, action, score, reason = quant.evaluate_stock_for_ui(tk, strat, cfg, buy_p, high_p, cp, h_price, l_price, is_halted, days_held)
                     
-                    # 🚨 패치 7: 서로 다른 1분봉 2개를 확인해야만 최종 확정 (SL/TS 제외)
+                    # 🚨 쿨다운 시 오직 '매수'만 보류하고, 손절/트레일링스탑/추세매도는 정상 작동하도록 허용
+                    if is_cooldown and ("매수" in action or "🟢" in action):
+                        action = "🟡 쿨다운 기간 (매수 보류)"
+                        score = 0.0
+                        reason = "최근 2연속 손실로 인한 거래 휴식"
+                    
                     curr_bar_min = now_kst.replace(second=0, microsecond=0)
                     last_bar_str = sig_state.get('last_distinct_bar_timestamp') if sig_state else None
                     last_bar_min = datetime.datetime.strptime(last_bar_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST) if last_bar_str else (curr_bar_min - datetime.timedelta(minutes=10))
@@ -279,14 +284,8 @@ def run_signal_bot():
                         db.safe_add_order_intent(spec)
                         print(f"🔥 [SELL SIGNAL] {name} ({tk}) - {reason}")
                         
+                        # 🚨 패치 9: 매도 의도(Intent) 생성 단계에서는 가짜 손익(loss_streak)을 갱신하지 않고 초기화만 함
                         db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'NONE', 'consecutive_count': 0})
-                        
-                        if "STOP_LOSS" in reason or "TRAILING_STOP" in reason:
-                            curr_streak = sig_state.get('loss_streak', 0) if sig_state else 0
-                            new_streak = curr_streak + 1
-                            cd_days = 3 if new_streak >= 3 else 0 
-                            cd_until = (now_kst + datetime.timedelta(days=cd_days)).strftime('%Y-%m-%d %H:%M:%S') if cd_days > 0 else None
-                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'loss_streak': new_streak, 'cooldown_until_session': cd_until})
                             
                     elif target_side == "BUY":
                         allow_amt = min(usable_cash, max(0.0, target_buy_amt - (total_qty * cp)))
@@ -304,7 +303,8 @@ def run_signal_bot():
                             print(f"🛒 [BUY SIGNAL] {name} ({tk}) - {add_qty}주 (사유: {reason})")
                             
                             usable_cash -= (add_qty * cp * 1.05)
-                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'loss_streak': 0, 'current_signal': 'NONE', 'consecutive_count': 0})
+                            # 🚨 패치 9: 매수 의도(Intent) 생성 단계에서는 loss_streak 초기화를 없앰 (오직 체결 확정 시에만 동작)
+                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'NONE', 'consecutive_count': 0})
 
         except Exception as e:
             print(f"🚨 [Signal Bot] Fatal Error in loop: {e}")
