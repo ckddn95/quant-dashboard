@@ -18,14 +18,23 @@ def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     if st.session_state["password_correct"]: return True
     hashed_pw_env = os.getenv("ADMIN_PASSWORD_HASH")
-    if not hashed_pw_env: st.warning("⚠️ 초기 보안 설정 필요"); st.stop()
+    if not hashed_pw_env: 
+        st.error("🚨 [보안 결함 - Fail-closed] ADMIN_PASSWORD_HASH 환경변수가 설정되지 않았습니다. 외부 침입 방지를 위해 시스템 구동을 전면 차단합니다.")
+        st.stop()
+        
+    # Brute-force 방어: 로그인 실패 횟수 제한
+    if "login_attempts" not in st.session_state:
+        st.session_state["login_attempts"] = 0
+    if st.session_state["login_attempts"] >= 5:
+        st.error("🔒 로그인 실패 횟수 초과. 보안을 위해 세션이 잠겼습니다. 서버를 재시작하십시오.")
+        st.stop()
     with st.form("login_form"):
         pwd_input = st.text_input("비밀번호", type="password")
         if st.form_submit_button("로그인") and bcrypt.checkpw(pwd_input.encode('utf-8'), hashed_pw_env.encode('utf-8')):
             st.session_state["password_correct"] = True; st.rerun()
     return False
 
-#if not check_password(): st.stop()
+if not check_password(): st.stop()
 
 def mts_metric_html(label, value, delta=None):
     val_color, val_str = "white", str(value)
