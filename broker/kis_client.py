@@ -139,7 +139,6 @@ def _strict_post(url: str, headers: dict, data: dict, rate_limit_key: str = "def
         if res.status_code == 429:
             return KisResult("BUSINESS_REJECT", "Rate limit (429)", None)
 
-        # 🚨 패치 11: HTTP 5xx 응답은 확정 거절(REJECTED)로 처리하지 않고 UNKNOWN으로 격리하여 중복 POST 재전송을 원천 차단
         if 500 <= res.status_code < 600:
             return KisResult("UNKNOWN", f"Server Error ({res.status_code}) - Treat as UNKNOWN", None)
 
@@ -152,11 +151,11 @@ def _strict_post(url: str, headers: dict, data: dict, rate_limit_key: str = "def
             err_msg = res_data.get('msg1', res_data.get('error_description', 'Business Error'))
             return KisResult("BUSINESS_REJECT", err_msg, res_data)
 
-    # 🚨 패치 11: 타임아웃 및 네트워크 예외 시 재전송(Retry)을 절대 수행하지 않고 UNKNOWN / TRANSPORT_FAIL로 즉시 반환 (단발성 원칙 준수)
     except requests.exceptions.Timeout:
         return KisResult("UNKNOWN", "Timeout - Single-shot POST unconfirmed, treating as UNKNOWN", None)
     except requests.exceptions.RequestException as e:
         return KisResult("TRANSPORT_FAIL", f"HTTP Exception: {str(e)}", None)
+
 def fetch_kis_account_balance(app_key: str, app_secret: str, cano: str, acnt_prdt: str, token: str, is_mock: bool = True) -> KisResult:
     url = f"{get_base_url(is_mock)}/uapi/domestic-stock/v1/trading/inquire-balance"
     headers = {"authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "VTTC8434R" if is_mock else "TTTC8434R"}
@@ -198,7 +197,6 @@ def fetch_kis_orderable_cash(app_key: str, app_secret: str, cano: str, acnt_prdt
     rate_key = f"{cano}_{is_mock}"
     
     dvsn = "01" if order_kind.upper() == "MARKET" else "00"
-    
     safe_ticker = ticker if ticker.strip() != "" else "005930"
     safe_price = str(int(price)) if price > 0 else "0"
     
@@ -207,7 +205,6 @@ def fetch_kis_orderable_cash(app_key: str, app_secret: str, cano: str, acnt_prdt
     res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":
         out = res.data['data'].get('output', {})
-        # 🚨 패치 12: 미수 방지 원칙에 따라 일반 ord_psbl_cash 대신 순수 현금 매수 가능 금액인 nrcvb_buy_amt를 최우선 사용
         cash_val = float(out.get('nrcvb_buy_amt', out.get('ord_psbl_cash', 0.0)))
         return KisResult("SUCCESS_DATA", "OK", cash_val)
     return res
@@ -237,12 +234,21 @@ def fetch_kis_current_price_ext(app_key: str, app_secret: str, ticker: str, toke
             return KisResult("BUSINESS_REJECT", "Invalid Price <= 0", None)
             
         return KisResult("SUCCESS_DATA", "OK", {
-            "price": price, 
-            "high": high, 
-            "low": low, 
-            "is_halted": is_halted
+            "price": price, "high": high, "low": low, "is_halted": is_halted
         })
+    return res
+
+def fetch_kis_minute_chart(app_key: str, app_secret: str, ticker: str, token: str, is_mock: bool = True) -> KisResult:
+    url = f"{get_base_url(is_mock)}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+    headers = {"authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "FHKST03010200"}
+    auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
+    rate_key = f"{app_key}_{is_mock}"
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker, "FID_ETC_CLS_CODE": ""}
     
+    res = _safe_get(url, headers=headers, params=params, max_retries=2, rate_limit_key=rate_key, auth_ctx=auth_ctx)
+    if res.state == "SUCCESS_DATA":
+        out = res.data['data'].get('output2', [])
+        return KisResult("SUCCESS_DATA", "OK", out)
     return res
 
 def fetch_daily_executions_0081(app_key: str, app_secret: str, cano: str, acnt_prdt: str, token: str, is_mock: bool = True, order_date: str = "") -> KisResult:
@@ -262,12 +268,9 @@ def fetch_daily_executions_0081(app_key: str, app_secret: str, cano: str, acnt_p
         params = {"CANO": cano, "ACNT_PRDT_CD": acnt_prdt, "INQR_STRT_DT": order_date, "INQR_END_DT": order_date, "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00", "PDNO": "", "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_DVSN_3": "00", "INQR_DVSN_1": "", "CTX_AREA_FK100": ctx_area_fk100, "CTX_AREA_NK100": ctx_area_nk100}
         
         res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
-        
         if res.state != "SUCCESS_DATA": 
-            if page > 0:
-                return KisResult("TRANSPORT_FAIL", f"Pagination failed at page {page}: {res.msg}", None)
-            else:
-                return res
+            if page > 0: return KisResult("TRANSPORT_FAIL", f"Pagination failed at page {page}: {res.msg}", None)
+            else: return res
         
         data = res.data['data']
         if 'output1' in data and isinstance(data['output1'], list):
@@ -292,7 +295,7 @@ def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: 
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    # 🚨 패치: 주문(Order) Payload에 KIS 공식 필수 필드(KRX, 00, 0)를 완벽하게 주입
+    # 🚨 패치 14: KIS 공식 예제 준수 - 매수는 SLL_TYPE 빈값(""), 일반 매도는 SLL_TYPE="01" 로 명확히 분기
     data = {
         "CANO": cano, 
         "ACNT_PRDT_CD": acnt_prdt, 
@@ -300,7 +303,7 @@ def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: 
         "ORD_DVSN": "01" if price == 0 else "00", 
         "ORD_QTY": str(int(qty)), 
         "ORD_UNPR": str(int(price)),
-        "SLL_TYPE": "00",
+        "SLL_TYPE": "" if is_buy else "01",
         "EXCG_ID_DVSN_CD": "KRX",
         "CNDT_PRIC": "0"
     }
@@ -320,7 +323,7 @@ def cancel_kis_order_0013(app_key: str, app_secret: str, cano: str, acnt_prdt: s
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    # 🚨 패치: 취소(Cancel) Payload에 KIS 공식 필수 필드(KRX, 00, 0)를 완벽하게 주입
+    # 🚨 패치 14: KIS 공식 취소 스키마에 존재하지 않는 SLL_TYPE을 제거하고 표준 필드만으로 정밀 구성
     data = {
         "CANO": cano, 
         "ACNT_PRDT_CD": acnt_prdt, 
@@ -332,7 +335,6 @@ def cancel_kis_order_0013(app_key: str, app_secret: str, cano: str, acnt_prdt: s
         "ORD_UNPR": "0", 
         "QTY_ALL_ORD_YN": "Y" if qty == 0 else "N",
         "EXCG_ID_DVSN_CD": "KRX",
-        "SLL_TYPE": "00",
         "CNDT_PRIC": "0"
     }
     
