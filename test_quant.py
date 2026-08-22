@@ -63,8 +63,9 @@ def test_03_kis_payload_completeness(monkeypatch):
     
     kis.execute_kis_order_001x("app", "sec", "12345678", "01", "token", "005930", True, 10, 0, True)
     
+    # 🚨 패치 3: KIS 공식 명세에 맞춰 정답지를 "01"에서 "KRX"로 교체!
     assert captured_data.get("SLL_TYPE") == "00", "SLL_TYPE 필드가 누락되었거나 틀렸습니다."
-    assert captured_data.get("EXCG_ID_DVSN_CD") == "01", "EXCG_ID_DVSN_CD 필드가 누락되었습니다."
+    assert captured_data.get("EXCG_ID_DVSN_CD") == "KRX", "EXCG_ID_DVSN_CD 필드가 KRX가 아닙니다."
     assert captured_data.get("CNDT_PRIC") == "0", "CNDT_PRIC 필드가 누락되었습니다."
 
 def test_04_version_mismatch_quarantine():
