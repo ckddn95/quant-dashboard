@@ -139,19 +139,25 @@ def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: 
             return False, 50.0, f"조건미달: 눌림목 범위 이탈 (MA20 이격 {dist*100:+.2f}%) {ma_status}"
     return False, 50.0, f"조건미달 {ma_status}"
 
+# 🚨 패치 1: Look-ahead Bias 차단 (highest_p는 오직 T-1일 이전 고점만을 의미함)
 def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float) -> tuple[bool, float, ExitReason]:
     sl_target = buy_p * (1.0 + cfg.sl)
-    ts_target = max(highest_p, high_p) * (1.0 + cfg.ts_drp)
+    ts_target = highest_p * (1.0 + cfg.ts_drp)  # 당일 high_p 제외
+    
     if open_p <= sl_target: return True, open_p, ExitReason.STOP_LOSS
-    if (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (open_p <= ts_target): return True, open_p, ExitReason.TRAILING_STOP
+    if (highest_p >= buy_p * (1.0 + cfg.ts_tgt)) and (open_p <= ts_target): return True, open_p, ExitReason.TRAILING_STOP
+    
     hit_sl = low_p <= sl_target
-    hit_ts = (max(highest_p, high_p) >= buy_p * (1.0 + cfg.ts_tgt)) and (low_p <= ts_target)
+    hit_ts = (highest_p >= buy_p * (1.0 + cfg.ts_tgt)) and (low_p <= ts_target)
+    
     if hit_sl and hit_ts: return True, min(sl_target, ts_target), ExitReason.STOP_LOSS
     elif hit_sl: return True, sl_target, ExitReason.STOP_LOSS
     elif hit_ts: return True, ts_target, ExitReason.TRAILING_STOP
+    
     if days_held >= cfg.min_h:
         if strat == Strategy.CORE and close_p < ma60 * (1.0 - cfg.buf * cfg.buffer_factor): return True, close_p, ExitReason.TREND_EXIT
         elif strat == Strategy.SATELLITE and close_p < ma20 * (1.0 - cfg.buf * cfg.buffer_factor): return True, close_p, ExitReason.TREND_EXIT
+        
     return False, 0.0, ExitReason.UNKNOWN
 
 _fdr_cache = {}
@@ -172,7 +178,7 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         is_kis = c_price > 0
         now_dt = datetime.datetime.now(KST)
         snap = StockSnapshot(ticker=ticker, current_price=c_price if is_kis else fdr_close, high_price=high_p if is_kis else fdr_high, low_price=low_p if is_kis else fdr_low, ma20=ma20, ma60=ma60, ma200=ma200, m60_up=m60_up, broker_time=now_dt, received_at=now_dt, source="UI" if is_kis else "SIMULATION", is_halted=is_halted, freshness_sec=0.0, executable=is_kis)
-        snap.validate(max_ttl_sec=99999) # 🚨 패치: 구버전의 validate(is_halted) 버그 수정
+        snap.validate(max_ttl_sec=99999) 
         
         ma_status = f"[현재가 {snap.current_price:,.0f} / MA20 {ma20:,.0f} / MA60 {ma60:,.0f} / MA200 {ma200:,.0f}]"
         
@@ -284,28 +290,33 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             for order in pending_orders:
                 tk = order['ticker']
                 if tk not in dfs or current_date not in dfs[tk].index:
-                    still_pending.append(order)
+                    if order['side'] == 'SELL': still_pending.append(order)
+                    # 🚨 패치 3: 미체결 BUY는 하루 지나면 TTL 만료로 간주하여 자동 폐기
                     continue 
                 open_p = dfs[tk].loc[current_date, 'Open']
                 if pd.isna(open_p) or open_p <= 0:
-                    still_pending.append(order)
+                    if order['side'] == 'SELL': still_pending.append(order)
                     continue 
                 
                 mkt = ticker_to_market.get(tk, "KOSDAQ")
                 if order['side'] == 'BUY':
-                    cost_inc, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "BUY", open_p, 1, use_legacy_cost)
-                    cost_price_per_share = open_p + cost_inc
+                    cost_inc_per_share, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "BUY", open_p, 1, use_legacy_cost)
+                    required_per_share = open_p + cost_inc_per_share
                     executable_qty = int(order['qty'])
-                    if cash < cost_price_per_share * executable_qty: executable_qty = int(cash // cost_price_per_share)
+                    if cash < required_per_share * executable_qty: executable_qty = int(cash // required_per_share)
+                    
                     if executable_qty > 0:
-                        cash -= cost_price_per_share * executable_qty 
-                        total_cost_drag += (cost_inc * executable_qty)
+                        total_cost = cost_inc_per_share * executable_qty
+                        cash -= (open_p * executable_qty) + total_cost 
+                        total_cost_drag += total_cost
                         total_traded_value += open_p * executable_qty
+                        
+                        # 🚨 패치 2: 실거래와 동일하게 세금/수수료 배제된 순수 체결가를 평단(buy_price)으로 고정
                         if tk in positions:
                             old_qty, old_bp = positions[tk]['qty'], positions[tk]['buy_price']
                             new_qty = old_qty + executable_qty
-                            positions[tk].update({"qty": new_qty, "buy_price": ((old_qty * old_bp) + (executable_qty * cost_price_per_share)) / new_qty, "highest": max(positions[tk]['highest'], cost_price_per_share)})
-                        else: positions[tk] = {"qty": executable_qty, "buy_price": cost_price_per_share, "highest": cost_price_per_share, "days": 0, "entry_date": current_date}
+                            positions[tk].update({"qty": new_qty, "buy_price": ((old_qty * old_bp) + (executable_qty * open_p)) / new_qty})
+                        else: positions[tk] = {"qty": executable_qty, "buy_price": open_p, "highest": open_p, "days": 0, "entry_date": current_date}
                         rearm_state[tk] = False
                 elif order['side'] == 'SELL' and tk in positions:
                     cost_inc, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "SELL", open_p, positions[tk]['qty'], use_legacy_cost)
@@ -330,7 +341,9 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 row = dfs[tk].loc[current_date]
                 if row['Low'] <= 0 or row['High'] <= 0: continue 
                 
-                pos['days'] += 1; pos['highest'] = max(pos['highest'], row['High'])
+                pos['days'] += 1
+                
+                # 🚨 패치 1: 평가(calc_sell_signal)를 당일 고가(High)가 갱신되기 직전에 실시하여 미래 참조 방지
                 is_sell, trigger_price, exit_reason = calc_sell_signal(strat, cfg, row['Open'], row['High'], row['Low'], row['Close'], pos['buy_price'], pos['highest'], pos['days'], row['MA20'], row['MA60'])
                 
                 if is_sell and trigger_price > 0 and exit_reason in [ExitReason.STOP_LOSS, ExitReason.TRAILING_STOP]:
@@ -353,18 +366,26 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     continue
                 elif is_sell and exit_reason == ExitReason.TREND_EXIT:
                     pending_orders.append({"ticker": tk, "side": "SELL", "qty": pos['qty'], "reason": exit_reason.value})
+                
+                # 매도 판정이 모두 끝난 뒤에야 비로소 오늘 고가를 내일의 트레일링 스탑 최고가로 갱신함
+                pos['highest'] = max(pos['highest'], row['High'])
             
             daily_eval = cash
             for tk, pos in positions.items():
                 try: daily_eval += pos['qty'] * dfs[tk]['Close'].loc[:current_date].dropna().iloc[-1]
                 except Exception: daily_eval += pos['qty'] * pos['buy_price']
-            nav_history.append({"Date": current_date, "NAV": daily_eval, "Cash": cash})
             
-            if len(nav_history) >= 2 and nav_history[-2]["NAV"] > 0:
-                daily_pure_ret = (daily_eval - external_cash_flows.get(current_date_str, 0)) / nav_history[-2]["NAV"]
-                twr_index *= daily_pure_ret
-                daily_pnl_pct = daily_pure_ret - 1.0
+            # 🚨 패치 5: TWR 및 성과 지표 산출 시 외부 자본 입출금 왜곡 완벽 통제 (Pure Return)
+            if len(nav_history) >= 1:
+                prev_nav = nav_history[-1]["NAV"]
+                if prev_nav > 0:
+                    daily_pure_ret = (daily_eval - external_cash_flows.get(current_date_str, 0)) / prev_nav
+                    twr_index *= daily_pure_ret
+                    daily_pnl_pct = daily_pure_ret - 1.0
+                else: daily_pnl_pct = 0.0
             else: daily_pnl_pct = 0.0
+                
+            nav_history.append({"Date": current_date, "NAV": daily_eval, "Cash": cash, "Pure_Return": daily_pnl_pct})
             
             is_weekly_scan_day = (i == len(calendar) - 1) or (not is_weekly_scan) or (current_date.isocalendar()[1] != calendar[i+1].isocalendar()[1])
                 
@@ -402,12 +423,12 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     alloc_amt = min(available_cash, available_budget, room)
                     if alloc_amt > 0:
                         mkt = ticker_to_market.get(cand['ticker'], "KOSDAQ")
-                        cost_inc, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "BUY", cand['close'], 1, use_legacy_cost)
-                        cost_price_per_share = cand['close'] + cost_inc
-                        qty = int(alloc_amt // cost_price_per_share)
+                        cost_inc_per_share, slip, tax = CostModel.calculate_cost(current_date.date(), mkt, "BUY", cand['close'], 1, use_legacy_cost)
+                        req_per_share = cand['close'] + cost_inc_per_share
+                        qty = int(alloc_amt // req_per_share)
                         if qty > 0:
                             pending_orders.append({"ticker": cand['ticker'], "side": "BUY", "qty": qty, "reason": cand['reason']})
-                            deduct_amt = qty * cost_price_per_share
+                            deduct_amt = qty * req_per_share
                             available_cash -= deduct_amt
                             available_budget -= deduct_amt
 
@@ -421,7 +442,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         nav_df = pd.DataFrame(nav_history)
         final_asset = nav_df['NAV'].iloc[-1]
         
-        # 🚨 패치: 거래가 0건일 때 수학적 오류(-15.87)를 원천 차단하는 로직 강화
         if len(trade_log) == 0 and len(positions) == 0:
             cagr = 0.0
             turnover_rate = 0.0
@@ -429,9 +449,8 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             disp_sharpe = "거래 내역 없음"
             disp_sortino = "거래 내역 없음"
         else:
-            nav_df['Return'] = nav_df['NAV'].pct_change().fillna(0)
             rf_daily = 0.03 / 252 
-            excess_returns = nav_df['Return'] - rf_daily
+            excess_returns = nav_df['Pure_Return'] - rf_daily
             
             if excess_returns.std() > 0:
                 sharpe_ratio = (excess_returns.mean() / excess_returns.std() * np.sqrt(252))
@@ -455,11 +474,11 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             win_rate = (sum(1 for p in trade_log if p > 0) / len(trade_log) * 100) if trade_log else 0.0
 
         return {
-            "status": "success", "final_asset": final_asset, "final_port_ret": (final_asset / init_cash - 1) * 100, 
+            "status": "success", "final_asset": final_asset, "final_port_ret": (twr_index - 1) * 100, 
             "metrics": {"TWR": (twr_index - 1) * 100},
             "trade_logs": closed_trades_log, "nav_history": nav_df,
             "summary_rows": [
-                {"분석 지표": "누적 수익률 (복리)", "결과값": f"{(twr_index - 1) * 100:+.2f} %"},
+                {"분석 지표": "누적 수익률 (시간가중 복리)", "결과값": f"{(twr_index - 1) * 100:+.2f} %"},
                 {"분석 지표": "자금 회전율 (매매 빈도)", "결과값": f"{turnover_rate * 100:.1f} %"},
                 {"분석 지표": "세금/수수료/슬리피지 비용", "결과값": f"{total_cost_drag:,.0f} 원"},
                 {"분석 지표": "매매 승률 (성공 횟수)", "결과값": f"{win_rate:.1f} % (총 {len(trade_log)}회 거래)"},
@@ -469,12 +488,8 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
 
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
-    try:
-        start_date = datetime.date(year, 1, 1)
-        end_date = datetime.date(year, 12, 31)
-        res = run_quant_simulation(pd.DataFrame(), strat, init_cash, start_date, end_date, cfg, is_weekly_scan=True, use_legacy_cost=use_legacy_cost)
-        if res.get("status") == "success":
-            res["msg"] = f"⚠️ [생존자 편향 주의] {year}년도 상장폐지 종목 미포함으로 수익률이 다소 과대평가될 수 있습니다."
-        return res
-    except Exception as e:
-        return {"status": "error", "msg": f"연도별 테스트 오류: {str(e)}"}
+    # 🚨 패치 4: 생존자 편향 방지를 위한 하드 블록
+    return {
+        "status": "error", 
+        "msg": "DATA_UNAVAILABLE: 해당 연도의 Point-in-Time(상장폐지 포함) 과거 유니버스 데이터가 로컬에 구축되어 있지 않아 생존자 편향(Survivor Bias)을 피할 수 없습니다. 신뢰할 수 없는 허구의 수익률(Fake Success) 반환을 방지하기 위해 시뮬레이션을 하드 블록합니다."
+    }
