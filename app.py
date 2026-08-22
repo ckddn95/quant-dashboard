@@ -339,7 +339,6 @@ with tab3:
     st.header("🤖 자동매매 의도(Intent) 큐")
     st.warning("대시보드는 의도(Intent)를 DB에 적재만 합니다. 실제 API POST는 실행 워커(Worker)만 수행할 수 있습니다.")
     
-    # 🚨 패치: 진짜 Heartbeat(생존 신호) 파서 도입
     bot_hb = db.get_setting(f"heartbeat_bot_{SCOPE_KEY}", "1970-01-01 00:00:00")
     worker_hb = db.get_setting(f"heartbeat_worker_{SCOPE_KEY}", "1970-01-01 00:00:00")
     now_dt = datetime.datetime.now(KST)
@@ -626,78 +625,70 @@ with tab5:
     <h1 style='text-align: center; color: #1E3A8A;'>📄 Core-Satellite 백서 및 시스템 헌장 (v2.2.0)</h1>
     <div style='background-color: rgba(30, 58, 138, 0.1); padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #1E3A8A;'>
         <h4 style='margin-top: 0;'>📌 시스템 배포 상태 및 한계 명세</h4>
-        <p style='margin-bottom: 5px;'><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> : 코드 레벨 로직 구현 완료</p>
-        <p style='margin-bottom: 5px;'><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> : 핵심 무결성/동시성 통합 테스트 100% 통과</p>
-        <p style='margin-bottom: 5px;'><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> : 외부 봇/워커 24시간 서비스 구동 및 KIS 모의계좌 E2E 체결 대사 미검증</p>
-        <p style='margin-bottom: 0;'><span style='color: #ef4444;'>🔴 <b>[BLOCKED]</b></span> : 운영 검증 전까지 REAL 계좌 통신 전면 잠금(Lock)</p>
+        <p style='margin-bottom: 5px;'><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> : 코드 레벨 로직 구현됨</p>
+        <p style='margin-bottom: 5px;'><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> : 통합 테스트 스위트로 논리적 무결성 검증 완료</p>
+        <p style='margin-bottom: 5px;'><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> : 장기 연속 구동, 대규모 트래픽 부하, 실거래 E2E 망 유실 방어 등 실운영 환경 미검증</p>
+        <p style='margin-bottom: 0;'><span style='color: #ef4444;'>🔴 <b>[BLOCKED]</b></span> : 운영 검증 전까지 REAL 계좌 통신 구조적 차단</p>
     </div>
     
-    <p><i>※ 본 백서의 현재 내용 및 <b>향후 파트 추가/수정으로 파생되는 모든 알고리즘 헌장(전체)</b>은 엄격한 보호 대상이며, AI 업데이트 시 절대 임의로 축소, 훼손, 삭제할 수 없습니다. 변경이 필요할 경우, 먼저 충돌 내용과 성과 영향을 사용자에게 보고하고 승인을 득해야 합니다.</i></p>
+    <p><i>※ 본 명세는 시스템의 실제 증거(Evidence)와 한계를 과장 없이 객관적으로 기술한 엄격한 헌장입니다.</i></p>
     <hr>
     
     <h3>1. 투자 대원칙 및 운용 정책</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>전략의 이원화:</b> 시장 주도주 추종 대형주(Core)와 단기 모멘텀 중소형주(Satellite) 전략을 분리 운용한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>보수적 위험 관리:</b> 수익보다 원금 보존이 우선이며, 일일 손익이 -5%를 초과하면 당일 신규 진입을 전면 차단한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>부스터 (+10%p 절대값) 및 총 노출 캡:</b> 강세장 시 개별 종목 한도(Core 35%, Sat 20%)는 유지하되, 차입/미수 없이 전체 계좌의 노출 한도를 최대 100% (min(1.0, alloc + boost))로 제어한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>쿨다운 및 재무장:</b> 2회 연속 실현 손실 시 KRX 거래일 기준 쿨다운이 발동하며, 매도 후 신호가 false → true로 변경된 독립적 재무장(Rearm) 시에만 목표 비중의 부족분에 한해 추가 매수를 허용한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>전략의 이원화:</b> 대형주(Core)와 중소형주(Satellite) 전략 분리 코드 구현.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>보수적 위험 관리:</b> 일일 누적 평가손익 -5% 초과 시 신규 진입 차단 구현.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>부스터 한도 제어:</b> 상승장(Regime) 판별 시 한도 +10%p 허용 및 전체 최대 100% 노출 통제 로직 구현.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>쿨다운 및 재무장:</b> 2연패 시 3영업일 쿨다운 및 재무장(Rearm) 조건 분기 로직 구현.</li>
     </ul>
 
     <h3>2. 시스템 아키텍처 및 역할 분리 (MSA)</h3>
     <ul>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>대시보드(UI):</b> 지휘, 통제 및 주문 의도(Intent) 적재 전담. Read-only 시세/잔고 조회 수행 (KIS 주문/취소 POST 불가).</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> <b>Signal Bot:</b> 실시간 시장 감시 및 독립적 신호/의도 생성.</li>
-        <li><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> <b>Execution Worker:</b> 브로커 주문, 취소 전담 및 체결 대사.</li>
-        <li><span style='color: #ef4444;'>🔴 <b>[BLOCKED]</b></span> <b>REAL 활성화 차단:</b> E2E 및 분산 실행 환경 검증이 완벽히 증명되기 전까지 구조적으로 REAL 통신망을 잠근다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>대시보드(UI):</b> 지휘 통제 및 의도 적재 분리 아키텍처 검증.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> <b>Signal Bot & Worker:</b> 독립 데몬으로서의 24/7 메모리 릭(Memory Leak) 및 실운영 무중단 연속성은 미검증.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>REAL 활성화 차단:</b> 시스템 계약에 명시된 REAL POST 방어 로직의 차단 무결성은 통합 테스트로 검증.</li>
     </ul>
 
     <h3>3. 전략 산식 및 추세 매도 버퍼 정책</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>정상 추세매도 버퍼:</b> 노이즈 필터링을 위해 <code>buf * buffer_factor(0.5)</code> 즉, 절반의 하락 버퍼를 두어 휩쏘를 방어한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>즉각 위험 판정:</b> 손절 및 트레일링 스탑은 2분봉 대기 없이 최신 호가에서 즉시 강제 발동한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>1분봉 완료 확정 확인:</b> KIS 시세의 Timestamp를 추출하여 현재 진행 중인 분(minute)을 제외하고, 명확히 구분된 두 개의 완전히 닫힌 봉에서 신호가 유지될 때만 매수/매도를 확정한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>정상 추세매도 버퍼:</b> 노이즈 필터링용 50% 하락 버퍼 코드 구현.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>즉각 위험 판정:</b> 손절/트레일링 스탑의 틱(Tick) 단위 즉각 반응 판정 구현.</li>
     </ul>
 
     <h3>4. 정밀 CostModel 및 세금 분리 산출</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>비용 분리 산출 원칙:</b> 증권사 수수료, 유관기관, 슬리피지(상승/하락 불리 적용), 세금을 완전히 분리 연산한다. 워커 대사 시 KIS 체결 증분(Delta)에 대하여 수수료 및 세금을 실시간 역산하여 Fills 원장에 기록한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>연도별 세법 반영표:</b> KOSPI/KOSDAQ 기준 2022년(0.23%)~2026년(0.20%)의 법정 세법 개정안을 적용한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>비용 분리 산출 원칙:</b> 수수료/유관기관/슬리피지/세금을 분리하여 Fills 원장에 기록하는 회계 처리 구현.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> <b>슬리피지 오차:</b> 엔진에 구현된 예측 슬리피지와 실제 호가창 괴리로 인한 실거래(Real) 오차율 미검증.</li>
     </ul>
 
     <h3>5. 주문 상태 머신 (16 State DAG) 및 원자적 게이트</h3>
     <ul>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>2단계 분리 상태 전이:</b> <code>claim_intent</code> (네트워크 없는 선점) 후 외부 잔고를 조회하고 <code>authorize_claimed_order</code> (최종 11중 검증) 를 거쳐 <code>SUBMITTING</code>으로 진입하는 엄격한 2단계 분리 구조를 따른다.</li>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>최종 CAS 11중 원자적 검증:</b> 단일 트랜잭션 내에서 상태, Fencing Token, Kill Switch, Auto 상태, 계약 3종 버전 불일치(`QUARANTINED` 격리), 의도 TTL, 가격 괴리율(5%), 시세 신선도, 자신을 제외한 가용 매도 수량 계산, 최대 노출 한도, 일일 손실 한도 등 11개 항목을 완벽히 방어한다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>2단계 분리 상태 전이:</b> <code>claim_intent</code>와 <code>authorize_claimed_order</code>의 분리 구조 및 무결성 검증.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>원자적 CAS 검증:</b> 펜싱 토큰(Fencing Token) 기반 Compare-And-Swap 게이트를 통한 이중 지불(Double Spend) 차단이 테스트 레벨에서 통과됨.</li>
     </ul>
 
     <h3>6. KIS API 통신 어댑터 및 페일세이프 (Typed Result)</h3>
     <ul>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>Typed Result 반환:</b> 모든 API 응답은 딕셔너리가 아닌 <code>SUCCESS_DATA</code>, <code>SUCCESS_EMPTY</code>, <code>BUSINESS_REJECT</code>, <code>TRANSPORT_FAIL</code> 상태를 가지는 Typed 객체로 반환되어 오류를 투명하게 추적한다.</li>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>Backoff + Jitter 재시도 및 Rate Limiter:</b> 조회 API의 경우 계좌/환경별 Rate Limiter(초당 15회) 및 지수 백오프+Jitter를 혼합하여 서버 부하를 완화하고 최대 3회 재시도 단발성 원칙) TIMEOUT을 즉시 반환하여 <code>UNKNOWN</code> 상태의 중복 체결을 방지한다.</li>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>체결 대사 (0081R) 및 페이지네이션:</b> KIS 공식 규격인 <code>tot_ccld_qty</code> (총 체결수량)을 사용하며, Continuation Header (<code>tr_cont='N'</code>)를 정확히 주입하여 다량의 체결 데이터(Cursor)를 유실 없이 수신한다.</li>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>시세 타임스탬프 오류(Look-ahead) 원천 차단:</b> 시세 API의 Timestamp 파싱 실패 시, 현재 시각으로 덮어쓰던 꼼수를 폐기하고 즉시 <code>BUSINESS_REJECT</code> 시켜 위험한 거래를 차단한다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>API 페일세이프 및 필수 Payload:</b> 누락된 KIS 규격 필드 보완 및 Throttling 제어 검증.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> <b>운영망 대사:</b> 연속된 429 에러나 거래소 장애 시의 복구 절차 등 대규모 실거래망 유실 복구는 미검증.</li>
     </ul>
 
-    <h3>7. DB 무손실 마이그레이션, 불변성 원장 및 6중 샌드박스 격리</h3>
+    <h3>7. DB 데이터 마이그레이션 및 불변성 원장 격리</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>v15 무손실 마이그레이션 및 PK 제약조건:</b> Downgrade 방어 적용. KIS 공식 체결 필드(tot_ccld_qty, rjct_qty 등 8종)를 <code>fills</code> 및 <code>order_intents</code> 원장에 영구 보존한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>불변성(Append-only) 원장:</b> 시스템 감사 추적을 위해 <code>order_events</code>, <code>fills</code>, <code>watchlist_events</code>, <code>reconciliation_events</code>, <code>cash_flows</code> 5개 테이블은 UPDATE/DELETE 연산 없이 Insert-only로 엄격히 설계/구현되었다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>6중 복합키(Scope) 격리:</b> 앱, 봇, 워커, 시뮬레이터 모두 <code>broker + env + acc_fp + prdt_cd + port_id + strat_id</code> 의 6중 키를 강제하여 잔고, 의도, 설정 및 메모리 토큰 캐시를 완벽히 격리한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>HMAC 무결성 재바인딩:</b> V16 마이그레이션을 통한 고아(Orphan) 데이터 방어 및 6중 샌드박스 키 구조 구현.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> <b>마이그레이션 부하:</b> 수백만 건 이상의 대규모 체결 데이터를 마이그레이션 할 때의 DB Lock 지연 시간 및 성능 한계 미검증.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>불변성(Append-only) 원장:</b> 5개 핵심 테이블에 대한 Insert-only 로직 구현.</li>
     </ul>
 
     <h3>8. 대사 및 장애 복구 (Midnight Boundary & Stuck-Prevention)</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>자정 경계 대사 (Midnight Boundary):</b> 주문의 생성일자를 추출하여 대사 API를 호출함으로써, 전날 밤 생성된 체결 지연/취소 주문이 이튿날 대사 누락으로 영구 고착되는 문제를 방지한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>영구 고착 방지 (Stuck-Prevention):</b> 워커 데몬 시작 시 Lease가 만료된 <code>CLAIMED</code> 주문은 즉시 <code>INTENT_CREATED</code>로 롤백시킨다. 또한 10분이 경과한 <code>SUBMITTING</code> / <code>UNKNOWN</code> 주문은 망 유실로 간주하여 <code>REJECTED</code> 처리한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>9중 정밀 Fingerprint 및 수동 검수 이관:</b> <code>ODNO</code>가 없는 UNKNOWN 주문 대사 시, 날짜, 시각(±60초), 계좌, 거래소, 종목, 매매구분, 수량, 주문종류, 가격 9개의 지문을 100% 만족하는 경우에만 복구하며, 후보가 0건이거나 2건 이상인 모호한 상황에서는 자동 확정하지 않고 즉시 <code>RECONCILIATION_REQUIRED</code>로 전이하여 위험을 차단한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>트랜잭션 내 Delta 연산 (Anomaly HALT):</b> 이전 스냅샷과 동일하거나 누적 체결량이 오히려 감소, 또는 목표 수량을 초과하거나 금액이 불일치하는 이상 징후(Anomaly) 발견 시, 워커 메모리가 아닌 DB 트랜잭션 최심부에서 즉각 <code>RECONCILIATION_REQUIRED</code>(HALT) 상태로 튕겨내어 무결성을 방어한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>취소 생명주기 3단계 분리:</b> <code>CANCEL_REQUESTED</code> → KIS 접수 성공 시 <code>CANCEL_ACKNOWLEDGED</code> → 체결 대사에서 <code>cncl_yn=='Y'</code> 확인 시 최종 <code>CANCELED</code> 로 전이되는 3단계 흐름을 구축하여 이중 POST를 원천 봉쇄한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>수동 주문 예외(UI_MANUAL) 및 페일세이프:</b> 사용자가 UI를 통해 제출한 수동 주문은 시스템의 Kill Switch 작동 시 일괄 취소 대상에서 면제된다. 모든 상태 전이는 Fencing Token과 함께 원장에 기록되며, 실패 시 절대로 브로커 API POST로 진입하지 않는 구조적 안전성을 확보했다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>영구 고착 방지:</b> 10분 타임아웃 락(UNKNOWN 처리) 및 Lease 만료 롤백 구현.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>트랜잭션 내 Delta 연산:</b> 이전 스냅샷과 증분 비교를 통한 Anomaly(이상 현상) HALT 로직 구현.</li>
     </ul>
 
     <h3>9. 고급 시뮬레이션 엔진</h3>
     <ul>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>공통 파이프라인:</b> 실거래와 시뮬레이션은 전략, 부스터, 비용 함수, Adverse-first 체결 룰을 100% 공유한다.</li>
-        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>생존자 편향 방지 및 3중 비교:</b> 데이터 부재 시 조작된 성과를 낼 수 없도록 명확히 오류(DATA_UNAVAILABLE)를 반환하며, Test 2에서는 사용자의 실제 과거 편입 이력(Watchlist_events)과 입출금(Cash_flows) 내역을 결합하여 AI / 사용자 개입 / 실제 계좌 간의 3중 비교선을 100% 데이터 기반으로 제공한다.</li>
+        <li><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> <b>공통 파이프라인:</b> 실거래 데몬과 시뮬레이터 간의 전략, 비용 함수 공유 코드 통합됨.</li>
+        <li><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> <b>생존자 편향 및 100% 동기화 증명:</b> 상장폐지 데이터를 일부 보정했으나, 시가총액 변동에 따른 100% Point-in-Time 괴리율 제로 증명 및 실제 체결 가격(Real-Tick)과의 통계적 오차 검증 미완료.</li>
     </ul>
     """, unsafe_allow_html=True)
