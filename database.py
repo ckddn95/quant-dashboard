@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import uuid
 import traceback
+import pandas as pd
 from datetime import datetime, timezone, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +19,6 @@ def load_contract():
     with open(CONTRACT_PATH, 'r', encoding='utf-8') as f: return yaml.safe_load(f)
 
 CONTRACT = load_contract()
-# 🚨 패치 10: 계약서의 schema_version을 실무 표준 버전(16)으로 강제 동기화하여 버전 불일치 원천 차단
 SCHEMA_VERSION = int(CONTRACT.get('schema_version', 16))
 
 ALLOWED_TRANSITIONS = CONTRACT.get('allowed_state_transitions', {})
@@ -307,7 +307,6 @@ def _migrate_to_v16(conn):
     for old_id, new_fp in cano_map.items():
         if old_id == new_fp: continue
         
-        # 🚨 패치 10: 이전 버전의 계좌번호(PLAINTEXT CANO)나 SHA 기반 fingerprint도 모두 V16의 HMAC fingerprint 변환 대상에 철저히 포함
         for table in tables:
             cols = [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
             if 'account_fingerprint' in cols:
@@ -624,6 +623,7 @@ def insert_reconciliation_event(broker, env, acc_fp, prdt_cd, port_id, strat_id,
         except Exception as e:
             raise RuntimeError(f"DB Error in insert_reconciliation_event: {e}")
 
+# 🚨 패치: 완전 청산(Full Close) 시점의 Net PnL(수수료·세금 포함) 기준으로만 승패 판정 및 KST 영업일(Business Days) 기준 쿨다운 부여
 def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt_cd, port_id, strat_id, broker_state):
     import quant_engine as quant
     with get_connection() as conn:
@@ -636,7 +636,9 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
             new_cum_amt = broker_state['tot_ccld_amt']
             delta_qty = new_cum_qty - o_row['cum_filled_qty']
             delta_amt = new_cum_amt - o_row['tot_ccld_amt']
-            now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+            
+            now_kst = datetime.now(KST)
+            now_str = now_kst.strftime('%Y-%m-%d %H:%M:%S')
             
             if delta_qty > 0 or delta_amt > 0:
                 anomalies = []
@@ -657,14 +659,14 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                 delta_manual = delta_qty if is_manual else 0
                 
                 market = "KOSPI" if ticker.startswith('0') else "KOSDAQ"
-                fee, slip, tax = quant.CostModel.calculate_cost(datetime.now(KST).date(), market, order_type, delta_fill_price, delta_qty, False)
+                fee, slip, tax = quant.CostModel.calculate_cost(now_kst.date(), market, order_type, delta_fill_price, delta_qty, False)
                 
                 new_status = 'FILLED' if new_cum_qty >= o_row['qty'] else 'PARTIALLY_FILLED'
                 if o_row['status'] in ['CANCEL_REQUESTED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCEL_ACKNOWLEDGED', 'CANCELED']: new_status = o_row['status'] 
                 if new_cum_qty >= o_row['qty']: new_status = 'FILLED'
                 
                 new_cum_avg_price = new_cum_amt / new_cum_qty if new_cum_qty > 0 else 0
-                fill_id = f"{order_id}_{datetime.now(KST).timestamp()}"
+                fill_id = f"{order_id}_{now_kst.timestamp()}"
                 
                 conn.execute("""
                     INSERT INTO fills (fill_id, order_intent_id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, delta_qty, cum_qty, fill_price, delta_amt, cum_amt, fee, tax, slippage, fill_timestamp, received_at, is_reconciled, tot_ccld_qty, tot_ccld_amt, avg_prvs, rmn_qty, cncl_yn, rjct_qty, orgno, ord_tmd) 
@@ -688,9 +690,6 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                     new_p_buy = ((total_old_qty * p_buy) + (delta_qty * delta_fill_price)) / total_new_qty if total_new_qty > 0 else 0
                     if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_p_buy, now_str))
-                    
-                    if not is_manual:
-                        conn.execute("UPDATE signal_states SET loss_streak=0 WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                 else: 
                     new_managed_qty = max(0, p_qty - delta_managed)
                     new_manual_qty = max(0, p_manual_qty - delta_manual)
@@ -701,18 +700,30 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                     else: 
                         conn.execute("UPDATE positions SET managed_qty=?, manual_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     
-                    if not is_manual and p_buy > 0 and delta_fill_price > 0:
-                        profit_pct = (delta_fill_price / p_buy) - 1.0
-                        if profit_pct < 0:
-                            st_row = conn.execute("SELECT loss_streak FROM signal_states WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
-                            curr_streak = st_row['loss_streak'] if st_row else 0
+                    if not is_manual and total_new_qty == 0 and p_buy > 0:
+                        total_sell_amt = new_cum_amt
+                        total_buy_cost = p_buy * (p_qty + p_manual_qty)
+                        
+                        fills_cost = conn.execute("SELECT SUM(fee + tax) as total_fees FROM fills WHERE order_intent_id=?", (order_id,)).fetchone()
+                        total_fees = fills_cost['total_fees'] if fills_cost and fills_cost['total_fees'] else (fee * delta_qty)
+                        
+                        net_pnl = total_sell_amt - total_buy_cost - total_fees
+                        
+                        st_row = conn.execute("SELECT loss_streak FROM signal_states WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
+                        curr_streak = st_row['loss_streak'] if st_row else 0
+                        
+                        if net_pnl < 0:
                             new_streak = curr_streak + 1
                             cd_str = None
-                            if new_streak >= 2:
-                                cd_str = (datetime.now(KST) + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+                            if new_streak >= CONTRACT.get('cooldown_policy', {}).get('loss_streak_threshold', 2):
+                                target_sessions = CONTRACT.get('cooldown_policy', {}).get('cooldown_sessions', 3)
+                                b_dates = pd.bdate_range(start=now_kst.date(), periods=target_sessions + 1)
+                                target_end_date = b_dates[-1].to_pydatetime().replace(hour=15, minute=30, second=0, tzinfo=KST)
+                                cd_str = target_end_date.strftime('%Y-%m-%d %H:%M:%S')
+                                
                             conn.execute("UPDATE signal_states SET loss_streak=?, cooldown_until_session=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_streak, cd_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                         else:
-                            conn.execute("UPDATE signal_states SET loss_streak=0 WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                            conn.execute("UPDATE signal_states SET loss_streak=0, cooldown_until_session=NULL WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                 
                 conn.execute("""
                     UPDATE order_intents 
