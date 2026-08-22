@@ -623,7 +623,6 @@ def insert_reconciliation_event(broker, env, acc_fp, prdt_cd, port_id, strat_id,
         except Exception as e:
             raise RuntimeError(f"DB Error in insert_reconciliation_event: {e}")
 
-# 🚨 패치: 완전 청산(Full Close) 시점의 Net PnL(수수료·세금 포함) 기준으로만 승패 판정 및 KST 영업일(Business Days) 기준 쿨다운 부여
 def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt_cd, port_id, strat_id, broker_state):
     import quant_engine as quant
     with get_connection() as conn:
@@ -928,8 +927,18 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
                 buffer_multi = CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05)
                 req_val = order['qty'] * (order['reference_price'] * buffer_multi if order['order_kind'] == 'MARKET' else order['limit_price'])
                 
-                if current_exposure + req_val > max_exposure:
-                    return reject('RISK_REJECTED', 'EXPOSURE_LIMIT', f'Exceeds Max Exposure (Max: {max_exposure})')
+                # 🚨 패치 16: 미체결 매수 주문들의 예약 익스포저 합산 검사
+                reserved_exposure_row = conn.execute(f"""
+                    SELECT SUM((qty - cum_filled_qty) * (CASE WHEN order_kind='MARKET' THEN reference_price * ? ELSE limit_price END)) as res_exp 
+                    FROM order_intents 
+                    WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? 
+                    AND side='BUY' AND status IN {open_states} AND id != ?
+                """, (buffer_multi, broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id)).fetchone()
+                
+                reserved_exposure = float(reserved_exposure_row['res_exp']) if reserved_exposure_row['res_exp'] else 0.0
+                
+                if current_exposure + reserved_exposure + req_val > max_exposure:
+                    return reject('RISK_REJECTED', 'EXPOSURE_LIMIT_WITH_PENDING', f'Exceeds Max Exposure including pending orders (Projected: {current_exposure + reserved_exposure + req_val}, Max: {max_exposure})')
                 
                 reserved = conn.execute(f"SELECT SUM((qty - cum_filled_qty) * (CASE WHEN order_kind='MARKET' THEN reference_price * ? ELSE limit_price END)) as res FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND side='BUY' AND status IN {open_states} AND id != ?", (buffer_multi, broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id)).fetchone()
                 res_cash = float(reserved['res']) if reserved['res'] else 0.0
