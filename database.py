@@ -696,6 +696,10 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                     new_p_buy = ((total_old_qty * p_buy) + (delta_qty * delta_fill_price)) / total_new_qty if total_new_qty > 0 else 0
                     if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_p_buy, now_str))
+                    
+                    # 🚨 패치 9: 체결(FILL) 확정 시 연패(Loss Streak) 초기화
+                    if not is_manual:
+                        conn.execute("UPDATE signal_states SET loss_streak=0 WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                 else: 
                     new_managed_qty = max(0, p_qty - delta_managed)
                     new_manual_qty = max(0, p_manual_qty - delta_manual)
@@ -705,6 +709,20 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                         conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     else: 
                         conn.execute("UPDATE positions SET managed_qty=?, manual_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                    
+                    # 🚨 패치 9: 매도 체결(SELL FILL) 확정 시 실제 손익을 계산하여 쿨다운(Cooldown) 및 연패 적용
+                    if not is_manual and p_buy > 0 and delta_fill_price > 0:
+                        profit_pct = (delta_fill_price / p_buy) - 1.0
+                        if profit_pct < 0:
+                            st_row = conn.execute("SELECT loss_streak FROM signal_states WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
+                            curr_streak = st_row['loss_streak'] if st_row else 0
+                            new_streak = curr_streak + 1
+                            cd_str = None
+                            if new_streak >= 2:
+                                cd_str = (datetime.now(KST) + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+                            conn.execute("UPDATE signal_states SET loss_streak=?, cooldown_until_session=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_streak, cd_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                        else:
+                            conn.execute("UPDATE signal_states SET loss_streak=0 WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                 
                 conn.execute("""
                     UPDATE order_intents 

@@ -133,8 +133,8 @@ def _strict_post(url: str, headers: dict, data: dict, rate_limit_key: str = "def
                     headers["authorization"] = f"Bearer {new_token}"
                     limiter.acquire()
                     res = requests.post(url, headers=headers, data=json.dumps(data), timeout=10)
-            if res.status_code in [401, 403]:
-                return KisResult("BUSINESS_REJECT", f"Unauthorized ({res.status_code})", None)
+        if res.status_code in [401, 403]:
+            return KisResult("BUSINESS_REJECT", f"Unauthorized ({res.status_code})", None)
 
         if res.status_code == 429:
             return KisResult("BUSINESS_REJECT", "Rate limit (429)", None)
@@ -195,7 +195,6 @@ def fetch_kis_orderable_cash(app_key: str, app_secret: str, cano: str, acnt_prdt
     
     dvsn = "01" if order_kind.upper() == "MARKET" else "00"
     
-    # 🚨 패치: 빈 종목코드나 0원 가격이 들어오면 API가 뻗어버리므로 더미 값(삼성전자, 0원)으로 안전망 구축
     safe_ticker = ticker if ticker.strip() != "" else "005930"
     safe_price = str(int(price)) if price > 0 else "0"
     
@@ -224,7 +223,6 @@ def fetch_kis_current_price_ext(app_key: str, app_secret: str, ticker: str, toke
         high = float(out.get('stck_hgpr', 0))
         low = float(out.get('stck_lwpr', 0))
         
-        # 🚨 패치: 멀쩡한 현금 100% 종목(55)이나 주의종목(53)이 차단되지 않도록 필터링 완화
         status_code = out.get('iscd_stat_cls_code', '00')
         is_halted = status_code in ['51', '57', '58', '59']
         
@@ -258,13 +256,10 @@ def fetch_daily_executions_0081(app_key: str, app_secret: str, cano: str, acnt_p
         
         res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
         
-        # 🚨 패치: 네트워크 오류나 중간 페이지 에러 시 부분 성공 처리(Silent Failure) 원천 차단
         if res.state != "SUCCESS_DATA": 
             if page > 0:
-                # 중간 페이지에서 끊겼다면 데이터 무결성이 깨진 것이므로 전체 조회 실패 처리
                 return KisResult("TRANSPORT_FAIL", f"Pagination failed at page {page}: {res.msg}", None)
             else:
-                # 첫 페이지부터 실패 시 에러 상태 그대로 반환
                 return res
         
         data = res.data['data']
@@ -290,7 +285,7 @@ def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: 
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    # 🚨 패치: 주문(Order) Payload에 KIS 공식 필수 누락 필드(거래소 구분, 조건부 가격, 매도 유형) 완벽하게 추가
+    # 🚨 패치: 주문(Order) Payload에 KIS 공식 필수 필드(KRX, 00, 0)를 완벽하게 주입
     data = {
         "CANO": cano, 
         "ACNT_PRDT_CD": acnt_prdt, 
@@ -298,8 +293,8 @@ def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: 
         "ORD_DVSN": "01" if price == 0 else "00", 
         "ORD_QTY": str(int(qty)), 
         "ORD_UNPR": str(int(price)),
-        "SLL_TYPE": "00" if is_buy else "01",
-        "EXCG_ID_DVSN_CD": "01",
+        "SLL_TYPE": "00",
+        "EXCG_ID_DVSN_CD": "KRX",
         "CNDT_PRIC": "0"
     }
     
@@ -318,18 +313,20 @@ def cancel_kis_order_0013(app_key: str, app_secret: str, cano: str, acnt_prdt: s
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    # 🚨 패치: 취소(Cancel) Payload에 KIS 공식 필수 누락 필드(거래소 구분) 추가 및 branch_no None 방어
+    # 🚨 패치: 취소(Cancel) Payload에 KIS 공식 필수 필드(KRX, 00, 0)를 완벽하게 주입
     data = {
         "CANO": cano, 
         "ACNT_PRDT_CD": acnt_prdt, 
         "KRX_FWDG_ORD_ORGNO": org_branch if org_branch else "", 
         "ORGN_ODNO": org_odno, 
-        "ORD_DVSN": "00", 
+        "ORD_DVSN": "01", 
         "RVSE_CNCL_DVSN_CD": "02", 
         "ORD_QTY": str(int(qty)), 
         "ORD_UNPR": "0", 
         "QTY_ALL_ORD_YN": "Y" if qty == 0 else "N",
-        "EXCG_ID_DVSN_CD": "01"
+        "EXCG_ID_DVSN_CD": "KRX",
+        "SLL_TYPE": "00",
+        "CNDT_PRIC": "0"
     }
     
     res = _strict_post(url, headers=headers, data=data, rate_limit_key=rate_key, auth_ctx=auth_ctx)
