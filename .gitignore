@@ -3,6 +3,7 @@
 *.db-wal
 *.db-shm
 *.bak
+*.db.*.bak
 *.sql
 
 # Logs
@@ -13,10 +14,15 @@
 .env
 secrets.json
 
-# Python Cache
+# Python Cache & Tests
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+
+# Virtual Environment
+venv/
+env/
 
 # OS Files
 .DS_Store

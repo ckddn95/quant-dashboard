@@ -338,15 +338,26 @@ with tab2:
 with tab3:
     st.header("🤖 자동매매 의도(Intent) 큐")
     st.warning("대시보드는 의도(Intent)를 DB에 적재만 합니다. 실제 API POST는 실행 워커(Worker)만 수행할 수 있습니다.")
+    
+    # 🚨 패치: 진짜 Heartbeat(생존 신호) 파서 도입
+    bot_hb = db.get_setting(f"heartbeat_bot_{SCOPE_KEY}", "1970-01-01 00:00:00")
+    worker_hb = db.get_setting(f"heartbeat_worker_{SCOPE_KEY}", "1970-01-01 00:00:00")
+    now_dt = datetime.datetime.now(KST)
+    
+    def parse_hb(hb_str):
+        try:
+            diff = (now_dt - datetime.datetime.strptime(hb_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST)).total_seconds()
+            if diff <= 120: return f"🟢 ON ({int(diff)}초 전)"
+            else: return f"🔴 OFF ({int(diff)}초)"
+        except: return "🔴 상태불명"
+
     w_c1, w_c2, w_c3, w_c4 = st.columns(4)
-    w_c1.metric("Signal Bot", "독립 프로세스 구동")
-    w_c2.metric("Exec Worker", "독립 프로세스 구동")
-    # 🚨 패치: 거짓 배지 제거
+    w_c1.metric("Signal Bot", parse_hb(bot_hb))
+    w_c2.metric("Exec Worker", parse_hb(worker_hb))
     w_c3.metric("MOCK Tests", "동적 검증 대기중")
     w_c4.metric("REAL Status", real_app_status)
     st.markdown("---")
     
-    # 🚨 패치: 동적 테스트 러너 연동
     st.markdown("### 🧪 시스템 무결성 정밀 테스트")
     st.info("실거래(REAL) 환경을 해제하기 전, 시스템의 코어 로직(상태 전이, 펜싱 토큰, KIS Payload 등)을 동적으로 검증합니다.")
     
@@ -662,7 +673,7 @@ with tab5:
     <h3>6. KIS API 통신 어댑터 및 페일세이프 (Typed Result)</h3>
     <ul>
         <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>Typed Result 반환:</b> 모든 API 응답은 딕셔너리가 아닌 <code>SUCCESS_DATA</code>, <code>SUCCESS_EMPTY</code>, <code>BUSINESS_REJECT</code>, <code>TRANSPORT_FAIL</code> 상태를 가지는 Typed 객체로 반환되어 오류를 투명하게 추적한다.</li>
-        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>Backoff + Jitter 재시도 및 Rate Limiter:</b> 조회 API의 경우 계좌/환경별 Rate Limiter(초당 15회) 및 지수 백오프+Jitter를 혼합하여 서버 부하를 완화하고 최대 3회 재시도한다. 주문/취소 POST는 <b>절대 임의 재시도하지 않고 (단발성 원칙)</b> TIMEOUT을 즉시 반환하여 <code>UNKNOWN</code> 상태의 중복 체결을 방지한다.</li>
+        <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>Backoff + Jitter 재시도 및 Rate Limiter:</b> 조회 API의 경우 계좌/환경별 Rate Limiter(초당 15회) 및 지수 백오프+Jitter를 혼합하여 서버 부하를 완화하고 최대 3회 재시도 단발성 원칙) TIMEOUT을 즉시 반환하여 <code>UNKNOWN</code> 상태의 중복 체결을 방지한다.</li>
         <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>체결 대사 (0081R) 및 페이지네이션:</b> KIS 공식 규격인 <code>tot_ccld_qty</code> (총 체결수량)을 사용하며, Continuation Header (<code>tr_cont='N'</code>)를 정확히 주입하여 다량의 체결 데이터(Cursor)를 유실 없이 수신한다.</li>
         <li><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> <b>시세 타임스탬프 오류(Look-ahead) 원천 차단:</b> 시세 API의 Timestamp 파싱 실패 시, 현재 시각으로 덮어쓰던 꼼수를 폐기하고 즉시 <code>BUSINESS_REJECT</code> 시켜 위험한 거래를 차단한다.</li>
     </ul>

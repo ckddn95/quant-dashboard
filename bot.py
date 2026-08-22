@@ -3,6 +3,7 @@ import time
 import datetime
 import concurrent.futures
 import pandas as pd
+import math  # 🚨 패치 2를 위한 모듈 추가
 import FinanceDataReader as fdr
 import database as db
 import broker.kis_client as kis
@@ -11,10 +12,8 @@ import quant_engine as quant
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 def get_last_friday_close():
-    """🚨 패치 3: 완벽한 주간 스캔 기준점 (가장 최근의 금요일 15:30) 계산"""
     now = datetime.datetime.now(KST)
     days_since_friday = (now.weekday() - 4) % 7
-    # 오늘이 금요일이지만 아직 15:30 이전이라면, 저번 주 금요일을 기준으로 함
     if days_since_friday == 0 and (now.hour * 100 + now.minute) < 1530:
         days_since_friday = 7
     last_fri = now - datetime.timedelta(days=days_since_friday)
@@ -49,16 +48,17 @@ def run_signal_bot():
                     continue
 
                 env_str = "MOCK" if is_mock else "REAL"
-                # 주의: sys_secret은 데몬 기동 전 미리 등록된 DB를 통해 무결성이 보장된 지문을 사용함
                 acc_fp = db.generate_account_fingerprint(sys_cano, db.get_setting("hmac_secret_cache", "fallback_default_secret")) 
                 scope_key = f"KIS_{env_str}_{acc_fp}_{sys_acnt_prdt}_{strat.value}_{strat.value}"
                 
+                # 🚨 패치 3: 봇의 생존을 증명하는 실시간 Heartbeat 기록 (UI가 감시)
+                db.set_setting(f"heartbeat_bot_{scope_key}", now_kst.strftime('%Y-%m-%d %H:%M:%S'))
+
                 if not db.get_setting(f"auto_pilot_{scope_key}", False):
                     continue
 
                 cfg = quant.get_default_config(strat)
                 
-                # 🚨 패치 3: "첫 실행 시점"이 아닌 "금요일 15:30 종가 직후"에 한 번만 픽스하여 스캔
                 last_fri_dt = get_last_friday_close()
                 last_scan_key = f"last_auto_scan_{scope_key}"
                 last_scan_str = db.get_setting(last_scan_key, "1970-01-01 00:00:00")
@@ -72,7 +72,6 @@ def run_signal_bot():
                         db.clear_and_update_watchlist("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, new_items, source="SYSTEM", provenance="AUTO_WEEKLY_SCAN")
                     db.set_setting(last_scan_key, now_kst.strftime('%Y-%m-%d %H:%M:%S'))
 
-                # 🚨 패치 1: 15:00 조기 마감 버그 수정 (09:00 ~ 15:30까지 완벽하게 감시)
                 if env_str == "REAL" and not (900 <= hm <= 1530):
                     continue 
 
@@ -117,11 +116,12 @@ def run_signal_bot():
 
                 db_positions = {p['ticker']: p for p in db.get_positions("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value)}
                 stocks_held = {str(s.get('pdno', '')).zfill(6): int(s.get('hldg_qty', 0)) for s in b_res.data.get('holdings', [])}
-
-                # 🚨 패치 2-A: 세트(Set) 순회 즉시 주문을 넣지 않고, 평가 결과 배열(List)로 먼저 취합
                 evaluations = []
 
                 for item in eval_list:
+                    # 🚨 패치 1: 다수 종목 반복 조회 시 API Rate Limit 엄수 (루프당 0.07초 지연 -> 최대 초당 14건 호출로 제한)
+                    time.sleep(0.07)
+                    
                     tk = item['티커']
                     m_qty = db_positions[tk]['managed_qty'] if tk in db_positions else 0
                     buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
@@ -136,10 +136,20 @@ def run_signal_bot():
                     p_res = kis.fetch_kis_current_price_ext(sys_app_key, sys_app_sec, tk, token, is_mock)
                     if p_res.state != "SUCCESS_DATA": continue
                         
-                    cp = p_res.data['price']
-                    h_price = p_res.data['high']
-                    l_price = p_res.data['low']
-                    is_halted = p_res.data['is_halted']
+                    try:
+                        cp = float(p_res.data['price'])
+                        h_price = float(p_res.data['high'])
+                        l_price = float(p_res.data['low'])
+                        is_halted = p_res.data['is_halted']
+                        
+                        # 🚨 패치 2: 시세 데이터의 수학적/논리적 무결성을 극단적으로 엄격하게 검증 (HFT 표준)
+                        if math.isinf(cp) or math.isnan(cp) or cp <= 0: continue
+                        if math.isinf(h_price) or math.isnan(h_price) or h_price <= 0: continue
+                        if math.isinf(l_price) or math.isnan(l_price) or l_price <= 0: continue
+                        if l_price > h_price or cp > h_price or cp < l_price: continue
+                        if not isinstance(is_halted, bool): is_halted = True # 거래정지 여부 불명 시 무조건 차단(Fail-Safe)
+                    except (ValueError, TypeError, KeyError):
+                        continue # 파싱 불가 데이터 즉시 폐기
 
                     if holding_qty > 0 and cp > high_p:
                         high_p = cp
@@ -160,8 +170,6 @@ def run_signal_bot():
                         'action': action, 'score': score, 'reason': reason, 'sig_state': sig_state
                     })
 
-                # 🚨 패치 2-B: 완전한 결정론적(Deterministic) 정렬 고정
-                # 우선순위: 1. 매도(현금 확보) -> 2. 매수(점수 내림차순) -> 3. 티커 오름차순
                 def sort_priority(x):
                     is_sell = 1 if ("매도" in x['action'] or "🔴" in x['action']) else 0
                     is_buy = 1 if ("매수" in x['action'] or "🟢" in x['action']) else 0
@@ -169,7 +177,6 @@ def run_signal_bot():
                     
                 evaluations.sort(key=sort_priority)
 
-                # 🚨 패치 2-C: 정렬된 순서대로 인텐트 생성 및 엄격한 가용현금 삭감 계산
                 for ev in evaluations:
                     tk, name, holding_qty, cp = ev['tk'], ev['name'], ev['holding_qty'], ev['cp']
                     action, reason, sig_state = ev['action'], ev['reason'], ev['sig_state']
@@ -202,7 +209,6 @@ def run_signal_bot():
                             db.safe_add_order_intent(spec)
                             print(f"🛒 [BUY SIGNAL] {name} ({tk}) - {add_qty}주 (사유: {reason})")
                             
-                            # 🚨 엄격한 가용현금 삭감 (다음 우선순위 종목이 무단으로 현금을 스틸하는 것 방지)
                             usable_cash -= (add_qty * cp * 1.05)
                             db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'loss_streak': 0})
 
