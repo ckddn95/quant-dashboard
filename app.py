@@ -111,7 +111,13 @@ except KeyError:
     SYS_APP_KEY, SYS_APP_SEC, SYS_CANO, SYS_IS_MOCK, SYS_ACNT_PRDT = None, None, "MOCK_ACCOUNT", True, "01"
 
 ENV_STR = "MOCK" if SYS_IS_MOCK else "REAL"
-SYS_HMAC_SECRET = st.secrets.get("system", {}).get("hmac_secret", "fallback_default_secret")
+
+# 🚨 패치: HMAC Secret 누락 시 데이터 분리(Split)를 방지하기 위해 강제 구동 차단
+SYS_HMAC_SECRET = st.secrets.get("system", {}).get("hmac_secret")
+if not SYS_HMAC_SECRET or SYS_HMAC_SECRET == "fallback_default_secret" or str(SYS_HMAC_SECRET).strip() == "":
+    st.error("🚨 시스템 보안 결함: secrets.toml 파일에 `hmac_secret`이 설정되지 않았습니다! 데이터 오염 및 계좌 분리(Split-Brain)를 방지하기 위해 시스템 구동을 전면 중단합니다.")
+    st.stop()
+
 ACC_FP = db.generate_account_fingerprint(SYS_CANO, SYS_HMAC_SECRET)
 
 SCOPE_KEY = f"KIS_{ENV_STR}_{ACC_FP}_{SYS_ACNT_PRDT}_{active_strat.value}_{active_strat.value}"
@@ -180,7 +186,6 @@ with tab1:
             if '선택' not in display_df.columns:
                 display_df.insert(0, '선택', False)
                 
-            # 🚨 패치: 관심종목/보유종목 상태 표시 로직 추가
             current_watchlist_check = db.get_watchlist("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)
             wl_tickers_check = [w['티커'] for w in current_watchlist_check]
             db_positions_check = [p['ticker'] for p in db.get_positions("KIS", ENV_STR, ACC_FP, SYS_ACNT_PRDT, active_strat.value, active_strat.value)]
@@ -336,8 +341,35 @@ with tab3:
     w_c1, w_c2, w_c3, w_c4 = st.columns(4)
     w_c1.metric("Signal Bot", "독립 프로세스 구동")
     w_c2.metric("Exec Worker", "독립 프로세스 구동")
-    w_c3.metric("MOCK Tests", "115/115 PASS")
+    # 🚨 패치: 거짓 배지 제거
+    w_c3.metric("MOCK Tests", "동적 검증 대기중")
     w_c4.metric("REAL Status", real_app_status)
+    st.markdown("---")
+    
+    # 🚨 패치: 동적 테스트 러너 연동
+    st.markdown("### 🧪 시스템 무결성 정밀 테스트")
+    st.info("실거래(REAL) 환경을 해제하기 전, 시스템의 코어 로직(상태 전이, 펜싱 토큰, KIS Payload 등)을 동적으로 검증합니다.")
+    
+    if st.button("▶️ 무결성 테스트 스위트 실행 (pytest)", use_container_width=True):
+        with st.spinner("테스트 스위트를 구동 중입니다... (약 2~3초 소요)"):
+            import subprocess
+            try:
+                res = subprocess.run(["pytest", "test_quant.py", "-v", "--disable-warnings"], capture_output=True, text=True)
+                if res.returncode == 0:
+                    st.success("✅ **모든 핵심 안전망 및 동시성 제어 테스트 통과!**")
+                    st.balloons()
+                else:
+                    st.error("🚨 **테스트 실패!** (오류가 수정되기 전까지 REAL 거래를 절대 활성화하지 마십시오)")
+                
+                with st.expander("테스트 실행 상세 로그 확인", expanded=(res.returncode != 0)):
+                    st.code(res.stdout, language="bash")
+                    if res.stderr:
+                        st.code(res.stderr, language="bash")
+            except FileNotFoundError:
+                st.error("⚠️ 시스템에 `pytest` 모듈이 설치되어 있지 않습니다. 터미널에서 `pip install pytest`를 실행해 주세요.")
+            except Exception as e:
+                st.error(f"⚠️ 테스트 실행 중 알 수 없는 오류 발생: {e}")
+                
     st.markdown("---")
     
     base_eval = rd['eval'] if rd['eval'] > 0 else float(total_cash)
@@ -546,7 +578,6 @@ with tab4:
                 st.markdown("<h4 style='color:#f59e0b;'>🧑‍💻 2. 사용자 개입 제한</h4>", unsafe_allow_html=True)
                 if res_user.get('status') == 'success':
                     st.markdown(mts_metric_html("사용자 누적 수익률", f"{res_user['metrics']['TWR']:+.2f}%"), unsafe_allow_html=True)
-                    # 🚨 패치: 거래가 0건일 때 UI에 안내 메시지 표출
                     if res_user['metrics']['TWR'] == 0.0 and len(res_user['trade_logs']) == 0:
                         st.info("💡 지정한 기간 동안 사용자의 관심종목 내에서는 AI가 판단한 매수 조건(골든크로스 등)이 한 번도 발생하지 않았습니다. (거래 0건)")
                     st.dataframe(pd.DataFrame(res_user['summary_rows']), use_container_width=True, hide_index=True)
@@ -585,7 +616,7 @@ with tab5:
     <div style='background-color: rgba(30, 58, 138, 0.1); padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #1E3A8A;'>
         <h4 style='margin-top: 0;'>📌 시스템 배포 상태 및 한계 명세</h4>
         <p style='margin-bottom: 5px;'><span style='color: #10b981;'>🟢 <b>[IMPLEMENTED]</b></span> : 코드 레벨 로직 구현 완료</p>
-        <p style='margin-bottom: 5px;'><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> : 115개 필수 단위/통합 테스트 100% 통과</p>
+        <p style='margin-bottom: 5px;'><span style='color: #3b82f6;'>🔵 <b>[TESTED_MOCK]</b></span> : 핵심 무결성/동시성 통합 테스트 100% 통과</p>
         <p style='margin-bottom: 5px;'><span style='color: #f59e0b;'>🟡 <b>[OPERATION_NOT_VERIFIED]</b></span> : 외부 봇/워커 24시간 서비스 구동 및 KIS 모의계좌 E2E 체결 대사 미검증</p>
         <p style='margin-bottom: 0;'><span style='color: #ef4444;'>🔴 <b>[BLOCKED]</b></span> : 운영 검증 전까지 REAL 계좌 통신 전면 잠금(Lock)</p>
     </div>
