@@ -25,6 +25,16 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
+    - name: Create Dummy Secrets for CI
+      run: |
+        mkdir -p .streamlit
+        echo '[system]' > .streamlit/secrets.toml
+        echo 'hmac_secret = "ci_dummy_secret_123"' >> .streamlit/secrets.toml
+        echo '[kis_accounts.core]' >> .streamlit/secrets.toml
+        echo 'is_mock = "true"' >> .streamlit/secrets.toml
+        echo 'app_key = "dummy"' >> .streamlit/secrets.toml
+        echo 'app_secret = "dummy"' >> .streamlit/secrets.toml
+        
     - name: Run Integrity Tests (Pytest)
       env:
         CI_TEST_MODE: "true"
