@@ -225,6 +225,21 @@ def run_worker_loop():
                             db.set_setting(last_principal_key, current_principal)
                         except Exception as e: logger.error(f"DB Error record_cash_flow: {e}")
                     
+                    # 🚨 30초 관측 루프 내 실시간 현재가(prpr)로 보유종목 트레일링 최고가(highest_price) 갱신
+                    for h in bal_h:
+                        tk = h.get('pdno')
+                        cur_prpr = float(h.get('prpr', 0.0))
+                        if tk and cur_prpr > 0:
+                            try:
+                                with db.get_connection() as conn:
+                                    conn.execute("""
+                                        UPDATE positions 
+                                        SET highest_price = MAX(highest_price, ?) 
+                                        WHERE broker='KIS' AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?
+                                    """, (cur_prpr, env, acc_fp, acnt_prdt, portfolio_id, portfolio_id, tk))
+                            except Exception as e:
+                                logger.error(f"DB Error updating real-time highest price for {tk}: {e}")
+
                     c_res = kis.fetch_kis_orderable_cash(app_key, app_sec, cano, acnt_prdt, kis_tokens[token_key]['token'], "", 0, "00", is_mock)
                     if c_res.state == "SUCCESS_DATA": 
                         raw_cash = float(c_res.data)
@@ -232,7 +247,6 @@ def run_worker_loop():
                         logger.warning(f"⚠️ 주문가능금액 조회 실패. 가용 현금을 0으로 제한: {c_res.msg}")
                         raw_cash = 0.0
                     
-                    # 🚨 패치: 당일 장 시작 기준 자산(Baseline Equity) 및 순수 일일 손익 계산 로직 적용
                     today_str = datetime.datetime.now(quant.KST).strftime('%Y-%m-%d')
                     baseline_key = f"baseline_equity_KIS_{env}_{acc_fp}_{acnt_prdt}_{portfolio_id}_{portfolio_id}_{today_str}"
                     
