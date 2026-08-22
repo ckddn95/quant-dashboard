@@ -615,3 +615,77 @@ def request_cancel_for_system_orders(account_fp, strategy):
         ''', (account_fp, strategy))
         conn.commit()
         return cursor.rowcount
+
+
+def preflight_check():
+    """[P0-2] DB 초기화 및 V17 하드 마이그레이션"""
+    import sqlite3
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN EXCLUSIVE TRANSACTION")
+        try:
+            # 1. 필수 테이블 무조건 생성 (V17 기준)
+            cursor.executescript('''
+                CREATE TABLE IF NOT EXISTS system_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS watchlists (
+                    ticker TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    source TEXT DEFAULT 'MANUAL',
+                    provenance TEXT DEFAULT '',
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS watchlist_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    source TEXT,
+                    event_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS positions (
+                    account_fp TEXT,
+                    strategy TEXT,
+                    ticker TEXT,
+                    quantity INTEGER DEFAULT 0,
+                    managed_quantity INTEGER DEFAULT 0,
+                    manual_quantity INTEGER DEFAULT 0,
+                    managed_buy_price REAL DEFAULT 0.0,
+                    manual_buy_price REAL DEFAULT 0.0,
+                    PRIMARY KEY (account_fp, strategy, ticker)
+                );
+                CREATE TABLE IF NOT EXISTS order_intents (
+                    intent_id TEXT PRIMARY KEY,
+                    account_fp TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    status TEXT DEFAULT 'PENDING',
+                    broker_order_id TEXT,
+                    broker_order_time TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+            
+            # 2. 기존 DB 마이그레이션 (열 추가)
+            cursor.execute("PRAGMA table_info(positions)")
+            pos_cols = [row['name'] for row in cursor.fetchall()]
+            if 'managed_buy_price' not in pos_cols:
+                cursor.execute("ALTER TABLE positions ADD COLUMN managed_buy_price REAL DEFAULT 0.0")
+            if 'manual_buy_price' not in pos_cols:
+                cursor.execute("ALTER TABLE positions ADD COLUMN manual_buy_price REAL DEFAULT 0.0")
+
+            cursor.execute("PRAGMA table_info(order_intents)")
+            ord_cols = [row['name'] for row in cursor.fetchall()]
+            if 'broker_order_time' not in ord_cols:
+                cursor.execute("ALTER TABLE order_intents ADD COLUMN broker_order_time TEXT")
+
+            cursor.execute("PRAGMA user_version = 17")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise
