@@ -481,35 +481,125 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
         try:
             conn.execute("BEGIN IMMEDIATE")
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+            now_kst = datetime.now(KST)
+
             order = conn.execute("SELECT * FROM order_intents WHERE id=?", (order_id,)).fetchone()
             if not order or order['status'] != 'CLAIMED':
                 conn.execute("ROLLBACK"); return None, False, "Order not in CLAIMED state"
-            
+            if order['broker'] != broker or order['environment'] != env or order['account_fingerprint'] != acc_fp or order['product_code'] != prdt_cd or order['portfolio_id'] != port_id or order['strategy_id'] != strat_id:
+                conn.execute("ROLLBACK"); return dict(order), False, "Scope Mismatch"
+
             def reject(new_status, reason, details):
                 conn.execute("UPDATE order_intents SET status=?, updated_at=? WHERE id=?", (new_status, now_str, order_id))
+                conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (order_id, order['correlation_id'], "STATUS_CHANGE", "CLAIMED", new_status, worker_id, order['fencing_token'], reason, now_str, details))
                 conn.execute("COMMIT")
                 return dict(order), False, details
 
+            lease = conn.execute("SELECT token, expires_at FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
+            if not lease or lease['expires_at'] < now_str or lease['token'] != order['fencing_token']:
+                return reject('QUARANTINED', 'INVALID_LEASE', 'Invalid fencing token or lease expired')
+
+            m_ks = conn.execute("SELECT value FROM settings WHERE key='master_kill_switch'").fetchone()
+            a_ks = conn.execute("SELECT value FROM settings WHERE key=?", (f"kill_switch_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
+            if (m_ks and json.loads(m_ks['value'])) or (a_ks and json.loads(a_ks['value'])):
+                return reject('RISK_REJECTED', 'KILL_SWITCH', 'Kill Switch ON')
+
+            if env == "REAL":
+                real_status = CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
+                if real_status != 'APPROVED':
+                    return reject('RISK_REJECTED', 'POST_BLOCKED', 'REAL POST Strictly Blocked')
+
+            if order['signal_source'] == 'SYSTEM':
+                ap = conn.execute("SELECT value FROM settings WHERE key=?", (f"auto_pilot_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
+                if not ap or not json.loads(ap['value']):
+                    return reject('RISK_REJECTED', 'AUTO_PILOT_OFF', 'Auto Pilot is OFF')
+                    
+            at = conn.execute("SELECT value FROM settings WHERE key=?", (f"auto_trade_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
+            if order['signal_source'] == 'SYSTEM' and env == "REAL" and (not at or not json.loads(at['value'])):
+                return reject('RISK_REJECTED', 'AUTO_TRADE_OFF', 'Auto Trade is OFF for REAL')
+
+            real_status = CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
+            if env == "REAL" and real_status != "APPROVED" and order['signal_source'] == 'SYSTEM':
+                return reject('RISK_REJECTED', 'REAL_BLOCKED', 'REAL Blocked by System Contract')
+
+            intent_created = datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST)
+            if (now_kst - intent_created).total_seconds() > order['intent_ttl']:
+                return reject('EXPIRED', 'TTL_EXCEEDED', 'Intent TTL Exceeded')
+
+            sys_strat_ver = CONTRACT.get('strategy_version', '1.0.0')
+            sys_cont_ver = CONTRACT.get('contract_version', '1.0.0')
+            sys_cost_ver = CONTRACT.get('cost_model_version', '2.2.0')
+            
+            if str(order['strategy_version']) != str(sys_strat_ver) or \
+               str(order['contract_version']) != str(sys_cont_ver) or \
+               str(order['cost_model_version']) != str(sys_cost_ver):
+                return reject('QUARANTINED', 'VERSION_MISMATCH', f'Version mismatch: strat({order["strategy_version"]} vs {sys_strat_ver}), cont({order["contract_version"]} vs {sys_cont_ver}), cost({order["cost_model_version"]} vs {sys_cost_ver})')
+
+            if order['side'] not in ('BUY', 'SELL') or order['qty'] <= 0 or order['order_kind'] not in ('MARKET', 'LIMIT') or order['reference_price'] <= 0:
+                return reject('RISK_REJECTED', 'INVALID_SPEC', 'Invalid Spec (Side, Qty, Kind, Price)')
+
             if is_halted:
                 return reject('RISK_REJECTED', 'MARKET_HALTED', 'Market Halted')
+            try:
+                quote_ts = datetime.strptime(order['quote_timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST)
+                if (now_kst - quote_ts).total_seconds() > CONTRACT['execution_rules']['quote_freshness_ttl_sec']:
+                    return reject('EXPIRED', 'STALE_QUOTE', 'Quote Freshness TTL Exceeded')
+            except ValueError:
+                return reject('QUARANTINED', 'INVALID_QUOTE_TS', 'Unparseable quote timestamp')
+
+            if abs(current_price - order['reference_price']) / order['reference_price'] > 0.05:
+                return reject('RISK_REJECTED', 'PRICE_DEVIATION', f"Price deviated >5% (Ref:{order['reference_price']}, Cur:{current_price})")
+
+            if daily_pnl_pct < -0.05 and order['side'] == 'BUY':
+                return reject('RISK_REJECTED', 'DAILY_LOSS_LIMIT', 'Daily PnL < -5%')
 
             open_states = "('CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED')"
-            if order['side'] == 'SELL':
+            if order['side'] == 'BUY':
+                buffer_multi = CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05)
+                req_val = order['qty'] * (order['reference_price'] * buffer_multi if order['order_kind'] == 'MARKET' else order['limit_price'])
+                
+                reserved_exposure_row = conn.execute(f"""
+                    SELECT SUM((qty - cum_filled_qty) * (CASE WHEN order_kind='MARKET' THEN reference_price * ? ELSE limit_price END)) as res_exp 
+                    FROM order_intents 
+                    WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? 
+                    AND side='BUY' AND status IN {open_states} AND id != ?
+                """, (buffer_multi, broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id)).fetchone()
+                
+                reserved_exposure = float(reserved_exposure_row['res_exp']) if reserved_exposure_row['res_exp'] else 0.0
+                
+                if current_exposure + reserved_exposure + req_val > max_exposure:
+                    return reject('RISK_REJECTED', 'EXPOSURE_LIMIT_WITH_PENDING', f'Exceeds Max Exposure including pending orders')
+                
+                reserved = conn.execute(f"SELECT SUM((qty - cum_filled_qty) * (CASE WHEN order_kind='MARKET' THEN reference_price * ? ELSE limit_price END)) as res FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND side='BUY' AND status IN {open_states} AND id != ?", (buffer_multi, broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id)).fetchone()
+                res_cash = float(reserved['res']) if reserved['res'] else 0.0
+                if (actual_cash - res_cash) < req_val:
+                    return reject('RISK_REJECTED', 'INSUFFICIENT_CASH', f'Insufficient Cash')
+            elif order['side'] == 'SELL':
                 pos = conn.execute("SELECT managed_qty, manual_qty FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'])).fetchone()
+                
                 is_manual_order = (order['signal_source'] != 'SYSTEM')
                 available_qty = (pos['manual_qty'] if pos else 0) if is_manual_order else (pos['managed_qty'] if pos else 0)
+                
                 reserved = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as r_qty FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND side='SELL' AND signal_source {'!=' if is_manual_order else '='} 'SYSTEM' AND status IN {open_states} AND id != ?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'], order_id)).fetchone()
                 r_qty = int(reserved['r_qty']) if reserved['r_qty'] else 0
+                
                 if (available_qty - r_qty) < order['qty']:
-                    return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', 'Insufficient Qty')
+                    return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', f'Insufficient Qty')
 
             res = conn.execute("UPDATE order_intents SET status='SUBMITTING', updated_at=? WHERE id=? AND status='CLAIMED' AND fencing_token=?", (now_str, order_id, order['fencing_token']))
+            
             if res.rowcount == 0:
                 conn.execute("ROLLBACK")
-                return None, False, "Atomic CAS Failed"
+                return None, False, "Atomic CAS Failed: Token mismatch or order state altered by another worker"
+
+            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (order_id, order['correlation_id'], "STATUS_CHANGE", "CLAIMED", "SUBMITTING", worker_id, order['fencing_token'], "GATE_PASSED_ALL", now_str, "Intent 11-step CAS authorized"))
             conn.execute("COMMIT")
+
             order_updated = conn.execute("SELECT * FROM order_intents WHERE id=?", (order_id,)).fetchone()
-            return dict(order_updated), True, "Passed"
+            return dict(order_updated), True, "Passed Atomic Gate"
+
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in authorize_claimed_order: {e}")
