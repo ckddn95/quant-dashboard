@@ -193,7 +193,6 @@ def run_signal_bot():
                             conn.execute("UPDATE positions SET highest_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
                                          (high_p, "KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk))
 
-                    # 🚨 패치 9: 쿨다운을 이유로 루프 전체를 continue 하지 않고 상태만 체크함
                     sig_state = db.get_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk)
                     is_cooldown = False
                     if sig_state:
@@ -203,17 +202,10 @@ def run_signal_bot():
 
                     cp, action, score, reason = quant.evaluate_stock_for_ui(tk, strat, cfg, buy_p, high_p, cp, h_price, l_price, is_halted, days_held)
                     
-                    # 🚨 쿨다운 시 오직 '매수'만 보류하고, 손절/트레일링스탑/추세매도는 정상 작동하도록 허용
                     if is_cooldown and ("매수" in action or "🟢" in action):
                         action = "🟡 쿨다운 기간 (매수 보류)"
                         score = 0.0
                         reason = "최근 2연속 손실로 인한 거래 휴식"
-                    
-                    curr_bar_min = now_kst.replace(second=0, microsecond=0)
-                    last_bar_str = sig_state.get('last_distinct_bar_timestamp') if sig_state else None
-                    last_bar_min = datetime.datetime.strptime(last_bar_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST) if last_bar_str else (curr_bar_min - datetime.timedelta(minutes=10))
-                    consecutive_count = sig_state.get('consecutive_count', 0) if sig_state else 0
-                    current_signal = sig_state.get('current_signal', 'NONE') if sig_state else 'NONE'
 
                     is_sl_or_ts = "STOP_LOSS" in action or "TRAILING_STOP" in action
                     is_trend_exit = "TREND_EXIT" in action
@@ -222,43 +214,50 @@ def run_signal_bot():
                     fire_order = False
                     target_side = None
 
+                    # 🚨 패치 7-B: 손절 및 트레일링스탑은 1분봉 2개 확인 없이 즉시(Immediate) 타격
                     if is_sl_or_ts and bot_sell_qty > 0:
                         fire_order = True
                         target_side = "SELL"
-                    elif is_trend_exit and bot_sell_qty > 0:
-                        if current_signal == 'TREND_EXIT':
-                            if curr_bar_min > last_bar_min:
-                                consecutive_count += 1
-                                last_bar_min = curr_bar_min
-                        else:
-                            current_signal = 'TREND_EXIT'
-                            consecutive_count = 1
-                            last_bar_min = curr_bar_min
-                        
-                        if consecutive_count >= 2:
-                            fire_order = True
-                            target_side = "SELL"
-                        else:
-                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'TREND_EXIT', 'consecutive_count': consecutive_count, 'last_distinct_bar_timestamp': last_bar_min.strftime('%Y-%m-%d %H:%M:%S')})
-                            print(f"⏳ [WAIT 1-Min Bar] {item['종목명']} ({tk}) TREND_EXIT ({consecutive_count}/2)")
-                    elif is_buy_signal:
-                        if current_signal == 'BUY':
-                            if curr_bar_min > last_bar_min:
-                                consecutive_count += 1
-                                last_bar_min = curr_bar_min
-                        else:
-                            current_signal = 'BUY'
-                            consecutive_count = 1
-                            last_bar_min = curr_bar_min
-                        
-                        if consecutive_count >= 2:
-                            fire_order = True
-                            target_side = "BUY"
-                        else:
-                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'BUY', 'consecutive_count': consecutive_count, 'last_distinct_bar_timestamp': last_bar_min.strftime('%Y-%m-%d %H:%M:%S')})
-                            print(f"⏳ [WAIT 1-Min Bar] {item['종목명']} ({tk}) BUY ({consecutive_count}/2)")
+                    elif (is_trend_exit or is_buy_signal) and (bot_sell_qty > 0 or is_buy_signal):
+                        # 🚨 실제 KIS 1분봉 바(Bar) API를 조회하여 closed=True인 완성된 봉 2개의 bar_end_time을 검증
+                        try:
+                            chart_res = kis.fetch_kis_minute_chart(sys_app_key, sys_app_sec, tk, token, is_mock)
+                            if chart_res.state == "SUCCESS_DATA" and len(chart_res.data) >= 2:
+                                bars = chart_res.data
+                                bar1, bar2 = bars[-2], bars[-1] # 최근 완료된 두 개의 1분봉
+                                
+                                t1_str = f"{bar1.get('stck_bsop_date', now_kst.strftime('%Y%m%d'))} {bar1.get('stck_cntg_hour', '000000')}"
+                                t2_str = f"{bar2.get('stck_bsop_date', now_kst.strftime('%Y%m%d'))} {bar2.get('stck_cntg_hour', '000000')}"
+                                
+                                bar_time_1 = datetime.datetime.strptime(t1_str, '%Y%m%d %H%M%S').replace(tzinfo=KST)
+                                bar_time_2 = datetime.datetime.strptime(t2_str, '%Y%m%d %H%M%S').replace(tzinfo=KST)
+                                
+                                # 당일 거래일 기준 검증 및 두 완성봉의 시간 간격이 1분 이상 벌어져 있는지(중복 틱/조작 방지) 엄격히 검증
+                                same_trade_date = (bar_time_1.date() == now_kst.date() and bar_time_2.date() == now_kst.date())
+                                distinct_bars = (bar_time_2 > bar_time_1) and ((bar_time_2 - bar_time_1).total_seconds() >= 60)
+                                
+                                target_signal_type = 'BUY' if is_buy_signal else 'TREND_EXIT'
+                                last_recorded_bar = sig_state.get('last_distinct_bar_timestamp') if sig_state else None
+                                
+                                if same_trade_date and distinct_bars:
+                                    if last_recorded_bar != bar_time_2.strftime('%Y-%m-%d %H:%M:%S'):
+                                        fire_order = True
+                                        target_side = "BUY" if is_buy_signal else "SELL"
+                                        db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {
+                                            'current_signal': target_signal_type, 
+                                            'consecutive_count': 2, 
+                                            'last_distinct_bar_timestamp': bar_time_2.strftime('%Y-%m-%d %H:%M:%S')
+                                        })
+                                    else:
+                                        print(f"⏳ [Bar Already Processed] {item['종목명']} ({tk}) 이미 처리된 1분봉입니다.")
+                                else:
+                                    print(f"⏳ [Waiting for 2 Distinct Completed Bars] {item['종목명']} ({tk}) 조건 미충족 (봉 간격 부족 또는 날짜 상이)")
+                            else:
+                                print(f"⚠️ [Bar Fetch Warning] {item['종목명']} ({tk}) 1분봉 데이터 조회 실패 또는 개수 부족")
+                        except Exception as ex:
+                            print(f"⚠️ [Bar Validation Error] {ex}")
                     else:
-                        if current_signal != 'NONE' or consecutive_count > 0:
+                        if sig_state and (sig_state.get('current_signal') != 'NONE'):
                             db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'NONE', 'consecutive_count': 0})
 
                     if fire_order:
@@ -284,7 +283,6 @@ def run_signal_bot():
                         db.safe_add_order_intent(spec)
                         print(f"🔥 [SELL SIGNAL] {name} ({tk}) - {reason}")
                         
-                        # 🚨 패치 9: 매도 의도(Intent) 생성 단계에서는 가짜 손익(loss_streak)을 갱신하지 않고 초기화만 함
                         db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'NONE', 'consecutive_count': 0})
                             
                     elif target_side == "BUY":
@@ -303,7 +301,6 @@ def run_signal_bot():
                             print(f"🛒 [BUY SIGNAL] {name} ({tk}) - {add_qty}주 (사유: {reason})")
                             
                             usable_cash -= (add_qty * cp * 1.05)
-                            # 🚨 패치 9: 매수 의도(Intent) 생성 단계에서는 loss_streak 초기화를 없앰 (오직 체결 확정 시에만 동작)
                             db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'NONE', 'consecutive_count': 0})
 
         except Exception as e:
