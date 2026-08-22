@@ -22,9 +22,9 @@ CONTRACT = load_contract()
 SCHEMA_VERSION = int(CONTRACT.get('schema_version', 16))
 
 ALLOWED_TRANSITIONS = CONTRACT.get('allowed_state_transitions', {})
-ALLOWED_TRANSITIONS.setdefault('CANCEL_REQUESTED', []).extend(['CANCEL_CLAIMED', 'CANCELED'])
+ALLOWED_TRANSITIONS.setdefault('CANCEL_REQUESTED', []).extend(['CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCELED'])
 ALLOWED_TRANSITIONS['CANCEL_CLAIMED'] = ['CANCEL_SUBMITTING', 'CANCEL_REQUESTED']
-ALLOWED_TRANSITIONS['CANCEL_SUBMITTING'] = ['CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN', 'REJECTED']
+ALLOWED_TRANSITIONS['CANCEL_SUBMITTING'] = ['CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN', 'REJECTED', 'CANCELED']
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False, timeout=30)
@@ -487,7 +487,7 @@ def sync_positions_from_broker(broker, env, acc_fp, prdt_cd, port_id, strat_id, 
 
 def get_locked_cash_and_qty(broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker=None):
     with get_connection() as conn:
-        open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED', 'CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN')"
+        open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN')"
         buffer_multi = CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05)
         r1 = conn.execute(f"SELECT SUM((qty - cum_filled_qty) * reference_price * ?) as locked_cash FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND side='BUY' AND status IN {open_states}", (buffer_multi, broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
         locked_cash = float(r1['locked_cash']) if r1['locked_cash'] else 0.0
@@ -628,11 +628,20 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            o_row = conn.execute("SELECT qty, correlation_id, cum_filled_qty, tot_ccld_amt, avg_fill_price, status, signal_source FROM order_intents WHERE id=? AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
+            o_row = conn.execute("SELECT qty, correlation_id, cum_filled_qty, tot_ccld_qty, tot_ccld_amt, avg_fill_price, status, signal_source FROM order_intents WHERE id=? AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
             if not o_row: conn.execute("ROLLBACK"); return False
             
             new_cum_qty = broker_state['tot_ccld_qty']
             new_cum_amt = broker_state['tot_ccld_amt']
+            
+            # 🚨 패치: 체결 누적치 무결성 검증 (유한성, 0 이상, 단조증가 여부 사전 검사)
+            if not (math.isfinite(new_cum_qty) and math.isfinite(new_cum_amt)):
+                raise ValueError(f"Non-finite execution data: {new_cum_qty}, {new_cum_amt}")
+            if new_cum_qty < 0 or new_cum_amt < 0:
+                raise ValueError(f"Negative execution data: {new_cum_qty}, {new_cum_amt}")
+            if new_cum_qty < o_row['tot_ccld_qty'] or new_cum_amt < o_row['tot_ccld_amt']:
+                raise ValueError(f"Regression detected: qty({o_row['tot_ccld_qty']}->{new_cum_qty}), amt({o_row['tot_ccld_amt']}->{new_cum_amt})")
+
             delta_qty = new_cum_qty - o_row['cum_filled_qty']
             delta_amt = new_cum_amt - o_row['tot_ccld_amt']
             
@@ -808,12 +817,16 @@ def revert_stale_claims(broker, env, acc_fp, prdt_cd, port_id, strat_id):
         try:
             conn.execute("BEGIN IMMEDIATE")
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            query = "SELECT id, correlation_id, fencing_token, status FROM order_intents WHERE status IN ('CLAIMED', 'CANCEL_CLAIMED') AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?"
+            # 🚨 패치: CANCEL_CLAIMED 및 CANCEL_SUBMITTING 상태를 복구 경로에 명시적 포함하여 고착 방지
+            query = "SELECT id, correlation_id, fencing_token, status FROM order_intents WHERE status IN ('CLAIMED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING') AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?"
             claimed = conn.execute(query, (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchall()
             for c in claimed:
                 lease = conn.execute("SELECT expires_at FROM worker_leases WHERE token=?", (c['fencing_token'],)).fetchone()
                 if not lease or lease['expires_at'] < now_str:
-                    new_status = 'INTENT_CREATED' if c['status'] == 'CLAIMED' else 'CANCEL_REQUESTED'
+                    if c['status'] == 'CLAIMED': new_status = 'INTENT_CREATED'
+                    elif c['status'] == 'CANCEL_CLAIMED': new_status = 'CANCEL_REQUESTED'
+                    else: new_status = 'CANCEL_REQUESTED' # CANCEL_SUBMITTING 타임아웃 시 안전하게 CANCEL_REQUESTED로 회귀
+
                     conn.execute("UPDATE order_intents SET status=?, updated_at=? WHERE id=?", (new_status, now_str, c['id']))
                     conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
                                  (c['id'], c['correlation_id'], "STATUS_CHANGE", c['status'], new_status, "LEASE_EXPIRED", now_str, "Reverted due to expired lease"))
@@ -902,7 +915,7 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
             if str(order['strategy_version']) != str(sys_strat_ver) or \
                str(order['contract_version']) != str(sys_cont_ver) or \
                str(order['cost_model_version']) != str(sys_cost_ver):
-                return reject('QUARANTINED', 'VERSION_MISMATCH', f'Version mismatch: strat({order["strategy_version"]} vs {sys_strat_ver}), cont({order["contract_version"]} vs {sys_cont_ver}), cost({order["cost_model_version"]} vs {sys_cost_ver})')
+                return reject('QUARANTINED', 'VERSION_MISMATCH', f'Version mismatch: strat({order["strategy_version"]} vs {sys_strat_ver}), cont({order["contract_version"]} vs {sys_cont_ver}), cost({order["cost_model_version']} vs {sys_cost_ver})')
 
             if order['side'] not in ('BUY', 'SELL') or order['qty'] <= 0 or order['order_kind'] not in ('MARKET', 'LIMIT') or order['reference_price'] <= 0:
                 return reject('RISK_REJECTED', 'INVALID_SPEC', 'Invalid Spec (Side, Qty, Kind, Price)')
@@ -927,7 +940,6 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
                 buffer_multi = CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05)
                 req_val = order['qty'] * (order['reference_price'] * buffer_multi if order['order_kind'] == 'MARKET' else order['limit_price'])
                 
-                # 🚨 패치 16: 미체결 매수 주문들의 예약 익스포저 합산 검사
                 reserved_exposure_row = conn.execute(f"""
                     SELECT SUM((qty - cum_filled_qty) * (CASE WHEN order_kind='MARKET' THEN reference_price * ? ELSE limit_price END)) as res_exp 
                     FROM order_intents 
