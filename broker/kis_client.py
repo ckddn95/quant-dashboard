@@ -2,10 +2,14 @@ import requests
 import json
 import time
 import random
+import sqlite3
+import os
 import threading
 from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(os.path.dirname(BASE_DIR), "quant_system.db")
 
 class KisResult:
     def __init__(self, state: str, msg: str, data=None):
@@ -14,21 +18,57 @@ class KisResult:
         self.data = data
 
 class AccountRateLimiter:
-    def __init__(self, max_rate=15, period=1.0):
+    def __init__(self, max_rate=15, period=1.0, rate_key="default"):
         self.max_rate = max_rate
         self.period = period
-        self.timestamps = []
-        self.lock = threading.Lock()
+        self.rate_key = rate_key
+        self._init_db()
+
+    def _get_conn(self):
+        conn = sqlite3.connect(DB_PATH, isolation_level=None, timeout=30)
+        conn.execute('PRAGMA journal_mode=WAL;')
+        conn.execute('PRAGMA busy_timeout=5000;')
+        return conn
+
+    def _init_db(self):
+        try:
+            with self._get_conn() as conn:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS api_rate_limits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rate_key TEXT,
+                        timestamp REAL
+                    )
+                ''')
+        except Exception:
+            pass
 
     def acquire(self):
-        with self.lock:
+        while True:
             now = time.time()
-            self.timestamps = [t for t in self.timestamps if now - t < self.period]
-            if len(self.timestamps) >= self.max_rate:
-                sleep_time = self.period - (now - self.timestamps[0]) + random.uniform(0.02, 0.05)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-            self.timestamps.append(time.time())
+            cutoff = now - self.period
+            try:
+                with self._get_conn() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    # 만료된 타임스탬프 정리
+                    conn.execute("DELETE FROM api_rate_limits WHERE rate_key=? AND timestamp < ?", (self.rate_key, cutoff))
+                    # 현재 윈도우 내 호출 건수 확인
+                    row = conn.execute("SELECT COUNT(*) as cnt FROM api_rate_limits WHERE rate_key=? AND timestamp >= ?", (self.rate_key, cutoff)).fetchone()
+                    count = row[0] if row else 0
+
+                    if count < self.max_rate:
+                        conn.execute("INSERT INTO api_rate_limits (rate_key, timestamp) VALUES (?, ?)", (self.rate_key, now))
+                        conn.execute("COMMIT")
+                        break
+                    else:
+                        # 가장 오래된 타임스탬프 기준 대기 시간 계산
+                        oldest = conn.execute("SELECT MIN(timestamp) FROM api_rate_limits WHERE rate_key=?", (self.rate_key,)).fetchone()
+                        conn.execute("COMMIT")
+                        sleep_time = self.period - (now - oldest[0]) + random.uniform(0.02, 0.05) if oldest and oldest[0] else 0.05
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
+            except Exception:
+                time.sleep(0.05)
 
 _RATE_LIMITERS = {}
 _RATE_LIMITER_LOCK = threading.Lock()
@@ -36,7 +76,7 @@ _RATE_LIMITER_LOCK = threading.Lock()
 def get_rate_limiter(key: str) -> AccountRateLimiter:
     with _RATE_LIMITER_LOCK:
         if key not in _RATE_LIMITERS:
-            _RATE_LIMITERS[key] = AccountRateLimiter(max_rate=15, period=1.0)
+            _RATE_LIMITERS[key] = AccountRateLimiter(max_rate=15, period=1.0, rate_key=key)
         return _RATE_LIMITERS[key]
 
 _TOKEN_CACHE = {}
@@ -205,7 +245,6 @@ def fetch_kis_orderable_cash(app_key: str, app_secret: str, cano: str, acnt_prdt
     res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":
         out = res.data['data'].get('output', {})
-        # 🚨 패치 15: ord_psbl_cash로의 Fallback을 완전히 차단. 순수 현금 필드(nrcvb_buy_amt)가 없으면 0원 처리하여 미수 매수 원천 차단
         raw_nrcvb = out.get('nrcvb_buy_amt')
         if raw_nrcvb is not None and str(raw_nrcvb).strip() != "":
             cash_val = float(raw_nrcvb)
@@ -321,7 +360,7 @@ def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: 
         return "REJECTED", res.msg, "", "", "", ""
     return "UNKNOWN", res.msg, "", "", "", ""
 
-def cancel_kis_order_0013(app_key: str, app_secret: str, cano: str, acnt_prdt: str, token: str, org_odno: str, org_branch: str, qty: int, is_mock: bool = True):
+def cancel_kis_order_0013(app_key: str, app_sec: str, cano: str, acnt_prdt: str, token: str, org_odno: str, org_branch: str, qty: int, is_mock: bool = True):
     url = f"{get_base_url(is_mock)}/uapi/domestic-stock/v1/trading/order-rvsecncl"
     tr_id = "VTTC0013U" if is_mock else "TTTC0013U"
     headers = {"authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": tr_id, "custtype": "P"}
