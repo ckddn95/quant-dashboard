@@ -19,6 +19,10 @@ def load_contract():
 
 CONTRACT = load_contract()
 ALLOWED_TRANSITIONS = CONTRACT.get('allowed_state_transitions', {})
+# 🚨 패치 5: 취소 로직도 펜싱(CAS)을 통과하도록 상태 전이 테이블 강제 주입
+ALLOWED_TRANSITIONS.setdefault('CANCEL_REQUESTED', []).extend(['CANCEL_CLAIMED', 'CANCELED'])
+ALLOWED_TRANSITIONS['CANCEL_CLAIMED'] = ['CANCEL_SUBMITTING', 'CANCEL_REQUESTED']
+ALLOWED_TRANSITIONS['CANCEL_SUBMITTING'] = ['CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN', 'REJECTED']
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False, timeout=30)
@@ -267,7 +271,6 @@ def _migrate_to_v15(conn):
         conn.execute('ALTER TABLE fills ADD COLUMN orgno TEXT')
         conn.execute('ALTER TABLE fills ADD COLUMN ord_tmd TEXT')
 
-# 🚨 패치 (V16): 식별체계 재바인딩, Dry-run 대조 및 데이터 무결성 검증 추가
 def _migrate_to_v16(conn):
     import os
     try: import tomllib as toml
@@ -279,7 +282,6 @@ def _migrate_to_v16(conn):
     with open(secrets_path, "rb") as f: config = toml.load(f)
     sys_secret = config.get("system", {}).get("hmac_secret")
     
-    # 암호화 키 누락 시 절대 실행 불가 (하드 블록)
     if not sys_secret or sys_secret == "fallback_default_secret" or sys_secret.strip() == "":
         raise RuntimeError("CRITICAL [V16 Migration]: hmac_secret is missing in secrets.toml! Migration halted to prevent account data split.")
         
@@ -316,8 +318,6 @@ def _migrate_to_v16(conn):
         
         if post_oi_qty < pre_oi_qty or post_pos_qty < pre_pos_qty:
             raise RuntimeError(f"V16 Migration Data Loss! {old_id} -> {new_fp}")
-            
-    print("✅ V16 HMAC Fingerprint Re-binding & Verification Complete.")
 
 def run_migration():
     if not os.path.exists(DB_PATH):
@@ -367,7 +367,6 @@ def run_migration():
         raise RuntimeError(f"DB_MIGRATE_ERROR: {e} | Backup: {backup_path} | Details: {err_trace}")
     finally: conn.close()
 
-# 🚨 패치: Fallback 문자열 원천 차단으로 Split-Brain 방지
 def generate_account_fingerprint(cano: str, secret_salt: str) -> str:
     if cano == "MOCK_ACCOUNT": return "MOCK_ACCOUNT"
     if not secret_salt or secret_salt == "fallback_default_secret" or secret_salt.strip() == "":
@@ -399,12 +398,13 @@ def get_system_status(broker, env, acc_fp, prdt_cd, port_id, strat_id):
         "real_approval_status": CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
     }
 
+# 🚨 패치 5-A: 취소 타겟을 '브로커 주문번호가 명확히 존재하는' 주문으로만 격리하여 KIS 규격 오류 원천 봉쇄
 def request_cancel_for_system_orders(broker, env, acc_fp, prdt_cd, port_id, strat_id):
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            targets = conn.execute("SELECT * FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND signal_source='SYSTEM' AND status IN ('SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED')", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchall()
+            targets = conn.execute("SELECT * FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND signal_source='SYSTEM' AND status IN ('ACKNOWLEDGED', 'PARTIALLY_FILLED')", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchall()
             for t in targets:
                 conn.execute("UPDATE order_intents SET status='CANCEL_REQUESTED', updated_at=? WHERE id=?", (now_str, t['id']))
                 conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
@@ -583,8 +583,7 @@ def safe_add_order_intent(spec):
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            
-            open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED', 'CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN')"
+            open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN')"
             check_query = f"SELECT id, status FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND status IN {open_states}"
             existing = conn.execute(check_query, (spec.broker, spec.environment, spec.account_fingerprint, spec.account_product_code, spec.portfolio_id, spec.strategy_id, spec.ticker)).fetchone()
             
@@ -632,89 +631,98 @@ def insert_reconciliation_event(broker, env, acc_fp, prdt_cd, port_id, strat_id,
         except Exception as e:
             raise RuntimeError(f"DB Error in insert_reconciliation_event: {e}")
 
-def update_broker_receipt(order_id, state):
-    with get_connection() as conn:
-        try:
-            conn.execute("""
-                UPDATE order_intents 
-                SET tot_ccld_qty=?, tot_ccld_amt=?, avg_prvs=?, rmn_qty=?, cncl_yn=?, rjct_qty=?, orgno=?, ord_tmd=? 
-                WHERE id=?
-            """, (state['tot_ccld_qty'], state['tot_ccld_amt'], state['avg_prvs'], state['rmn_qty'], state['cncl_yn'], state['rjct_qty'], state['orgno'], state['ord_tmd'], order_id))
-        except Exception as e: raise RuntimeError(f"DB Error in update_broker_receipt: {e}")
-
-def apply_fill_delta_exactly_once(order_id, ticker, order_type, broker, env, acc_fp, prdt_cd, port_id, strat_id, new_cum_qty, new_cum_amt, broker_state):
+# 🚨 패치 4 연동: 통합된 원자적 대사(Reconciliation) 함수
+def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt_cd, port_id, strat_id, broker_state):
     import quant_engine as quant
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
             o_row = conn.execute("SELECT qty, correlation_id, cum_filled_qty, tot_ccld_amt, avg_fill_price, status, signal_source FROM order_intents WHERE id=? AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
             if not o_row: conn.execute("ROLLBACK"); return False
-            if new_cum_qty == o_row['cum_filled_qty'] and new_cum_amt == o_row['tot_ccld_amt']: conn.execute("ROLLBACK"); return False
-                
-            anomalies = []
-            if new_cum_qty < o_row['cum_filled_qty']: anomalies.append(f"CumQty Drop: {o_row['cum_filled_qty']}->{new_cum_qty}")
-            if new_cum_qty > o_row['qty']: anomalies.append(f"Qty Exceeded: {new_cum_qty} > {o_row['qty']}")
-            if new_cum_qty == o_row['cum_filled_qty'] and new_cum_amt != o_row['tot_ccld_amt']: anomalies.append(f"Amt Mismatch: {o_row['tot_ccld_amt']} vs {new_cum_amt}")
-                
-            if anomalies:
-                now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-                details = " | ".join(anomalies)
-                conn.execute("UPDATE order_intents SET status='RECONCILIATION_REQUIRED', updated_at=? WHERE id=?", (now_str, order_id))
-                conn.execute("INSERT INTO reconciliation_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, order_intent_id, event_type, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, 'ANOMALY_HALT', ?, ?)", 
-                             (broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id, now_str, details))
-                conn.execute("COMMIT"); return False
-
+            
+            new_cum_qty = broker_state['tot_ccld_qty']
+            new_cum_amt = broker_state['tot_ccld_amt']
             delta_qty = new_cum_qty - o_row['cum_filled_qty']
             delta_amt = new_cum_amt - o_row['tot_ccld_amt']
-            delta_fill_price = delta_amt / delta_qty if delta_qty > 0 else 0
-            
-            is_manual = (o_row['signal_source'] != 'SYSTEM')
-            managed_qty_delta = delta_qty if is_manual else 0
-            
-            market = "KOSPI" if ticker.startswith('0') else "KOSDAQ"
-            fee, slip, tax = quant.CostModel.calculate_cost(datetime.now(KST).date(), market, order_type, delta_fill_price, delta_qty, False)
-            
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            new_status = 'FILLED' if new_cum_qty >= o_row['qty'] else 'PARTIALLY_FILLED'
-            if o_row['status'] in ['CANCEL_REQUESTED', 'CANCEL_ACKNOWLEDGED', 'CANCELED']: new_status = o_row['status'] 
-            if new_cum_qty >= o_row['qty']: new_status = 'FILLED'
             
-            new_cum_avg_price = new_cum_amt / new_cum_qty if new_cum_qty > 0 else 0
-            conn.execute("UPDATE order_intents SET cum_filled_qty=?, avg_fill_price=?, status=?, updated_at=? WHERE id=?", (new_cum_qty, new_cum_avg_price, new_status, now_str, order_id))
-            
-            fill_id = f"{order_id}_{datetime.now(KST).timestamp()}"
-            conn.execute("""
-                INSERT INTO fills (fill_id, order_intent_id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, delta_qty, cum_qty, fill_price, delta_amt, cum_amt, fee, tax, slippage, fill_timestamp, received_at, is_reconciled, tot_ccld_qty, tot_ccld_amt, avg_prvs, rmn_qty, cncl_yn, rjct_qty, orgno, ord_tmd) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (fill_id, order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_cum_qty, delta_fill_price, delta_amt, new_cum_amt, fee, tax, slip, now_str, now_str, 1, broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd']))
-            
-            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                         (order_id, o_row['correlation_id'], "FILL", o_row['status'], new_status, "BROKER_FILL", now_str, f"Delta Fill: {delta_qty} @ {delta_fill_price}"))
-            
-            p_row = conn.execute("SELECT managed_qty, manual_qty, buy_price FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
-            p_qty = p_row['managed_qty'] if p_row else 0
-            p_buy = p_row['buy_price'] if p_row else 0.0
-            p_manual_qty = p_row['manual_qty'] if p_row else 0
-            
-            if "BUY" in order_type.upper():
-                new_p_qty = p_qty + delta_qty
-                new_manual_qty = p_manual_qty + managed_qty_delta
-                new_p_buy = ((p_qty * p_buy) + (delta_qty * delta_fill_price)) / new_p_qty if new_p_qty > 0 else 0
-                if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_p_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_p_qty, new_manual_qty, new_p_buy, now_str))
-            else: 
-                new_p_qty = p_qty - delta_qty
-                new_manual_qty = max(0, p_manual_qty - managed_qty_delta)
-                if new_p_qty < 0: 
-                    conn.execute("UPDATE order_intents SET status='RECONCILIATION_REQUIRED' WHERE id=?", (order_id,))
-                    conn.execute("INSERT INTO reconciliation_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, order_intent_id, event_type, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, 'NEGATIVE_QTY_DETECTED', ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id, now_str, f"qty: {new_p_qty}"))
-                    conn.execute("COMMIT"); return False 
-                if new_p_qty == 0 and (not p_row or new_manual_qty == 0): conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                else: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_p_qty, new_manual_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+            if delta_qty > 0 or delta_amt > 0:
+                anomalies = []
+                if new_cum_qty < o_row['cum_filled_qty']: anomalies.append(f"CumQty Drop: {o_row['cum_filled_qty']}->{new_cum_qty}")
+                if new_cum_qty > o_row['qty']: anomalies.append(f"Qty Exceeded: {new_cum_qty} > {o_row['qty']}")
+                if new_cum_qty == o_row['cum_filled_qty'] and new_cum_amt != o_row['tot_ccld_amt']: anomalies.append(f"Amt Mismatch: {o_row['tot_ccld_amt']} vs {new_cum_amt}")
+                    
+                if anomalies:
+                    details = " | ".join(anomalies)
+                    conn.execute("UPDATE order_intents SET status='RECONCILIATION_REQUIRED', updated_at=? WHERE id=?", (now_str, order_id))
+                    conn.execute("INSERT INTO reconciliation_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, order_intent_id, event_type, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, 'ANOMALY_HALT', ?, ?)", 
+                                 (broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id, now_str, details))
+                    conn.execute("COMMIT"); return False
+
+                delta_fill_price = delta_amt / delta_qty if delta_qty > 0 else 0
+                is_manual = (o_row['signal_source'] != 'SYSTEM')
+                delta_managed = delta_qty if not is_manual else 0
+                delta_manual = delta_qty if is_manual else 0
+                
+                market = "KOSPI" if ticker.startswith('0') else "KOSDAQ"
+                fee, slip, tax = quant.CostModel.calculate_cost(datetime.now(KST).date(), market, order_type, delta_fill_price, delta_qty, False)
+                
+                new_status = 'FILLED' if new_cum_qty >= o_row['qty'] else 'PARTIALLY_FILLED'
+                if o_row['status'] in ['CANCEL_REQUESTED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCEL_ACKNOWLEDGED', 'CANCELED']: new_status = o_row['status'] 
+                if new_cum_qty >= o_row['qty']: new_status = 'FILLED'
+                
+                new_cum_avg_price = new_cum_amt / new_cum_qty if new_cum_qty > 0 else 0
+                fill_id = f"{order_id}_{datetime.now(KST).timestamp()}"
+                
+                conn.execute("""
+                    INSERT INTO fills (fill_id, order_intent_id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, delta_qty, cum_qty, fill_price, delta_amt, cum_amt, fee, tax, slippage, fill_timestamp, received_at, is_reconciled, tot_ccld_qty, tot_ccld_amt, avg_prvs, rmn_qty, cncl_yn, rjct_qty, orgno, ord_tmd) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (fill_id, order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_cum_qty, delta_fill_price, delta_amt, new_cum_amt, fee, tax, slip, now_str, now_str, 1, broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd']))
+                
+                conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                             (order_id, o_row['correlation_id'], "FILL", o_row['status'], new_status, "BROKER_FILL", now_str, f"Delta Fill: {delta_qty} @ {delta_fill_price}"))
+                
+                p_row = conn.execute("SELECT managed_qty, manual_qty, buy_price FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
+                p_qty = p_row['managed_qty'] if p_row else 0
+                p_manual_qty = p_row['manual_qty'] if p_row else 0
+                p_buy = p_row['buy_price'] if p_row else 0.0
+                
+                if "BUY" in order_type.upper():
+                    new_managed_qty = p_qty + delta_managed
+                    new_manual_qty = p_manual_qty + delta_manual
+                    total_new_qty = new_managed_qty + new_manual_qty
+                    total_old_qty = p_qty + p_manual_qty
+                    
+                    new_p_buy = ((total_old_qty * p_buy) + (delta_qty * delta_fill_price)) / total_new_qty if total_new_qty > 0 else 0
+                    if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                    else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_p_buy, now_str))
+                else: 
+                    new_managed_qty = max(0, p_qty - delta_managed)
+                    new_manual_qty = max(0, p_manual_qty - delta_manual)
+                    total_new_qty = new_managed_qty + new_manual_qty
+                    
+                    if total_new_qty == 0 and not is_manual: 
+                        conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                    else: 
+                        conn.execute("UPDATE positions SET managed_qty=?, manual_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                
+                conn.execute("""
+                    UPDATE order_intents 
+                    SET cum_filled_qty=?, avg_fill_price=?, status=?, updated_at=?,
+                        tot_ccld_qty=?, tot_ccld_amt=?, avg_prvs=?, rmn_qty=?, cncl_yn=?, rjct_qty=?, orgno=?, ord_tmd=? 
+                    WHERE id=?
+                """, (new_cum_qty, new_cum_avg_price, new_status, now_str, broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd'], order_id))
+            else:
+                conn.execute("""
+                    UPDATE order_intents 
+                    SET tot_ccld_qty=?, tot_ccld_amt=?, avg_prvs=?, rmn_qty=?, cncl_yn=?, rjct_qty=?, orgno=?, ord_tmd=?, updated_at=?
+                    WHERE id=?
+                """, (broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd'], now_str, order_id))
+
             conn.execute("COMMIT"); return True
         except Exception as e:
             conn.execute("ROLLBACK")
-            raise RuntimeError(f"DB Error in apply_fill_delta: {e}")
+            raise RuntimeError(f"DB Error in apply_broker_receipt: {e}")
 
 def transition_order_status(order_id, current_status, new_status, broker_id="", branch="", broker_order_time="", code="", worker_id=None, fencing_token=None, reason=""):
     if new_status not in ALLOWED_TRANSITIONS.get(current_status, []): return False
@@ -735,19 +743,63 @@ def transition_order_status(order_id, current_status, new_status, broker_id="", 
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in transition_order_status: {e}")
 
+# 🚨 패치 5: 취소 Claim 및 Authorize 로직을 추가하여 다중 워커 중복 취소(Double-Cancel) 방지
+def claim_cancel_intent(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id):
+    with get_connection() as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+            lease = conn.execute("SELECT token, expires_at FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
+            if not lease or lease['expires_at'] < now_str:
+                conn.execute("ROLLBACK"); return None, "Expired or No Lease"
+
+            order = conn.execute("SELECT * FROM order_intents WHERE status='CANCEL_REQUESTED' AND broker_order_id IS NOT NULL AND broker_order_id != '' AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY id ASC LIMIT 1", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
+            if not order:
+                conn.execute("ROLLBACK"); return None, "No Pending Cancels"
+
+            conn.execute("UPDATE order_intents SET status='CANCEL_CLAIMED', fencing_token=?, updated_at=? WHERE id=?", (lease['token'], now_str, order['id']))
+            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (order['id'], order['correlation_id'], "STATUS_CHANGE", "CANCEL_REQUESTED", "CANCEL_CLAIMED", worker_id, lease['token'], "WORKER_CANCEL_CLAIM", now_str, "Cancel intent claimed"))
+            conn.execute("COMMIT")
+            return dict(order), "OK"
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise RuntimeError(f"DB Error in claim_cancel_intent: {e}")
+
+def authorize_cancel_order(order_id, worker_id, fencing_token):
+    with get_connection() as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+            res = conn.execute("UPDATE order_intents SET status='CANCEL_SUBMITTING', updated_at=? WHERE id=? AND status='CANCEL_CLAIMED' AND fencing_token=?", (now_str, order_id, fencing_token))
+            
+            if res.rowcount == 0:
+                conn.execute("ROLLBACK")
+                return False, "Atomic CAS Failed: Token mismatch or order state altered"
+
+            order_updated = conn.execute("SELECT * FROM order_intents WHERE id=?", (order_id,)).fetchone()
+            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (order_id, order_updated['correlation_id'], "STATUS_CHANGE", "CANCEL_CLAIMED", "CANCEL_SUBMITTING", worker_id, fencing_token, "GATE_PASSED_CANCEL", now_str, "Cancel CAS authorized"))
+            conn.execute("COMMIT")
+            return True, "Passed Atomic Cancel Gate"
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise RuntimeError(f"DB Error in authorize_cancel_order: {e}")
+
 def revert_stale_claims(broker, env, acc_fp, prdt_cd, port_id, strat_id):
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            query = "SELECT id, correlation_id, fencing_token FROM order_intents WHERE status='CLAIMED' AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?"
+            query = "SELECT id, correlation_id, fencing_token, status FROM order_intents WHERE status IN ('CLAIMED', 'CANCEL_CLAIMED') AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?"
             claimed = conn.execute(query, (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchall()
             for c in claimed:
                 lease = conn.execute("SELECT expires_at FROM worker_leases WHERE token=?", (c['fencing_token'],)).fetchone()
                 if not lease or lease['expires_at'] < now_str:
-                    conn.execute("UPDATE order_intents SET status='INTENT_CREATED', updated_at=? WHERE id=?", (now_str, c['id']))
+                    new_status = 'INTENT_CREATED' if c['status'] == 'CLAIMED' else 'CANCEL_REQUESTED'
+                    conn.execute("UPDATE order_intents SET status=?, updated_at=? WHERE id=?", (new_status, now_str, c['id']))
                     conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                                 (c['id'], c['correlation_id'], "STATUS_CHANGE", "CLAIMED", "INTENT_CREATED", "LEASE_EXPIRED", now_str, "Reverted due to expired lease"))
+                                 (c['id'], c['correlation_id'], "STATUS_CHANGE", c['status'], new_status, "LEASE_EXPIRED", now_str, "Reverted due to expired lease"))
             conn.execute("COMMIT")
         except Exception as e:
             conn.execute("ROLLBACK")

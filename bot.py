@@ -3,7 +3,7 @@ import time
 import datetime
 import concurrent.futures
 import pandas as pd
-import math  # 🚨 패치 2를 위한 모듈 추가
+import math
 import FinanceDataReader as fdr
 import database as db
 import broker.kis_client as kis
@@ -19,6 +19,24 @@ def get_last_friday_close():
     last_fri = now - datetime.timedelta(days=days_since_friday)
     return last_fri.replace(hour=15, minute=30, second=0, microsecond=0)
 
+def get_account_secrets(portfolio_id):
+    try:
+        try: import tomllib as toml
+        except ImportError: import toml
+        secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
+        with open(secrets_path, "rb") as f: config = toml.load(f)
+        acc_key = "core" if portfolio_id == "CORE" else "satellite"
+        c = config["kis_accounts"][acc_key]
+        is_mock_raw = str(c.get("is_mock", "true")).strip().lower()
+        if is_mock_raw not in ["true", "false"]: return None, None, None, True, "01", ""
+        sys_secret = config.get("system", {}).get("hmac_secret")
+        if not sys_secret or sys_secret == "fallback_default_secret" or str(sys_secret).strip() == "":
+            print("🚨 [Security Alert] hmac_secret is missing!")
+            return None, None, None, True, "01", ""
+        return c["app_key"], c["app_secret"], str(c["cano"]).strip(), is_mock_raw == 'true', str(c.get("acnt_prdt", "01")).strip(), sys_secret
+    except Exception as e:
+        print(f"Secrets Error: {e}"); return None, None, None, True, "01", ""
+
 def run_signal_bot():
     db.preflight_check()
     print("🤖 [Signal Bot] Daemon Started. Monitoring markets with DETERMINISTIC rules...")
@@ -30,29 +48,31 @@ def run_signal_bot():
 
             if db.get_setting('master_kill_switch', False):
                 print("🚨 [Signal Bot] Master Kill Switch is ON. Paused.")
+                # 🚨 패치 5: 마스터 킬스위치 발동 시 누락되었던 취소 트리거를 정상 연동
+                for strat_ks in [quant.Strategy.CORE, quant.Strategy.SATELLITE]:
+                    app_k, _, c_ano, is_m, p_cd, sec = get_account_secrets(strat_ks.value)
+                    if app_k:
+                        fp_ks = db.generate_account_fingerprint(c_ano, sec)
+                        db.request_cancel_for_system_orders("KIS", "MOCK" if is_m else "REAL", fp_ks, p_cd, strat_ks.value, strat_ks.value)
                 time.sleep(10)
                 continue
 
             for strat in [quant.Strategy.CORE, quant.Strategy.SATELLITE]:
-                account_key = "core" if strat == quant.Strategy.CORE else "satellite"
-                try:
-                    sys_app_key = db.get_setting(f'kis_app_key_{account_key}', None)
-                    sys_app_sec = db.get_setting(f'kis_app_sec_{account_key}', None)
-                    sys_cano = db.get_setting(f'kis_cano_{account_key}', 'MOCK_ACCOUNT')
-                    sys_acnt_prdt = db.get_setting(f'kis_prdt_{account_key}', '01')
-                    is_mock = db.get_setting(f'kis_is_mock_{account_key}', True)
-                except KeyError:
-                    continue
-
+                portfolio_id = strat.value
+                sys_app_key, sys_app_sec, sys_cano, is_mock, sys_acnt_prdt, sys_secret = get_account_secrets(portfolio_id)
+                
                 if not sys_app_key:
                     continue
 
                 env_str = "MOCK" if is_mock else "REAL"
-                acc_fp = db.generate_account_fingerprint(sys_cano, db.get_setting("hmac_secret_cache", "fallback_default_secret")) 
+                acc_fp = db.generate_account_fingerprint(sys_cano, sys_secret) 
                 scope_key = f"KIS_{env_str}_{acc_fp}_{sys_acnt_prdt}_{strat.value}_{strat.value}"
                 
-                # 🚨 패치 3: 봇의 생존을 증명하는 실시간 Heartbeat 기록 (UI가 감시)
                 db.set_setting(f"heartbeat_bot_{scope_key}", now_kst.strftime('%Y-%m-%d %H:%M:%S'))
+
+                # 🚨 패치 5: 계좌별 개별 킬스위치 발동 시 취소 트리거 정상 연동
+                if db.get_setting(f"kill_switch_{scope_key}", False):
+                    db.request_cancel_for_system_orders("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value)
 
                 if not db.get_setting(f"auto_pilot_{scope_key}", False):
                     continue
@@ -95,8 +115,18 @@ def run_signal_bot():
                 last_principal = db.get_setting(last_principal_key, total_eval)
                 daily_pnl_pct = (total_eval - last_principal) / last_principal if last_principal > 0 else 0.0
                 
-                regime = quant.determine_market_regime(total_eval)
-                is_bull_market = (regime == quant.MarketRegime.BULL)
+                is_bull_market = False
+                if cfg.boost:
+                    try:
+                        idx_tk = 'KS11' if strat == quant.Strategy.CORE else 'KQ11'
+                        start_d = (now_kst - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
+                        market_df = fdr.DataReader(idx_tk, start=start_d)
+                        if not market_df.empty and len(market_df) >= 200:
+                            ma200 = market_df['Close'].rolling(200).mean().iloc[-1]
+                            is_bull_market = market_df['Close'].iloc[-1] > ma200
+                    except Exception as e:
+                        print(f"⚠️ [Signal Bot] Market Regime Check Error: {e}")
+
                 boost_addon = db.CONTRACT.get('booster_policy', {}).get('value', 0.10) if (cfg.boost and is_bull_market) else 0.0
                 max_exposure_ratio = 0.90 + boost_addon
                 target_buy_amt = total_eval * cfg.alloc if total_eval > 0 else 1000000.0
@@ -119,7 +149,6 @@ def run_signal_bot():
                 evaluations = []
 
                 for item in eval_list:
-                    # 🚨 패치 1: 다수 종목 반복 조회 시 API Rate Limit 엄수 (루프당 0.07초 지연 -> 최대 초당 14건 호출로 제한)
                     time.sleep(0.07)
                     
                     tk = item['티커']
@@ -142,14 +171,13 @@ def run_signal_bot():
                         l_price = float(p_res.data['low'])
                         is_halted = p_res.data['is_halted']
                         
-                        # 🚨 패치 2: 시세 데이터의 수학적/논리적 무결성을 극단적으로 엄격하게 검증 (HFT 표준)
                         if math.isinf(cp) or math.isnan(cp) or cp <= 0: continue
                         if math.isinf(h_price) or math.isnan(h_price) or h_price <= 0: continue
                         if math.isinf(l_price) or math.isnan(l_price) or l_price <= 0: continue
                         if l_price > h_price or cp > h_price or cp < l_price: continue
-                        if not isinstance(is_halted, bool): is_halted = True # 거래정지 여부 불명 시 무조건 차단(Fail-Safe)
+                        if not isinstance(is_halted, bool): is_halted = True
                     except (ValueError, TypeError, KeyError):
-                        continue # 파싱 불가 데이터 즉시 폐기
+                        continue 
 
                     if holding_qty > 0 and cp > high_p:
                         high_p = cp
