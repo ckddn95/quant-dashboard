@@ -110,7 +110,7 @@ def _migrate_to_v6(conn):
     conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS watchlist (broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, added_at TIMESTAMP)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS positions (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_id, portfolio_id))''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_id, portfolio_id))''')
     conn.execute('''CREATE TABLE IF NOT EXISTS order_intents (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT UNIQUE, idempotency_key TEXT UNIQUE, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, strategy_version TEXT, contract_version TEXT, ticker TEXT, stock_name TEXT, side TEXT, order_kind TEXT, qty INTEGER, limit_price REAL, reference_price REAL, exchange TEXT, time_in_force TEXT, signal_id TEXT, signal_source TEXT, signal_cutoff TEXT, quote_id TEXT, quote_source TEXT, quote_timestamp TEXT, intent_ttl INTEGER, cost_model_version TEXT, status TEXT DEFAULT 'INTENT_CREATED', broker_order_id TEXT, branch_no TEXT, cum_filled_qty INTEGER DEFAULT 0, avg_fill_price REAL DEFAULT 0.0, resp_code TEXT, fencing_token INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP)''')
 
 def _migrate_to_v7(conn):
@@ -806,7 +806,6 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
             elif order['side'] == 'SELL':
                 pos = conn.execute("SELECT managed_qty, manual_qty FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'])).fetchone()
                 
-                # 🚨 패치: 주문 소스(signal_source)에 따라 managed_qty 또는 manual_qty를 정확히 분리 검사하여 UI 수동 매도 허용
                 is_manual_order = (order['signal_source'] != 'SYSTEM')
                 available_qty = (pos['manual_qty'] if pos else 0) if is_manual_order else (pos['managed_qty'] if pos else 0)
                 
