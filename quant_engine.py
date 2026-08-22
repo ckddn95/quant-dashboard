@@ -8,7 +8,6 @@ from enum import Enum
 from dataclasses import dataclass
 import database as db
 
-# 🚨 Hotfix: datetime 네임스페이스 명시적 지정
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 class ExitReason(Enum):
@@ -139,11 +138,19 @@ def calc_buy_signal(strat: Strategy, cfg: StrategyConfig, close_p: float, ma20: 
             return False, 50.0, f"조건미달: 눌림목 범위 이탈 (MA20 이격 {dist*100:+.2f}%) {ma_status}"
     return False, 50.0, f"조건미달 {ma_status}"
 
-# 🚨 패치 1: Look-ahead Bias 차단 (highest_p는 오직 T-1일 이전 고점만을 의미함)
-def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float) -> tuple[bool, float, ExitReason]:
+# 🚨 패치 7: 당일 누적 저가(low_p)를 현재가처럼 취급하던 시뮬레이션 로직을 분리. 라이브(is_live) 환경에서는 오직 순수 현재가(close_p)로만 위기 상황을 판정.
+def calc_sell_signal(strat: Strategy, cfg: StrategyConfig, open_p: float, high_p: float, low_p: float, close_p: float, buy_p: float, highest_p: float, days_held: int, ma20: float, ma60: float, is_live: bool = False) -> tuple[bool, float, ExitReason]:
     sl_target = buy_p * (1.0 + cfg.sl)
-    ts_target = highest_p * (1.0 + cfg.ts_drp)  # 당일 high_p 제외
+    ts_target = highest_p * (1.0 + cfg.ts_drp)
     
+    if is_live:
+        if close_p <= sl_target: return True, close_p, ExitReason.STOP_LOSS
+        if (highest_p >= buy_p * (1.0 + cfg.ts_tgt)) and (close_p <= ts_target): return True, close_p, ExitReason.TRAILING_STOP
+        if days_held >= cfg.min_h:
+            if strat == Strategy.CORE and close_p < ma60 * (1.0 - cfg.buf * cfg.buffer_factor): return True, close_p, ExitReason.TREND_EXIT
+            elif strat == Strategy.SATELLITE and close_p < ma20 * (1.0 - cfg.buf * cfg.buffer_factor): return True, close_p, ExitReason.TREND_EXIT
+        return False, 0.0, ExitReason.UNKNOWN
+        
     if open_p <= sl_target: return True, open_p, ExitReason.STOP_LOSS
     if (highest_p >= buy_p * (1.0 + cfg.ts_tgt)) and (open_p <= ts_target): return True, open_p, ExitReason.TRAILING_STOP
     
@@ -185,14 +192,14 @@ def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy
         if not snap.is_valid: return snap.current_price, f"차단: {snap.reason}", 0.0, f"거래불가 상태 ({snap.reason}) {ma_status}"
         
         if buy_price > 0:
-            is_sell, trigger_p, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60)
+            is_sell, trigger_p, s_reason = calc_sell_signal(strat, cfg, snap.current_price, snap.high_price, snap.low_price, snap.current_price, buy_price, highest_price, days_held, ma20, ma60, is_live=is_kis)
             if is_sell:
                 detail_reason = ""
                 if s_reason == ExitReason.STOP_LOSS: detail_reason = f"손절매 (기준가 {trigger_p:,.0f}원 이탈) {ma_status}"
                 elif s_reason == ExitReason.TRAILING_STOP: detail_reason = f"트레일링스탑 (고점 {highest_price:,.0f}원 대비 하락) {ma_status}"
                 elif s_reason == ExitReason.TREND_EXIT: detail_reason = f"단기/중기 이동평균선 추세 이탈 {ma_status}"
                 else: detail_reason = f"조건 만족 {ma_status}"
-                return snap.current_price, f"🔴 {s_reason.value} (예비)", 999.0, detail_reason
+                return snap.current_price, f"🔴 {s_reason.name} (예비)", 999.0, detail_reason
 
         is_buy, score, b_reason = calc_buy_signal(strat, cfg, snap.current_price, ma20, ma60, ma200, m60_up)
         if is_buy: return snap.current_price, "🟢 매수 시그널 (예비)", score, b_reason
@@ -291,7 +298,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 tk = order['ticker']
                 if tk not in dfs or current_date not in dfs[tk].index:
                     if order['side'] == 'SELL': still_pending.append(order)
-                    # 🚨 패치 3: 미체결 BUY는 하루 지나면 TTL 만료로 간주하여 자동 폐기
                     continue 
                 open_p = dfs[tk].loc[current_date, 'Open']
                 if pd.isna(open_p) or open_p <= 0:
@@ -311,7 +317,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                         total_cost_drag += total_cost
                         total_traded_value += open_p * executable_qty
                         
-                        # 🚨 패치 2: 실거래와 동일하게 세금/수수료 배제된 순수 체결가를 평단(buy_price)으로 고정
                         if tk in positions:
                             old_qty, old_bp = positions[tk]['qty'], positions[tk]['buy_price']
                             new_qty = old_qty + executable_qty
@@ -343,8 +348,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 
                 pos['days'] += 1
                 
-                # 🚨 패치 1: 평가(calc_sell_signal)를 당일 고가(High)가 갱신되기 직전에 실시하여 미래 참조 방지
-                is_sell, trigger_price, exit_reason = calc_sell_signal(strat, cfg, row['Open'], row['High'], row['Low'], row['Close'], pos['buy_price'], pos['highest'], pos['days'], row['MA20'], row['MA60'])
+                is_sell, trigger_price, exit_reason = calc_sell_signal(strat, cfg, row['Open'], row['High'], row['Low'], row['Close'], pos['buy_price'], pos['highest'], pos['days'], row['MA20'], row['MA60'], is_live=False)
                 
                 if is_sell and trigger_price > 0 and exit_reason in [ExitReason.STOP_LOSS, ExitReason.TRAILING_STOP]:
                     mkt = ticker_to_market.get(tk, "KOSDAQ")
@@ -367,7 +371,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 elif is_sell and exit_reason == ExitReason.TREND_EXIT:
                     pending_orders.append({"ticker": tk, "side": "SELL", "qty": pos['qty'], "reason": exit_reason.value})
                 
-                # 매도 판정이 모두 끝난 뒤에야 비로소 오늘 고가를 내일의 트레일링 스탑 최고가로 갱신함
                 pos['highest'] = max(pos['highest'], row['High'])
             
             daily_eval = cash
@@ -375,7 +378,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                 try: daily_eval += pos['qty'] * dfs[tk]['Close'].loc[:current_date].dropna().iloc[-1]
                 except Exception: daily_eval += pos['qty'] * pos['buy_price']
             
-            # 🚨 패치 5: TWR 및 성과 지표 산출 시 외부 자본 입출금 왜곡 완벽 통제 (Pure Return)
             if len(nav_history) >= 1:
                 prev_nav = nav_history[-1]["NAV"]
                 if prev_nav > 0:
@@ -488,7 +490,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
 
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
-    # 🚨 패치 4: 생존자 편향 방지를 위한 하드 블록
     return {
         "status": "error", 
         "msg": "DATA_UNAVAILABLE: 해당 연도의 Point-in-Time(상장폐지 포함) 과거 유니버스 데이터가 로컬에 구축되어 있지 않아 생존자 편향(Survivor Bias)을 피할 수 없습니다. 신뢰할 수 없는 허구의 수익률(Fake Success) 반환을 방지하기 위해 시뮬레이션을 하드 블록합니다."

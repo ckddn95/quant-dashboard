@@ -48,7 +48,6 @@ def run_signal_bot():
 
             if db.get_setting('master_kill_switch', False):
                 print("🚨 [Signal Bot] Master Kill Switch is ON. Paused.")
-                # 🚨 패치 5: 마스터 킬스위치 발동 시 누락되었던 취소 트리거를 정상 연동
                 for strat_ks in [quant.Strategy.CORE, quant.Strategy.SATELLITE]:
                     app_k, _, c_ano, is_m, p_cd, sec = get_account_secrets(strat_ks.value)
                     if app_k:
@@ -70,7 +69,6 @@ def run_signal_bot():
                 
                 db.set_setting(f"heartbeat_bot_{scope_key}", now_kst.strftime('%Y-%m-%d %H:%M:%S'))
 
-                # 🚨 패치 5: 계좌별 개별 킬스위치 발동 시 취소 트리거 정상 연동
                 if db.get_setting(f"kill_switch_{scope_key}", False):
                     db.request_cancel_for_system_orders("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value)
 
@@ -153,6 +151,7 @@ def run_signal_bot():
                     
                     tk = item['티커']
                     m_qty = db_positions[tk]['managed_qty'] if tk in db_positions else 0
+                    manual_qty = db_positions[tk]['manual_qty'] if tk in db_positions else 0
                     buy_p = db_positions[tk]['buy_price'] if tk in db_positions else 0.0
                     high_p = db_positions[tk]['highest_price'] if tk in db_positions else 0.0
                     
@@ -160,7 +159,18 @@ def run_signal_bot():
                     days_held = len(pd.bdate_range(start=buy_dt.date(), end=now_kst.date())) - 1 if tk in db_positions else 0
                     
                     kis_qty = stocks_held.get(tk, 0)
-                    holding_qty = max(kis_qty, m_qty)
+                    
+                    # 🚨 패치 8: KIS 실제 수량과 DB 원장 수량(관리+수동) 불일치 시 봇 매매 원천 차단 및 대사/격리 트리거
+                    if m_qty > 0 or manual_qty > 0:
+                        if kis_qty != (m_qty + manual_qty):
+                            print(f"⚠️ [Reconciliation Alert] {item['종목명']} ({tk}) 브로커수량({kis_qty}) != DB수량({m_qty}+{manual_qty}). 매매 보류.")
+                            try:
+                                db.insert_reconciliation_event("KIS", env_str, acc_fp, sys_acnt_prdt, portfolio_id, portfolio_id, 0, "POSITION_MISMATCH", f"KIS: {kis_qty}, DB(m:{m_qty}+u:{manual_qty})")
+                            except: pass
+                            continue
+                            
+                    # 자동 봇은 절대 수동 수량(manual_qty)을 건드리지 않고, 오직 자기가 산 물량(m_qty)만 팔 수 있습니다.
+                    bot_sell_qty = m_qty
 
                     p_res = kis.fetch_kis_current_price_ext(sys_app_key, sys_app_sec, tk, token, is_mock)
                     if p_res.state != "SUCCESS_DATA": continue
@@ -179,7 +189,7 @@ def run_signal_bot():
                     except (ValueError, TypeError, KeyError):
                         continue 
 
-                    if holding_qty > 0 and cp > high_p:
+                    if bot_sell_qty > 0 and cp > high_p:
                         high_p = cp
                         with db.get_connection() as conn:
                             conn.execute("UPDATE positions SET highest_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
@@ -193,37 +203,93 @@ def run_signal_bot():
 
                     cp, action, score, reason = quant.evaluate_stock_for_ui(tk, strat, cfg, buy_p, high_p, cp, h_price, l_price, is_halted, days_held)
                     
-                    evaluations.append({
-                        'tk': tk, 'name': item['종목명'], 'holding_qty': holding_qty, 'cp': cp,
-                        'action': action, 'score': score, 'reason': reason, 'sig_state': sig_state
-                    })
+                    # 🚨 패치 7: 서로 다른 1분봉 2개를 확인해야만 최종 확정 (SL/TS 제외)
+                    curr_bar_min = now_kst.replace(second=0, microsecond=0)
+                    last_bar_str = sig_state.get('last_distinct_bar_timestamp') if sig_state else None
+                    last_bar_min = datetime.datetime.strptime(last_bar_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST) if last_bar_str else (curr_bar_min - datetime.timedelta(minutes=10))
+                    consecutive_count = sig_state.get('consecutive_count', 0) if sig_state else 0
+                    current_signal = sig_state.get('current_signal', 'NONE') if sig_state else 'NONE'
+
+                    is_sl_or_ts = "STOP_LOSS" in action or "TRAILING_STOP" in action
+                    is_trend_exit = "TREND_EXIT" in action
+                    is_buy_signal = "매수" in action or "🟢" in action
+
+                    fire_order = False
+                    target_side = None
+
+                    if is_sl_or_ts and bot_sell_qty > 0:
+                        fire_order = True
+                        target_side = "SELL"
+                    elif is_trend_exit and bot_sell_qty > 0:
+                        if current_signal == 'TREND_EXIT':
+                            if curr_bar_min > last_bar_min:
+                                consecutive_count += 1
+                                last_bar_min = curr_bar_min
+                        else:
+                            current_signal = 'TREND_EXIT'
+                            consecutive_count = 1
+                            last_bar_min = curr_bar_min
+                        
+                        if consecutive_count >= 2:
+                            fire_order = True
+                            target_side = "SELL"
+                        else:
+                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'TREND_EXIT', 'consecutive_count': consecutive_count, 'last_distinct_bar_timestamp': last_bar_min.strftime('%Y-%m-%d %H:%M:%S')})
+                            print(f"⏳ [WAIT 1-Min Bar] {item['종목명']} ({tk}) TREND_EXIT ({consecutive_count}/2)")
+                    elif is_buy_signal:
+                        if current_signal == 'BUY':
+                            if curr_bar_min > last_bar_min:
+                                consecutive_count += 1
+                                last_bar_min = curr_bar_min
+                        else:
+                            current_signal = 'BUY'
+                            consecutive_count = 1
+                            last_bar_min = curr_bar_min
+                        
+                        if consecutive_count >= 2:
+                            fire_order = True
+                            target_side = "BUY"
+                        else:
+                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'BUY', 'consecutive_count': consecutive_count, 'last_distinct_bar_timestamp': last_bar_min.strftime('%Y-%m-%d %H:%M:%S')})
+                            print(f"⏳ [WAIT 1-Min Bar] {item['종목명']} ({tk}) BUY ({consecutive_count}/2)")
+                    else:
+                        if current_signal != 'NONE' or consecutive_count > 0:
+                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'NONE', 'consecutive_count': 0})
+
+                    if fire_order:
+                        evaluations.append({
+                            'tk': tk, 'name': item['종목명'], 'bot_sell_qty': bot_sell_qty, 'total_qty': kis_qty, 'cp': cp,
+                            'target_side': target_side, 'score': score, 'reason': reason, 'sig_state': sig_state
+                        })
 
                 def sort_priority(x):
-                    is_sell = 1 if ("매도" in x['action'] or "🔴" in x['action']) else 0
-                    is_buy = 1 if ("매수" in x['action'] or "🟢" in x['action']) else 0
+                    is_sell = 1 if x['target_side'] == "SELL" else 0
+                    is_buy = 1 if x['target_side'] == "BUY" else 0
                     return (-is_sell, -is_buy, -x['score'], x['tk'])
                     
                 evaluations.sort(key=sort_priority)
 
                 for ev in evaluations:
-                    tk, name, holding_qty, cp = ev['tk'], ev['name'], ev['holding_qty'], ev['cp']
-                    action, reason, sig_state = ev['action'], ev['reason'], ev['sig_state']
+                    tk, name, bot_sell_qty, total_qty, cp = ev['tk'], ev['name'], ev['bot_sell_qty'], ev['total_qty'], ev['cp']
+                    target_side, reason, sig_state = ev['target_side'], ev['reason'], ev['sig_state']
                     
-                    if holding_qty > 0 and ("매도" in action or "🔴" in action):
+                    if target_side == "SELL":
                         now_str = now_kst.strftime('%H%M%S')
-                        spec = quant.OrderSpec("", f"BOT_{scope_key}_{tk}_SELL_{now_str}", "KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, db.CONTRACT['strategy_version'], db.CONTRACT['contract_version'], tk, name, "SELL", "MARKET", holding_qty, 0, cp, "KRX", "GTC", "SYSTEM", "SYSTEM", now_str, "Q", "KIS", now_kst.strftime('%Y-%m-%d %H:%M:%S'), db.CONTRACT['execution_rules']['intent_ttl_sec'], db.CONTRACT['cost_model_version'], now_kst.strftime('%Y-%m-%d %H:%M:%S'))
+                        spec = quant.OrderSpec("", f"BOT_{scope_key}_{tk}_SELL_{now_str}", "KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, db.CONTRACT['strategy_version'], db.CONTRACT['contract_version'], tk, name, "SELL", "MARKET", bot_sell_qty, 0, cp, "KRX", "GTC", "SYSTEM", "SYSTEM", now_str, "Q", "KIS", now_kst.strftime('%Y-%m-%d %H:%M:%S'), db.CONTRACT['execution_rules']['intent_ttl_sec'], db.CONTRACT['cost_model_version'], now_kst.strftime('%Y-%m-%d %H:%M:%S'))
                         db.safe_add_order_intent(spec)
                         print(f"🔥 [SELL SIGNAL] {name} ({tk}) - {reason}")
                         
-                        if "손절매" in reason or "트레일링스탑" in reason:
+                        db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'current_signal': 'NONE', 'consecutive_count': 0})
+                        
+                        if "STOP_LOSS" in reason or "TRAILING_STOP" in reason:
                             curr_streak = sig_state.get('loss_streak', 0) if sig_state else 0
                             new_streak = curr_streak + 1
                             cd_days = 3 if new_streak >= 3 else 0 
                             cd_until = (now_kst + datetime.timedelta(days=cd_days)).strftime('%Y-%m-%d %H:%M:%S') if cd_days > 0 else None
                             db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'loss_streak': new_streak, 'cooldown_until_session': cd_until})
                             
-                    elif "매수" in action or "🟢" in action:
-                        allow_amt = min(usable_cash, max(0.0, target_buy_amt - (holding_qty * cp)))
+                    elif target_side == "BUY":
+                        allow_amt = min(usable_cash, max(0.0, target_buy_amt - (total_qty * cp)))
                         add_qty = int(allow_amt // (cp * db.CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05))) if cp > 0 else 0
                         
                         current_exposure = sum([float(b['prpr']) * int(b['hldg_qty']) for b in b_res.data.get('holdings', [])])
@@ -238,7 +304,7 @@ def run_signal_bot():
                             print(f"🛒 [BUY SIGNAL] {name} ({tk}) - {add_qty}주 (사유: {reason})")
                             
                             usable_cash -= (add_qty * cp * 1.05)
-                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'loss_streak': 0})
+                            db.upsert_signal_state("KIS", env_str, acc_fp, sys_acnt_prdt, strat.value, strat.value, tk, {'loss_streak': 0, 'current_signal': 'NONE', 'consecutive_count': 0})
 
         except Exception as e:
             print(f"🚨 [Signal Bot] Fatal Error in loop: {e}")
