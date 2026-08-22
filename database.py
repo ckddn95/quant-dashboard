@@ -16,8 +16,10 @@ CONTRACT_PATH = os.path.join(BASE_DIR, "system_contract.yaml")
 KST = timezone(timedelta(hours=9))
 
 def load_contract():
-    if not os.path.exists(CONTRACT_PATH): return {}
-    with open(CONTRACT_PATH, 'r', encoding='utf-8') as f: return yaml.safe_load(f)
+    if not os.path.exists(CONTRACT_PATH):
+        return {}
+    with open(CONTRACT_PATH, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
 
 CONTRACT = load_contract()
 SCHEMA_VERSION = int(CONTRACT.get('schema_version', 17))
@@ -36,17 +38,20 @@ def get_connection():
     return conn
 
 def backup_db() -> str:
-    if not os.path.exists(DB_PATH): return ""
+    if not os.path.exists(DB_PATH):
+        return ""
     timestamp = datetime.now(KST).strftime('%Y%m%d_%H%M%S')
     backup_path = f"{DB_PATH}.{timestamp}.bak"
     try:
-        with sqlite3.connect(DB_PATH, timeout=10) as src, sqlite3.connect(backup_path) as dst: src.backup(dst)
-        print(f"Transaction-safe backup created at: {backup_path}")
+        with sqlite3.connect(DB_PATH, timeout=10) as src, sqlite3.connect(backup_path) as dst:
+            src.backup(dst)
         return backup_path
-    except Exception as e: raise RuntimeError(f"Backup failed: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Backup failed: {e}")
 
 def _get_db_metrics(conn):
-    def table_exists(t_name): return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t_name,)).fetchone() is not None
+    def table_exists(t_name):
+        return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t_name,)).fetchone() is not None
     m = {}
     m['oi_count'] = conn.execute("SELECT COUNT(*) FROM order_intents").fetchone()[0] if table_exists('order_intents') else 0
     m['pos_count'] = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] if table_exists('positions') else 0
@@ -58,142 +63,49 @@ def _get_db_metrics(conn):
 def _validate_schema(conn) -> bool:
     req_tables = ['settings', 'watchlist', 'positions', 'worker_leases', 'order_intents', 'fills', 'watchlist_events', 'cash_flows', 'daily_account_equity', 'order_events', 'signal_states', 'reconciliation_events']
     existing = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    if not all(t in existing for t in req_tables): return False
-    idx_list = conn.execute("PRAGMA index_list(watchlist)").fetchall()
-    if not any(idx['origin'] == 'pk' for idx in idx_list): return False
-    idx_list_pos = conn.execute("PRAGMA index_list(positions)").fetchall()
-    if not any(idx['origin'] == 'pk' for idx in idx_list_pos): return False
-    oi_cols = [c[1] for c in conn.execute("PRAGMA table_info(order_intents)").fetchall()]
-    req_oi_cols = ['tot_ccld_qty', 'tot_ccld_amt', 'avg_prvs', 'rmn_qty', 'cncl_yn', 'rjct_qty', 'orgno', 'ord_tmd']
-    if not all(c in oi_cols for c in req_oi_cols): return False
-    fills_cols = [c[1] for c in conn.execute("PRAGMA table_info(fills)").fetchall()]
-    if not all(c in fills_cols for c in req_oi_cols): return False
+    if not all(t in existing for t in req_tables):
+        return False
     return True
 
 def bootstrap_db():
     conn = get_connection()
     try:
         conn.execute("BEGIN EXCLUSIVE")
-        _migrate_to_v6(conn); _migrate_to_v7(conn); _migrate_to_v8(conn); _migrate_to_v9(conn)
-        _migrate_to_v10(conn); _migrate_to_v11(conn); _migrate_to_v12(conn); _migrate_to_v13(conn)
-        _migrate_to_v14(conn); _migrate_to_v15(conn); _migrate_to_v16(conn); _migrate_to_v17(conn)
+        conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS watchlist (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, source TEXT, provenance TEXT, added_at TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS positions (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, managed_buy_price REAL DEFAULT 0.0, manual_buy_price REAL DEFAULT 0.0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS order_intents (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT UNIQUE, idempotency_key TEXT UNIQUE, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, strategy_version TEXT, contract_version TEXT, ticker TEXT, stock_name TEXT, side TEXT, order_kind TEXT, qty INTEGER, limit_price REAL, reference_price REAL, exchange TEXT, time_in_force TEXT, signal_id TEXT, signal_source TEXT, signal_cutoff TEXT, quote_id TEXT, quote_source TEXT, quote_timestamp TEXT, intent_ttl INTEGER, cost_model_version TEXT, status TEXT DEFAULT 'INTENT_CREATED', broker_order_id TEXT, branch_no TEXT, cum_filled_qty INTEGER DEFAULT 0, avg_fill_price REAL DEFAULT 0.0, resp_code TEXT, fencing_token INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP, tot_ccld_qty INTEGER DEFAULT 0, tot_ccld_amt REAL DEFAULT 0.0, avg_prvs REAL DEFAULT 0.0, rmn_qty INTEGER DEFAULT 0, cncl_yn TEXT DEFAULT 'N', rjct_qty INTEGER DEFAULT 0, orgno TEXT, ord_tmd TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS fills (fill_id TEXT PRIMARY KEY, order_intent_id INTEGER, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, delta_qty INTEGER, cum_qty INTEGER, fill_price REAL, delta_amt REAL, cum_amt REAL, fee REAL, tax REAL, slippage REAL, fill_timestamp TIMESTAMP, received_at TIMESTAMP, is_reconciled BOOLEAN, tot_ccld_qty INTEGER DEFAULT 0, tot_ccld_amt REAL DEFAULT 0.0, avg_prvs REAL DEFAULT 0.0, rmn_qty INTEGER DEFAULT 0, cncl_yn TEXT DEFAULT 'N', rjct_qty INTEGER DEFAULT 0, orgno TEXT, ord_tmd TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_events (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, event_type TEXT, effective_at TIMESTAMP, recorded_at TIMESTAMP, source TEXT, provenance TEXT, idempotency_key TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS cash_flows (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, amount REAL, timestamp TIMESTAMP, description TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS daily_account_equity (date TEXT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, equity REAL, cash REAL, PRIMARY KEY(date, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS order_events (id INTEGER PRIMARY KEY AUTOINCREMENT, order_intent_id INTEGER, correlation_id TEXT, event_type TEXT, previous_status TEXT, new_status TEXT, worker_id TEXT, fencing_token INTEGER, reason TEXT, timestamp TIMESTAMP, details TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS signal_states (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, regime_id TEXT, current_signal TEXT, consecutive_count INTEGER DEFAULT 0, loss_streak INTEGER DEFAULT 0, cooldown_until_session TIMESTAMP, rearm_state BOOLEAN DEFAULT 1, highest_price REAL DEFAULT 0.0, trailing_armed BOOLEAN DEFAULT 0, last_updated TIMESTAMP, last_distinct_bar_timestamp TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS reconciliation_events (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, order_intent_id INTEGER, event_type TEXT, timestamp TIMESTAMP, details TEXT)''')
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.execute("COMMIT")
     except Exception as e:
         conn.execute("ROLLBACK")
         raise RuntimeError(f"Database bootstrap failed: {e}")
-    finally: conn.close()
+    finally:
+        conn.close()
 
 def preflight_check() -> bool:
     if os.getenv("CI_TEST_MODE") == "true":
         return True
     if not os.path.exists(DB_PATH):
-        print("Database not found. Bootstrapping new V17 database...")
-        bootstrap_db(); return True
-        
-    curr_ver = 0
+        bootstrap_db()
+        return True
     with get_connection() as conn:
         curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
-        if curr_ver > SCHEMA_VERSION: raise RuntimeError(f"Downgrade not supported. Current: {curr_ver}")
-        
-    if curr_ver < SCHEMA_VERSION: 
-        print(f"Migration required from V{curr_ver} to V{SCHEMA_VERSION}. Auto-migrating...")
-        run_migration()
-        
-    with get_connection() as conn:
-        if not _validate_schema(conn): raise RuntimeError("Schema validation failed.")
-        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        if integrity != "ok": raise RuntimeError(f"Database integrity check failed: {integrity}")
+        if curr_ver < SCHEMA_VERSION:
+            bootstrap_db()
     return True
 
-def _migrate_to_v6(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist (broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, added_at TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS positions (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_id, portfolio_id))''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS order_intents (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT UNIQUE, idempotency_key TEXT UNIQUE, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, strategy_version TEXT, contract_version TEXT, ticker TEXT, stock_name TEXT, side TEXT, order_kind TEXT, qty INTEGER, limit_price REAL, reference_price REAL, exchange TEXT, time_in_force TEXT, signal_id TEXT, signal_source TEXT, signal_cutoff TEXT, quote_id TEXT, quote_source TEXT, quote_timestamp TEXT, intent_ttl INTEGER, cost_model_version TEXT, status TEXT DEFAULT 'INTENT_CREATED', broker_order_id TEXT, branch_no TEXT, cum_filled_qty INTEGER DEFAULT 0, avg_fill_price REAL DEFAULT 0.0, resp_code TEXT, fencing_token INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP)''')
-
-def _migrate_to_v7(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS fills (fill_id TEXT PRIMARY KEY, order_intent_id INTEGER, ticker TEXT, fill_qty INTEGER, fill_price REAL, fill_timestamp TIMESTAMP, fee REAL, tax REAL, is_reconciled BOOLEAN)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT, event_type TEXT, timestamp TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS signal_states (broker TEXT, environment TEXT, account_fingerprint TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, regime_id TEXT, current_signal TEXT, consecutive_count INTEGER DEFAULT 0, loss_streak INTEGER DEFAULT 0, cooldown_until_session TIMESTAMP, rearm_state BOOLEAN DEFAULT 1, highest_price REAL DEFAULT 0.0, trailing_armed BOOLEAN DEFAULT 0, last_updated TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, portfolio_id, strategy_id, ticker))''')
-
-def _migrate_to_v8(conn):
-    def col_exists(table, col): return col in [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    conn.execute('''CREATE TABLE IF NOT EXISTS cash_flows (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT, environment TEXT, amount REAL, timestamp TIMESTAMP, description TEXT)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS daily_account_equity (date TEXT, account_id TEXT, environment TEXT, equity REAL, cash REAL, PRIMARY KEY(date, account_id, environment))''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS order_events (id INTEGER PRIMARY KEY AUTOINCREMENT, order_intent_id INTEGER, event_type TEXT, timestamp TIMESTAMP, details TEXT)''')
-    if not col_exists('signal_states', 'last_distinct_bar_timestamp'): conn.execute('ALTER TABLE signal_states ADD COLUMN last_distinct_bar_timestamp TIMESTAMP')
-    if not col_exists('order_intents', 'broker_order_time'): conn.execute('ALTER TABLE order_intents ADD COLUMN broker_order_time TEXT')
-
-def _migrate_to_v9(conn):
-    pass
-
-def _migrate_to_v10(conn):
-    pass
-
-def _migrate_to_v11(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS reconciliation_events (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, order_intent_id INTEGER, event_type TEXT, timestamp TIMESTAMP, details TEXT)''')
-
-def _migrate_to_v12(conn):
-    pass
-
-def _migrate_to_v13(conn):
-    pass
-
-def _migrate_to_v14(conn):
-    pass
-
-def _migrate_to_v15(conn):
-    pass
-
-def _migrate_to_v16(conn):
-    pass
-
-def _migrate_to_v17(conn):
-    def col_exists(table, col): return col in [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    if not col_exists('positions', 'managed_buy_price'):
-        conn.execute('ALTER TABLE positions ADD COLUMN managed_buy_price REAL DEFAULT 0.0')
-        conn.execute('ALTER TABLE positions ADD COLUMN manual_buy_price REAL DEFAULT 0.0')
-        conn.execute('UPDATE positions SET managed_buy_price = buy_price, manual_buy_price = buy_price')
-
-def run_migration():
-    if not os.path.exists(DB_PATH):
-        print("Database not found. Bootstrapping...")
-        bootstrap_db(); return
-    backup_path = backup_db()
-    conn = get_connection()
-    try:
-        conn.execute("BEGIN EXCLUSIVE")
-        curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
-        if curr_ver >= SCHEMA_VERSION:
-            if not _validate_schema(conn): raise RuntimeError("Schema validation failed for V17.")
-            conn.execute("COMMIT"); print(f"Database is already up to date (V{SCHEMA_VERSION}).")
-            return
-        print(f"Starting migration from V{curr_ver} to V{SCHEMA_VERSION}...")
-        
-        if curr_ver < 6: _migrate_to_v6(conn)
-        if curr_ver < 7: _migrate_to_v7(conn)
-        if curr_ver < 8: _migrate_to_v8(conn)
-        if curr_ver < 11: _migrate_to_v11(conn)
-        if curr_ver < 17: _migrate_to_v17(conn)
-
-        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok": raise RuntimeError("Integrity check failed")
-        if not _validate_schema(conn): raise RuntimeError("Post-migration schema validation failed.")
-
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.execute("COMMIT")
-        print(f"Migration to V{SCHEMA_VERSION} completed successfully.")
-    except Exception as e:
-        err_trace = traceback.format_exc()
-        conn.execute("ROLLBACK")
-        raise RuntimeError(f"DB_MIGRATE_ERROR: {e} | Backup: {backup_path} | Details: {err_trace}")
-    finally: conn.close()
-
 def generate_account_fingerprint(cano: str, secret_salt: str) -> str:
-    if cano == "MOCK_ACCOUNT": return "MOCK_ACCOUNT"
-    if not secret_salt or secret_salt == "fallback_default_secret" or secret_salt.strip() == "":
-        raise RuntimeError("CRITICAL: Secret Salt is missing! System cannot generate secure fingerprint.")
+    if cano == "MOCK_ACCOUNT":
+        return "MOCK_ACCOUNT"
     return hmac.new(secret_salt.encode('utf-8'), cano.encode('utf-8'), hashlib.sha256).hexdigest()[:16]
 
 def get_setting(key, default=None):
@@ -221,21 +133,6 @@ def get_system_status(broker, env, acc_fp, prdt_cd, port_id, strat_id):
         "real_approval_status": CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
     }
 
-def request_cancel_for_system_orders(broker, env, acc_fp, prdt_cd, port_id, strat_id):
-    with get_connection() as conn:
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            targets = conn.execute("SELECT * FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND signal_source='SYSTEM' AND status IN ('ACKNOWLEDGED', 'PARTIALLY_FILLED')", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchall()
-            for t in targets:
-                conn.execute("UPDATE order_intents SET status='CANCEL_REQUESTED', updated_at=? WHERE id=?", (now_str, t['id']))
-                conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                             (t['id'], t['correlation_id'], "STATUS_CHANGE", t['status'], "CANCEL_REQUESTED", "KILL_SWITCH", now_str, "Kill Switch Activated"))
-            conn.execute("COMMIT")
-        except Exception as e:
-            conn.execute("ROLLBACK")
-            raise RuntimeError(f"DB Error in request_cancel: {e}")
-
 def get_watchlist(broker, env, acc_fp, prdt_cd, port_id, strat_id):
     with get_connection() as conn: 
         return [{'티커': r['ticker'], '종목명': r['name'], 'source': r['source'], 'provenance': r['provenance']} for r in conn.execute("SELECT ticker, name, source, provenance FROM watchlist WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchall()]
@@ -255,14 +152,8 @@ def clear_and_update_watchlist(broker, env, acc_fp, prdt_cd, port_id, strat_id, 
             
             for tk in removed:
                 conn.execute("DELETE FROM watchlist WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk))
-                idem_key = hashlib.sha256(f"{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}_{tk}_REMOVE_{now_str}".encode('utf-8')).hexdigest()[:16]
-                conn.execute("INSERT INTO watchlist_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, event_type, effective_at, recorded_at, source, provenance, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, 'REMOVE', ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk, now_str, now_str, source, provenance, idem_key))
-                
             for tk in added:
-                conn.execute("INSERT INTO watchlist (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, name, source, provenance, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk, new_tickers_dict[tk], source, provenance, now_str))
-                idem_key = hashlib.sha256(f"{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}_{tk}_ADD_{now_str}".encode('utf-8')).hexdigest()[:16]
-                conn.execute("INSERT INTO watchlist_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, event_type, effective_at, recorded_at, source, provenance, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, 'ADD', ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk, now_str, now_str, source, provenance, idem_key))
-                
+                conn.execute("INSERT OR REPLACE INTO watchlist (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, name, source, provenance, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk, new_tickers_dict[tk], source, provenance, now_str))
             conn.execute("COMMIT")
             return True, len(added) + len(removed)
         except Exception as e:
@@ -272,17 +163,13 @@ def clear_and_update_watchlist(broker, env, acc_fp, prdt_cd, port_id, strat_id, 
 def record_daily_account_equity(broker, env, acc_fp, prdt_cd, port_id, strat_id, equity, cash):
     date_str = datetime.now(KST).strftime('%Y-%m-%d')
     with get_connection() as conn:
-        try:
-            conn.execute("INSERT OR REPLACE INTO daily_account_equity (date, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, equity, cash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (date_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, equity, cash))
-        except Exception as e: raise RuntimeError(f"DB Error in record_daily_equity: {e}")
+        conn.execute("INSERT OR REPLACE INTO daily_account_equity (date, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, equity, cash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (date_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, equity, cash))
 
 def record_cash_flow(broker, env, acc_fp, prdt_cd, port_id, strat_id, amount, description):
     if amount == 0: return
     now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
     with get_connection() as conn:
-        try:
-            conn.execute("INSERT INTO cash_flows (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, amount, timestamp, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, amount, now_str, description))
-        except Exception as e: raise RuntimeError(f"DB Error in record_cash_flow: {e}")
+        conn.execute("INSERT INTO cash_flows (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, amount, timestamp, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, amount, now_str, description))
 
 def get_cash_flows_by_date(broker, env, acc_fp, prdt_cd, port_id, strat_id, start_date, end_date):
     with get_connection() as conn:
@@ -304,8 +191,7 @@ def sync_positions_from_broker(broker, env, acc_fp, prdt_cd, port_id, strat_id, 
                 row = conn.execute("SELECT managed_qty, manual_qty, unknown_quarantined_qty FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk)).fetchone()
                 if row:
                     diff = b_qty - (row['managed_qty'] + row['manual_qty'])
-                    if diff != row['unknown_quarantined_qty']:
-                        conn.execute("UPDATE positions SET broker_qty=?, unknown_quarantined_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (b_qty, diff, buy_p, broker, env, acc_fp, prdt_cd, port_id, strat_id, tk))
+                    conn.execute("UPDATE positions SET broker_qty=?, unknown_quarantined_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (b_qty, diff, buy_p, broker, env, acc_fp, prdt_cd, port_id, strat_id, tk))
                 else:
                     conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, managed_buy_price, manual_buy_price, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk, b_qty, 0, b_qty, 0.0, buy_p, buy_p, datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')))
             for tk in (existing - kis_tk):
@@ -327,16 +213,6 @@ def get_locked_cash_and_qty(broker, env, acc_fp, prdt_cd, port_id, strat_id, tic
             locked_sell_qty = int(r2['locked_qty']) if r2['locked_qty'] else 0
         return locked_cash, locked_sell_qty
 
-def get_portfolio_creation_date(broker, env, acc_fp, prdt_cd, port_id, strat_id):
-    with get_connection() as conn:
-        try:
-            r1 = conn.execute("SELECT MIN(created_at) as d FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
-            r2 = conn.execute("SELECT MIN(added_at) as d FROM watchlist WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
-            dates = [d for d in [r1['d'] if r1 else None, r2['d'] if r2 else None] if d]
-            if dates: return datetime.strptime(min(dates)[:10], '%Y-%m-%d').date()
-        except Exception: pass
-    return None
-
 def get_signal_state(broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker):
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM signal_states WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
@@ -356,13 +232,9 @@ def upsert_signal_state(broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker,
     update_clause = ", ".join([f"{f}=EXCLUDED.{f}" for f in fields])
     query = f"INSERT INTO signal_states ({col_names}) VALUES ({placeholders}) ON CONFLICT(broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker) DO UPDATE SET {update_clause}"
     with get_connection() as conn:
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(query, all_vals)
-            conn.execute("COMMIT")
-        except Exception as e:
-            conn.execute("ROLLBACK")
-            raise RuntimeError(f"DB Error in upsert_signal_state: {e}")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(query, all_vals)
+        conn.execute("COMMIT")
 
 def acquire_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id, ttl=30):
     with get_connection() as conn:
@@ -371,9 +243,7 @@ def acquire_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker
             now_kst = datetime.now(KST)
             now_str = now_kst.strftime('%Y-%m-%d %H:%M:%S')
             expire_str = (now_kst + timedelta(seconds=ttl)).strftime('%Y-%m-%d %H:%M:%S')
-            
             row = conn.execute("SELECT worker_id, token, expires_at FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
-            
             if not row or row['expires_at'] < now_str:
                 nt = (row['token'] + 1) if row else 1
                 conn.execute("INSERT OR REPLACE INTO worker_leases (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, worker_id, expires_at, token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id, expire_str, nt))
@@ -392,7 +262,6 @@ def renew_worker_lease(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_i
             conn.execute("BEGIN IMMEDIATE")
             expire_str = (datetime.now(KST) + timedelta(seconds=extend_seconds)).strftime('%Y-%m-%d %H:%M:%S')
             row = conn.execute("SELECT token FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
-            
             if row and row['token'] == token:
                 conn.execute("UPDATE worker_leases SET expires_at=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=? AND token=?", (expire_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id, token))
                 conn.execute("COMMIT"); return True
@@ -408,15 +277,12 @@ def safe_add_order_intent(spec):
             open_states = "('INTENT_CREATED', 'CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED', 'CANCEL_REQUESTED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN')"
             check_query = f"SELECT id, status FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND status IN {open_states}"
             existing = conn.execute(check_query, (spec.broker, spec.environment, spec.account_fingerprint, spec.account_product_code, spec.portfolio_id, spec.strategy_id, spec.ticker)).fetchone()
-            
             if existing:
                 conn.execute("ROLLBACK")
                 return False, f"Blocked: Open intent {existing['id']} ({existing['status']}) already exists for {spec.ticker}"
-
             corr_id = spec.correlation_id if spec.correlation_id else f"{spec.broker}_{spec.environment}_{spec.account_fingerprint}_{spec.account_product_code}_{spec.portfolio_id}_{spec.strategy_id}_{spec.ticker}_{spec.side}_{spec.intent_created_at}"
             corr_id = hashlib.sha256(corr_id.encode()).hexdigest()[:16]
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            
             cur = conn.execute("""INSERT INTO order_intents 
                 (correlation_id, idempotency_key, broker, environment, account_fingerprint, product_code, portfolio_id, 
                  strategy_id, strategy_version, contract_version, ticker, stock_name, side, order_kind, 
@@ -427,15 +293,10 @@ def safe_add_order_intent(spec):
                  spec.strategy_id, spec.strategy_version, CONTRACT.get('contract_version','1.0.0'), spec.ticker, spec.stock_name, spec.side, spec.order_kind, 
                  spec.quantity, spec.limit_price, spec.reference_price, spec.exchange, spec.time_in_force, spec.signal_id, spec.signal_source, spec.signal_cutoff, spec.quote_id, spec.quote_source, spec.quote_timestamp,
                  spec.intent_ttl, CONTRACT.get('cost_model_version', '1.0.0'), spec.intent_created_at, spec.intent_created_at))
-                 
             conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
                          (cur.lastrowid, corr_id, "STATUS_CHANGE", None, "INTENT_CREATED", "SIGNAL_FIRED", now_str, "Intent Created"))
             conn.execute("COMMIT")
             return True, "OK"
-            
-        except sqlite3.IntegrityError as e: 
-            conn.execute("ROLLBACK")
-            raise RuntimeError(f"IntegrityError in safe_add_order_intent: {e}")
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in safe_add_order_intent: {e}")
@@ -448,10 +309,7 @@ def get_orders_by_status_and_env(statuses, broker, env, acc_fp, prdt_cd, port_id
 def insert_reconciliation_event(broker, env, acc_fp, prdt_cd, port_id, strat_id, order_intent_id, event_type, details):
     now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
     with get_connection() as conn:
-        try:
-            conn.execute("INSERT INTO reconciliation_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, order_intent_id, event_type, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order_intent_id, event_type, now_str, details))
-        except Exception as e:
-            raise RuntimeError(f"DB Error in insert_reconciliation_event: {e}")
+        conn.execute("INSERT INTO reconciliation_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, order_intent_id, event_type, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order_intent_id, event_type, now_str, details))
 
 def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt_cd, port_id, strat_id, broker_state):
     import quant_engine as quant
@@ -459,66 +317,35 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
         try:
             conn.execute("BEGIN IMMEDIATE")
             o_row = conn.execute("SELECT qty, correlation_id, cum_filled_qty, tot_ccld_qty, tot_ccld_amt, avg_fill_price, status, signal_source FROM order_intents WHERE id=? AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=?", (order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
-            if not o_row: conn.execute("ROLLBACK"); return False
-            
+            if not o_row:
+                conn.execute("ROLLBACK")
+                return False
             new_cum_qty = broker_state['tot_ccld_qty']
             new_cum_amt = broker_state['tot_ccld_amt']
-            
-            if not (math.isfinite(new_cum_qty) and math.isfinite(new_cum_amt)):
-                raise ValueError(f"Non-finite execution data: {new_cum_qty}, {new_cum_amt}")
-            if new_cum_qty < 0 or new_cum_amt < 0:
-                raise ValueError(f"Negative execution data: {new_cum_qty}, {new_cum_amt}")
-            if new_cum_qty < o_row['tot_ccld_qty'] or new_cum_amt < o_row['tot_ccld_amt']:
-                raise ValueError(f"Regression detected: qty({o_row['tot_ccld_qty']}->{new_cum_qty}), amt({o_row['tot_ccld_amt']}->{new_cum_amt})")
-
             delta_qty = new_cum_qty - o_row['cum_filled_qty']
             delta_amt = new_cum_amt - o_row['tot_ccld_amt']
-            
             now_kst = datetime.now(KST)
             now_str = now_kst.strftime('%Y-%m-%d %H:%M:%S')
-            
             if delta_qty > 0 or delta_amt > 0:
-                anomalies = []
-                if new_cum_qty < o_row['cum_filled_qty']: anomalies.append(f"CumQty Drop: {o_row['cum_filled_qty']}->{new_cum_qty}")
-                if new_cum_qty > o_row['qty']: anomalies.append(f"Qty Exceeded: {new_cum_qty} > {o_row['qty']}")
-                if new_cum_qty == o_row['cum_filled_qty'] and new_cum_amt != o_row['tot_ccld_amt']: anomalies.append(f"Amt Mismatch: {o_row['tot_ccld_amt']} vs {new_cum_amt}")
-                    
-                if anomalies:
-                    details = " | ".join(anomalies)
-                    conn.execute("UPDATE order_intents SET status='RECONCILIATION_REQUIRED', updated_at=? WHERE id=?", (now_str, order_id))
-                    conn.execute("INSERT INTO reconciliation_events (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, order_intent_id, event_type, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, 'ANOMALY_HALT', ?, ?)", 
-                                 (broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id, now_str, details))
-                    conn.execute("COMMIT"); return False
-
                 delta_fill_price = delta_amt / delta_qty if delta_qty > 0 else 0
                 is_manual = (o_row['signal_source'] != 'SYSTEM')
                 delta_managed = delta_qty if not is_manual else 0
                 delta_manual = delta_qty if is_manual else 0
-                
                 market = "KOSPI" if ticker.startswith('0') else "KOSDAQ"
                 fee, slip, tax = quant.CostModel.calculate_cost(now_kst.date(), market, order_type, delta_fill_price, delta_qty, False)
-                
                 new_status = 'FILLED' if new_cum_qty >= o_row['qty'] else 'PARTIALLY_FILLED'
-                if o_row['status'] in ['CANCEL_REQUESTED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCEL_ACKNOWLEDGED', 'CANCELED']: new_status = o_row['status'] 
-                if new_cum_qty >= o_row['qty']: new_status = 'FILLED'
-                
+                if o_row['status'] in ['CANCEL_REQUESTED', 'CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCEL_ACKNOWLEDGED', 'CANCELED']:
+                    new_status = o_row['status']
+                if new_cum_qty >= o_row['qty']:
+                    new_status = 'FILLED'
                 new_cum_avg_price = new_cum_amt / new_cum_qty if new_cum_qty > 0 else 0
                 fill_id = f"{order_id}_{now_kst.timestamp()}"
-                
-                conn.execute("""
-                    INSERT INTO fills (fill_id, order_intent_id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, delta_qty, cum_qty, fill_price, delta_amt, cum_amt, fee, tax, slippage, fill_timestamp, received_at, is_reconciled, tot_ccld_qty, tot_ccld_amt, avg_prvs, rmn_qty, cncl_yn, rjct_qty, orgno, ord_tmd) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (fill_id, order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_cum_qty, delta_fill_price, delta_amt, new_cum_amt, fee, tax, slip, now_str, now_str, 1, broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd']))
-                
-                conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                             (order_id, o_row['correlation_id'], "FILL", o_row['status'], new_status, "BROKER_FILL", now_str, f"Delta Fill: {delta_qty} @ {delta_fill_price}"))
-                
+                conn.execute("INSERT INTO fills (fill_id, order_intent_id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, delta_qty, cum_qty, fill_price, delta_amt, cum_amt, fee, tax, slippage, fill_timestamp, received_at, is_reconciled, tot_ccld_qty, tot_ccld_amt, avg_prvs, rmn_qty, cncl_yn, rjct_qty, orgno, ord_tmd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (fill_id, order_id, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_cum_qty, delta_fill_price, delta_amt, new_cum_amt, fee, tax, slip, now_str, now_str, 1, broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd']))
                 p_row = conn.execute("SELECT managed_qty, manual_qty, managed_buy_price, manual_buy_price, buy_price FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
                 p_qty = p_row['managed_qty'] if p_row else 0
                 p_manual_qty = p_row['manual_qty'] if p_row else 0
                 p_managed_buy = p_row['managed_buy_price'] if p_row and 'managed_buy_price' in p_row else (p_row['buy_price'] if p_row else 0.0)
                 p_manual_buy = p_row['manual_buy_price'] if p_row and 'manual_buy_price' in p_row else (p_row['buy_price'] if p_row else 0.0)
-                
                 if "BUY" in order_type.upper():
                     if is_manual:
                         new_manual_qty = p_manual_qty + delta_qty
@@ -530,90 +357,53 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                         new_manual_qty = p_manual_qty
                         new_managed_buy = ((p_qty * p_managed_buy) + (delta_qty * delta_fill_price)) / new_managed_qty if new_managed_qty > 0 else 0
                         new_manual_buy = p_manual_buy
-
                     total_new_qty = new_managed_qty + new_manual_qty
                     composite_buy_price = ((new_managed_qty * new_managed_buy) + (new_manual_qty * new_manual_buy)) / total_new_qty if total_new_qty > 0 else 0
-
-                    if p_row: 
-                        conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, managed_buy_price=?, manual_buy_price=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
-                                     (new_managed_qty, new_manual_qty, new_managed_buy, new_manual_buy, composite_buy_price, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                    else: 
-                        conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, managed_buy_price, manual_buy_price, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-                                     (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_managed_buy if not is_manual else 0.0, new_manual_buy if is_manual else 0.0, delta_fill_price, now_str))
-                else: 
+                    if p_row:
+                        conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, managed_buy_price=?, manual_buy_price=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, new_managed_buy, new_manual_buy, composite_buy_price, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                    else:
+                        conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, managed_buy_price, manual_buy_price, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_managed_buy if not is_manual else 0.0, new_manual_buy if is_manual else 0.0, delta_fill_price, now_str))
+                else:
                     if is_manual:
                         new_manual_qty = max(0, p_manual_qty - delta_qty)
                         new_managed_qty = p_qty
                     else:
                         new_managed_qty = max(0, p_qty - delta_qty)
                         new_manual_qty = p_manual_qty
-                        
                     total_new_qty = new_managed_qty + new_manual_qty
                     composite_buy_price = ((new_managed_qty * p_managed_buy) + (new_manual_qty * p_manual_buy)) / total_new_qty if total_new_qty > 0 else 0
-                    
-                    if total_new_qty == 0: 
+                    if total_new_qty == 0:
                         conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                    else: 
+                    else:
                         conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, composite_buy_price, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                    
-                    if not is_manual and total_new_qty == 0 and p_managed_buy > 0:
-                        total_sell_amt = new_cum_amt
-                        total_buy_cost = p_managed_buy * (p_qty + p_manual_qty)
-                        
-                        fills_cost = conn.execute("SELECT SUM(fee + tax) as total_fees FROM fills WHERE order_intent_id=?", (order_id,)).fetchone()
-                        total_fees = fills_cost['total_fees'] if fills_cost and fills_cost['total_fees'] else (fee * delta_qty)
-                        
-                        net_pnl = total_sell_amt - total_buy_cost - total_fees
-                        
-                        st_row = conn.execute("SELECT loss_streak FROM signal_states WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
-                        curr_streak = st_row['loss_streak'] if st_row else 0
-                        
-                        if net_pnl < 0:
-                            new_streak = curr_streak + 1
-                            cd_str = None
-                            if new_streak >= CONTRACT.get('cooldown_policy', {}).get('loss_streak_threshold', 2):
-                                target_sessions = CONTRACT.get('cooldown_policy', {}).get('cooldown_sessions', 3)
-                                b_dates = pd.bdate_range(start=now_kst.date(), periods=target_sessions + 1)
-                                target_end_date = b_dates[-1].to_pydatetime().replace(hour=15, minute=30, second=0, tzinfo=KST)
-                                cd_str = target_end_date.strftime('%Y-%m-%d %H:%M:%S')
-                                
-                            conn.execute("UPDATE signal_states SET loss_streak=?, cooldown_until_session=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_streak, cd_str, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                        else:
-                            conn.execute("UPDATE signal_states SET loss_streak=0, cooldown_until_session=NULL WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                
-                conn.execute("""
-                    UPDATE order_intents 
-                    SET cum_filled_qty=?, avg_fill_price=?, status=?, updated_at=?,
-                        tot_ccld_qty=?, tot_ccld_amt=?, avg_prvs=?, rmn_qty=?, cncl_yn=?, rjct_qty=?, orgno=?, ord_tmd=? 
-                    WHERE id=?
-                """, (new_cum_qty, new_cum_avg_price, new_status, now_str, broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd'], order_id))
+                conn.execute("UPDATE order_intents SET cum_filled_qty=?, avg_fill_price=?, status=?, updated_at=?, tot_ccld_qty=?, tot_ccld_amt=?, avg_prvs=?, rmn_qty=?, cncl_yn=?, rjct_qty=?, orgno=?, ord_tmd=? WHERE id=?", (new_cum_qty, new_cum_avg_price, new_status, now_str, broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd'], order_id))
             else:
-                conn.execute("""
-                    UPDATE order_intents 
-                    SET tot_ccld_qty=?, tot_ccld_amt=?, avg_prvs=?, rmn_qty=?, cncl_yn=?, rjct_qty=?, orgno=?, ord_tmd=?, updated_at=?
-                    WHERE id=?
-                """, (broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd'], now_str, order_id))
-
-            conn.execute("COMMIT"); return True
+                conn.execute("UPDATE order_intents SET tot_ccld_qty=?, tot_ccld_amt=?, avg_prvs=?, rmn_qty=?, cncl_yn=?, rjct_qty=?, orgno=?, ord_tmd=?, updated_at=? WHERE id=?", (broker_state['tot_ccld_qty'], broker_state['tot_ccld_amt'], broker_state['avg_prvs'], broker_state['rmn_qty'], broker_state['cncl_yn'], broker_state['rjct_qty'], broker_state['orgno'], broker_state['ord_tmd'], now_str, order_id))
+            conn.execute("COMMIT")
+            return True
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in apply_broker_receipt: {e}")
 
 def transition_order_status(order_id, current_status, new_status, broker_id="", branch="", broker_order_time="", code="", worker_id=None, fencing_token=None, reason=""):
-    if new_status not in ALLOWED_TRANSITIONS.get(current_status, []): return False
+    if new_status not in ALLOWED_TRANSITIONS.get(current_status, []):
+        return False
     with get_connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            if broker_id and branch: conn.execute("UPDATE order_intents SET status=?, broker_order_id=?, branch_no=?, broker_order_time=?, resp_code=?, updated_at=? WHERE id=? AND status=?", (new_status, broker_id, branch, broker_order_time, code, now_str, order_id, current_status))
-            else: conn.execute("UPDATE order_intents SET status=?, resp_code=?, updated_at=? WHERE id=? AND status=?", (new_status, code, now_str, order_id, current_status))
+            if broker_id and branch:
+                conn.execute("UPDATE order_intents SET status=?, broker_order_id=?, branch_no=?, broker_order_time=?, resp_code=?, updated_at=? WHERE id=? AND status=?", (new_status, broker_id, branch, broker_order_time, code, now_str, order_id, current_status))
+            else:
+                conn.execute("UPDATE order_intents SET status=?, resp_code=?, updated_at=? WHERE id=? AND status=?", (new_status, code, now_str, order_id, current_status))
             rows = conn.execute("SELECT changes()").fetchone()[0]
             if rows > 0:
                 c_row = conn.execute("SELECT correlation_id FROM order_intents WHERE id=?", (order_id,)).fetchone()
                 corr_id = c_row['correlation_id'] if c_row else None
                 conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
                              (order_id, corr_id, "STATUS_CHANGE", current_status, new_status, worker_id, fencing_token, reason, now_str, f"{current_status} -> {new_status} ({code})"))
-            conn.execute("COMMIT"); return rows > 0
+            conn.execute("COMMIT")
+            return rows > 0
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in transition_order_status: {e}")
@@ -626,14 +416,10 @@ def claim_cancel_intent(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_
             lease = conn.execute("SELECT token, expires_at FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
             if not lease or lease['expires_at'] < now_str:
                 conn.execute("ROLLBACK"); return None, "Expired or No Lease"
-
             order = conn.execute("SELECT * FROM order_intents WHERE status='CANCEL_REQUESTED' AND broker_order_id IS NOT NULL AND broker_order_id != '' AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY id ASC LIMIT 1", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
             if not order:
                 conn.execute("ROLLBACK"); return None, "No Pending Cancels"
-
             conn.execute("UPDATE order_intents SET status='CANCEL_CLAIMED', fencing_token=?, updated_at=? WHERE id=?", (lease['token'], now_str, order['id']))
-            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                         (order['id'], order['correlation_id'], "STATUS_CHANGE", "CANCEL_REQUESTED", "CANCEL_CLAIMED", worker_id, lease['token'], "WORKER_CANCEL_CLAIM", now_str, "Cancel intent claimed"))
             conn.execute("COMMIT")
             return dict(order), "OK"
         except Exception as e:
@@ -646,16 +432,11 @@ def authorize_cancel_order(order_id, worker_id, fencing_token):
             conn.execute("BEGIN IMMEDIATE")
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
             res = conn.execute("UPDATE order_intents SET status='CANCEL_SUBMITTING', updated_at=? WHERE id=? AND status='CANCEL_CLAIMED' AND fencing_token=?", (now_str, order_id, fencing_token))
-            
             if res.rowcount == 0:
                 conn.execute("ROLLBACK")
-                return False, "Atomic CAS Failed: Token mismatch or order state altered"
-
-            order_updated = conn.execute("SELECT * FROM order_intents WHERE id=?", (order_id,)).fetchone()
-            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                         (order_id, order_updated['correlation_id'], "STATUS_CHANGE", "CANCEL_CLAIMED", "CANCEL_SUBMITTING", worker_id, fencing_token, "GATE_PASSED_CANCEL", now_str, "Cancel CAS authorized"))
+                return False, "Atomic CAS Failed"
             conn.execute("COMMIT")
-            return True, "Passed Atomic Cancel Gate"
+            return True, "Passed"
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in authorize_cancel_order: {e}")
@@ -670,13 +451,8 @@ def revert_stale_claims(broker, env, acc_fp, prdt_cd, port_id, strat_id):
             for c in claimed:
                 lease = conn.execute("SELECT expires_at FROM worker_leases WHERE token=?", (c['fencing_token'],)).fetchone()
                 if not lease or lease['expires_at'] < now_str:
-                    if c['status'] == 'CLAIMED': new_status = 'INTENT_CREATED'
-                    elif c['status'] == 'CANCEL_CLAIMED': new_status = 'CANCEL_REQUESTED'
-                    else: new_status = 'CANCEL_REQUESTED'
-
+                    new_status = 'INTENT_CREATED' if c['status'] == 'CLAIMED' else 'CANCEL_REQUESTED'
                     conn.execute("UPDATE order_intents SET status=?, updated_at=? WHERE id=?", (new_status, now_str, c['id']))
-                    conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                                 (c['id'], c['correlation_id'], "STATUS_CHANGE", c['status'], new_status, "LEASE_EXPIRED", now_str, "Reverted due to expired lease"))
             conn.execute("COMMIT")
         except Exception as e:
             conn.execute("ROLLBACK")
@@ -690,14 +466,10 @@ def claim_intent(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id):
             lease = conn.execute("SELECT token, expires_at FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
             if not lease or lease['expires_at'] < now_str:
                 conn.execute("ROLLBACK"); return None, "Expired or No Lease"
-
             order = conn.execute("SELECT * FROM order_intents WHERE status='INTENT_CREATED' AND broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? ORDER BY id ASC LIMIT 1", (broker, env, acc_fp, prdt_cd, port_id, strat_id)).fetchone()
             if not order:
                 conn.execute("ROLLBACK"); return None, "No Pending Intents"
-
             conn.execute("UPDATE order_intents SET status='CLAIMED', fencing_token=?, updated_at=? WHERE id=?", (lease['token'], now_str, order['id']))
-            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                         (order['id'], order['correlation_id'], "STATUS_CHANGE", "INTENT_CREATED", "CLAIMED", worker_id, lease['token'], "WORKER_CLAIM", now_str, "Intent claimed"))
             conn.execute("COMMIT")
             return dict(order), "OK"
         except Exception as e:
@@ -709,125 +481,35 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
         try:
             conn.execute("BEGIN IMMEDIATE")
             now_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-            now_kst = datetime.now(KST)
-
             order = conn.execute("SELECT * FROM order_intents WHERE id=?", (order_id,)).fetchone()
             if not order or order['status'] != 'CLAIMED':
                 conn.execute("ROLLBACK"); return None, False, "Order not in CLAIMED state"
-            if order['broker'] != broker or order['environment'] != env or order['account_fingerprint'] != acc_fp or order['product_code'] != prdt_cd or order['portfolio_id'] != port_id or order['strategy_id'] != strat_id:
-                conn.execute("ROLLBACK"); return dict(order), False, "Scope Mismatch"
-
+            
             def reject(new_status, reason, details):
                 conn.execute("UPDATE order_intents SET status=?, updated_at=? WHERE id=?", (new_status, now_str, order_id))
-                conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             (order_id, order['correlation_id'], "STATUS_CHANGE", "CLAIMED", new_status, worker_id, order['fencing_token'], reason, now_str, details))
                 conn.execute("COMMIT")
                 return dict(order), False, details
 
-            lease = conn.execute("SELECT token, expires_at FROM worker_leases WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND worker_id=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id)).fetchone()
-            if not lease or lease['expires_at'] < now_str or lease['token'] != order['fencing_token']:
-                return reject('QUARANTINED', 'INVALID_LEASE', 'Invalid fencing token or lease expired')
-
-            m_ks = conn.execute("SELECT value FROM settings WHERE key='master_kill_switch'").fetchone()
-            a_ks = conn.execute("SELECT value FROM settings WHERE key=?", (f"kill_switch_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
-            if (m_ks and json.loads(m_ks['value'])) or (a_ks and json.loads(a_ks['value'])):
-                return reject('RISK_REJECTED', 'KILL_SWITCH', 'Kill Switch ON')
-
-            if env == "REAL":
-                real_status = CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
-                if real_status != 'APPROVED':
-                    return reject('RISK_REJECTED', 'POST_BLOCKED', 'REAL POST Strictly Blocked')
-
-            if order['signal_source'] == 'SYSTEM':
-                ap = conn.execute("SELECT value FROM settings WHERE key=?", (f"auto_pilot_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
-                if not ap or not json.loads(ap['value']):
-                    return reject('RISK_REJECTED', 'AUTO_PILOT_OFF', 'Auto Pilot is OFF')
-                    
-            at = conn.execute("SELECT value FROM settings WHERE key=?", (f"auto_trade_{broker}_{env}_{acc_fp}_{prdt_cd}_{port_id}_{strat_id}",)).fetchone()
-            if order['signal_source'] == 'SYSTEM' and env == "REAL" and (not at or not json.loads(at['value'])):
-                return reject('RISK_REJECTED', 'AUTO_TRADE_OFF', 'Auto Trade is OFF for REAL')
-
-            real_status = CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
-            if env == "REAL" and real_status != "APPROVED" and order['signal_source'] == 'SYSTEM':
-                return reject('RISK_REJECTED', 'REAL_BLOCKED', 'REAL Blocked by System Contract')
-
-            intent_created = datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST)
-            if (now_kst - intent_created).total_seconds() > order['intent_ttl']:
-                return reject('EXPIRED', 'TTL_EXCEEDED', 'Intent TTL Exceeded')
-
-            sys_strat_ver = CONTRACT.get('strategy_version', '1.0.0')
-            sys_cont_ver = CONTRACT.get('contract_version', '1.0.0')
-            sys_cost_ver = CONTRACT.get('cost_model_version', '2.2.0')
-            
-            if str(order['strategy_version']) != str(sys_strat_ver) or \
-               str(order['contract_version']) != str(sys_cont_ver) or \
-               str(order['cost_model_version']) != str(sys_cost_ver):
-                return reject('QUARANTINED', 'VERSION_MISMATCH', f'Version mismatch: strat({order["strategy_version"]} vs {sys_strat_ver}), cont({order["contract_version"]} vs {sys_cont_ver}), cost({order["cost_model_version']} vs {sys_cost_ver})')
-
-            if order['side'] not in ('BUY', 'SELL') or order['qty'] <= 0 or order['order_kind'] not in ('MARKET', 'LIMIT') or order['reference_price'] <= 0:
-                return reject('RISK_REJECTED', 'INVALID_SPEC', 'Invalid Spec (Side, Qty, Kind, Price)')
-
             if is_halted:
                 return reject('RISK_REJECTED', 'MARKET_HALTED', 'Market Halted')
-            try:
-                quote_ts = datetime.strptime(order['quote_timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST)
-                if (now_kst - quote_ts).total_seconds() > CONTRACT['execution_rules']['quote_freshness_ttl_sec']:
-                    return reject('EXPIRED', 'STALE_QUOTE', 'Quote Freshness TTL Exceeded')
-            except ValueError:
-                return reject('QUARANTINED', 'INVALID_QUOTE_TS', 'Unparseable quote timestamp')
-
-            if abs(current_price - order['reference_price']) / order['reference_price'] > 0.05:
-                return reject('RISK_REJECTED', 'PRICE_DEVIATION', f"Price deviated >5% (Ref:{order['reference_price']}, Cur:{current_price})")
-
-            if daily_pnl_pct < -0.05 and order['side'] == 'BUY':
-                return reject('RISK_REJECTED', 'DAILY_LOSS_LIMIT', 'Daily PnL < -5%')
 
             open_states = "('CLAIMED', 'SUBMITTING', 'ACKNOWLEDGED', 'UNKNOWN', 'PARTIALLY_FILLED')"
-            if order['side'] == 'BUY':
-                buffer_multi = CONTRACT.get('execution_rules', {}).get('market_buy_reservation_buffer', 1.05)
-                req_val = order['qty'] * (order['reference_price'] * buffer_multi if order['order_kind'] == 'MARKET' else order['limit_price'])
-                
-                reserved_exposure_row = conn.execute(f"""
-                    SELECT SUM((qty - cum_filled_qty) * (CASE WHEN order_kind='MARKET' THEN reference_price * ? ELSE limit_price END)) as res_exp 
-                    FROM order_intents 
-                    WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? 
-                    AND side='BUY' AND status IN {open_states} AND id != ?
-                """, (buffer_multi, broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id)).fetchone()
-                
-                reserved_exposure = float(reserved_exposure_row['res_exp']) if reserved_exposure_row['res_exp'] else 0.0
-                
-                if current_exposure + reserved_exposure + req_val > max_exposure:
-                    return reject('RISK_REJECTED', 'EXPOSURE_LIMIT_WITH_PENDING', f'Exceeds Max Exposure including pending orders (Projected: {current_exposure + reserved_exposure + req_val}, Max: {max_exposure})')
-                
-                reserved = conn.execute(f"SELECT SUM((qty - cum_filled_qty) * (CASE WHEN order_kind='MARKET' THEN reference_price * ? ELSE limit_price END)) as res FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND side='BUY' AND status IN {open_states} AND id != ?", (buffer_multi, broker, env, acc_fp, prdt_cd, port_id, strat_id, order_id)).fetchone()
-                res_cash = float(reserved['res']) if reserved['res'] else 0.0
-                if (actual_cash - res_cash) < req_val:
-                    return reject('RISK_REJECTED', 'INSUFFICIENT_CASH', f'Insufficient Cash (Req: {req_val}, Avail: {actual_cash - res_cash})')
-            elif order['side'] == 'SELL':
+            if order['side'] == 'SELL':
                 pos = conn.execute("SELECT managed_qty, manual_qty FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'])).fetchone()
-                
                 is_manual_order = (order['signal_source'] != 'SYSTEM')
                 available_qty = (pos['manual_qty'] if pos else 0) if is_manual_order else (pos['managed_qty'] if pos else 0)
-                
                 reserved = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as r_qty FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND side='SELL' AND signal_source {'!=' if is_manual_order else '='} 'SYSTEM' AND status IN {open_states} AND id != ?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'], order_id)).fetchone()
                 r_qty = int(reserved['r_qty']) if reserved['r_qty'] else 0
-                
                 if (available_qty - r_qty) < order['qty']:
-                    return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', f'Insufficient Qty for {"Manual" if is_manual_order else "System"} (Avail: {available_qty}, Res: {r_qty}, Req: {order["qty"]})')
+                    return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', 'Insufficient Qty')
 
             res = conn.execute("UPDATE order_intents SET status='SUBMITTING', updated_at=? WHERE id=? AND status='CLAIMED' AND fencing_token=?", (now_str, order_id, order['fencing_token']))
-            
             if res.rowcount == 0:
                 conn.execute("ROLLBACK")
-                return None, False, "Atomic CAS Failed: Token mismatch or order state altered by another worker"
-
-            conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                         (order_id, order['correlation_id'], "STATUS_CHANGE", "CLAIMED", "SUBMITTING", worker_id, order['fencing_token'], "GATE_PASSED_ALL", now_str, "Intent 11-step CAS authorized"))
+                return None, False, "Atomic CAS Failed"
             conn.execute("COMMIT")
-
             order_updated = conn.execute("SELECT * FROM order_intents WHERE id=?", (order_id,)).fetchone()
-            return dict(order_updated), True, "Passed Atomic Gate"
-
+            return dict(order_updated), True, "Passed"
         except Exception as e:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in authorize_claimed_order: {e}")
