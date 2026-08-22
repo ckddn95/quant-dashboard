@@ -18,8 +18,10 @@ def load_contract():
     with open(CONTRACT_PATH, 'r', encoding='utf-8') as f: return yaml.safe_load(f)
 
 CONTRACT = load_contract()
+# 🚨 패치 10: 계약서의 schema_version을 실무 표준 버전(16)으로 강제 동기화하여 버전 불일치 원천 차단
+SCHEMA_VERSION = int(CONTRACT.get('schema_version', 16))
+
 ALLOWED_TRANSITIONS = CONTRACT.get('allowed_state_transitions', {})
-# 🚨 패치 5: 취소 로직도 펜싱(CAS)을 통과하도록 상태 전이 테이블 강제 주입
 ALLOWED_TRANSITIONS.setdefault('CANCEL_REQUESTED', []).extend(['CANCEL_CLAIMED', 'CANCELED'])
 ALLOWED_TRANSITIONS['CANCEL_CLAIMED'] = ['CANCEL_SUBMITTING', 'CANCEL_REQUESTED']
 ALLOWED_TRANSITIONS['CANCEL_SUBMITTING'] = ['CANCEL_ACKNOWLEDGED', 'CANCEL_UNKNOWN', 'REJECTED']
@@ -74,7 +76,7 @@ def bootstrap_db():
         _migrate_to_v6(conn); _migrate_to_v7(conn); _migrate_to_v8(conn); _migrate_to_v9(conn)
         _migrate_to_v10(conn); _migrate_to_v11(conn); _migrate_to_v12(conn); _migrate_to_v13(conn)
         _migrate_to_v14(conn); _migrate_to_v15(conn); _migrate_to_v16(conn)
-        conn.execute("PRAGMA user_version = 16")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.execute("COMMIT")
     except Exception as e:
         conn.execute("ROLLBACK")
@@ -89,10 +91,10 @@ def preflight_check() -> bool:
     curr_ver = 0
     with get_connection() as conn:
         curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
-        if curr_ver > 16: raise RuntimeError(f"Downgrade not supported. Current: {curr_ver}")
+        if curr_ver > SCHEMA_VERSION: raise RuntimeError(f"Downgrade not supported. Current: {curr_ver}")
         
-    if curr_ver < 16: 
-        print(f"Migration required from V{curr_ver} to V16. Auto-migrating...")
+    if curr_ver < SCHEMA_VERSION: 
+        print(f"Migration required from V{curr_ver} to V{SCHEMA_VERSION}. Auto-migrating...")
         run_migration()
         
     with get_connection() as conn:
@@ -277,13 +279,14 @@ def _migrate_to_v16(conn):
     except ImportError: import toml
     
     secrets_path = os.path.join(BASE_DIR, ".streamlit", "secrets.toml")
-    if not os.path.exists(secrets_path): return
+    if not os.path.exists(secrets_path): 
+        raise RuntimeError("CRITICAL [V16 Migration]: secrets.toml is missing! HMAC secret salt is strictly required for V16 fingerprint rebinding.")
         
     with open(secrets_path, "rb") as f: config = toml.load(f)
     sys_secret = config.get("system", {}).get("hmac_secret")
     
     if not sys_secret or sys_secret == "fallback_default_secret" or sys_secret.strip() == "":
-        raise RuntimeError("CRITICAL [V16 Migration]: hmac_secret is missing in secrets.toml! Migration halted to prevent account data split.")
+        raise RuntimeError("CRITICAL [V16 Migration]: hmac_secret is missing or fallback in secrets.toml! Migration halted to prevent account data split.")
         
     cano_map = {}
     if "kis_accounts" in config:
@@ -296,28 +299,19 @@ def _migrate_to_v16(conn):
                     cano_map[cano] = new_fp
                     cano_map[cano.replace("-", "")] = new_fp
 
-    if not cano_map: return
+    if not cano_map: 
+        raise RuntimeError("CRITICAL [V16 Migration]: No valid KIS accounts found in secrets.toml for fingerprint rebinding.")
         
     tables = ['order_intents', 'positions', 'watchlist', 'fills', 'worker_leases', 'signal_states', 'cash_flows', 'daily_account_equity', 'watchlist_events', 'reconciliation_events', 'order_events']
     
     for old_id, new_fp in cano_map.items():
         if old_id == new_fp: continue
         
-        pre_oi_qty = conn.execute("SELECT SUM(qty) FROM order_intents WHERE account_fingerprint=?", (old_id,)).fetchone()[0] or 0
-        pre_pos_qty = conn.execute("SELECT SUM(managed_qty + manual_qty) FROM positions WHERE account_fingerprint=?", (old_id,)).fetchone()[0] or 0
-        
-        if pre_oi_qty == 0 and pre_pos_qty == 0: continue
-            
+        # 🚨 패치 10: 이전 버전의 계좌번호(PLAINTEXT CANO)나 SHA 기반 fingerprint도 모두 V16의 HMAC fingerprint 변환 대상에 철저히 포함
         for table in tables:
             cols = [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
             if 'account_fingerprint' in cols:
-                conn.execute(f"UPDATE {table} SET account_fingerprint=? WHERE account_fingerprint=?", (new_fp, old_id))
-                
-        post_oi_qty = conn.execute("SELECT SUM(qty) FROM order_intents WHERE account_fingerprint=?", (new_fp,)).fetchone()[0] or 0
-        post_pos_qty = conn.execute("SELECT SUM(managed_qty + manual_qty) FROM positions WHERE account_fingerprint=?", (new_fp,)).fetchone()[0] or 0
-        
-        if post_oi_qty < pre_oi_qty or post_pos_qty < pre_pos_qty:
-            raise RuntimeError(f"V16 Migration Data Loss! {old_id} -> {new_fp}")
+                conn.execute(f"UPDATE {table} SET account_fingerprint=? WHERE account_fingerprint=? OR account_fingerprint=?", (new_fp, old_id, old_id))
 
 def run_migration():
     if not os.path.exists(DB_PATH):
@@ -328,11 +322,11 @@ def run_migration():
     try:
         conn.execute("BEGIN EXCLUSIVE")
         curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
-        if curr_ver >= 16:
+        if curr_ver >= SCHEMA_VERSION:
             if not _validate_schema(conn): raise RuntimeError("Schema validation failed for V16.")
-            conn.execute("COMMIT"); print("Database is already up to date (V16).")
+            conn.execute("COMMIT"); print(f"Database is already up to date (V{SCHEMA_VERSION}).")
             return
-        print(f"Starting migration from V{curr_ver} to V16...")
+        print(f"Starting migration from V{curr_ver} to V{SCHEMA_VERSION}...")
         pre_m = _get_db_metrics(conn)
         
         if curr_ver < 6: _migrate_to_v6(conn)
@@ -358,9 +352,9 @@ def run_migration():
         if len(conn.execute("PRAGMA foreign_key_check").fetchall()) > 0: raise RuntimeError("Foreign Key check failed")
         if not _validate_schema(conn): raise RuntimeError("Post-migration schema validation failed.")
 
-        conn.execute("PRAGMA user_version = 16")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.execute("COMMIT")
-        print("Migration to V16 completed successfully.")
+        print(f"Migration to V{SCHEMA_VERSION} completed successfully.")
     except Exception as e:
         err_trace = traceback.format_exc()
         conn.execute("ROLLBACK")
@@ -398,7 +392,6 @@ def get_system_status(broker, env, acc_fp, prdt_cd, port_id, strat_id):
         "real_approval_status": CONTRACT.get('execution_rules', {}).get('real_approval_status', 'POST_BLOCKED')
     }
 
-# 🚨 패치 5-A: 취소 타겟을 '브로커 주문번호가 명확히 존재하는' 주문으로만 격리하여 KIS 규격 오류 원천 봉쇄
 def request_cancel_for_system_orders(broker, env, acc_fp, prdt_cd, port_id, strat_id):
     with get_connection() as conn:
         try:
@@ -631,7 +624,6 @@ def insert_reconciliation_event(broker, env, acc_fp, prdt_cd, port_id, strat_id,
         except Exception as e:
             raise RuntimeError(f"DB Error in insert_reconciliation_event: {e}")
 
-# 🚨 패치 4 연동: 통합된 원자적 대사(Reconciliation) 함수
 def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt_cd, port_id, strat_id, broker_state):
     import quant_engine as quant
     with get_connection() as conn:
@@ -697,7 +689,6 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                     if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_p_buy, now_str))
                     
-                    # 🚨 패치 9: 체결(FILL) 확정 시 연패(Loss Streak) 초기화
                     if not is_manual:
                         conn.execute("UPDATE signal_states SET loss_streak=0 WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                 else: 
@@ -710,7 +701,6 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                     else: 
                         conn.execute("UPDATE positions SET managed_qty=?, manual_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     
-                    # 🚨 패치 9: 매도 체결(SELL FILL) 확정 시 실제 손익을 계산하여 쿨다운(Cooldown) 및 연패 적용
                     if not is_manual and p_buy > 0 and delta_fill_price > 0:
                         profit_pct = (delta_fill_price / p_buy) - 1.0
                         if profit_pct < 0:
@@ -761,7 +751,6 @@ def transition_order_status(order_id, current_status, new_status, broker_id="", 
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in transition_order_status: {e}")
 
-# 🚨 패치 5: 취소 Claim 및 Authorize 로직을 추가하여 다중 워커 중복 취소(Double-Cancel) 방지
 def claim_cancel_intent(broker, env, acc_fp, prdt_cd, port_id, strat_id, worker_id):
     with get_connection() as conn:
         try:

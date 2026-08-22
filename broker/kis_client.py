@@ -139,6 +139,10 @@ def _strict_post(url: str, headers: dict, data: dict, rate_limit_key: str = "def
         if res.status_code == 429:
             return KisResult("BUSINESS_REJECT", "Rate limit (429)", None)
 
+        # 🚨 패치 11: HTTP 5xx 응답은 확정 거절(REJECTED)로 처리하지 않고 UNKNOWN으로 격리하여 중복 POST 재전송을 원천 차단
+        if 500 <= res.status_code < 600:
+            return KisResult("UNKNOWN", f"Server Error ({res.status_code}) - Treat as UNKNOWN", None)
+
         try: res_data = res.json()
         except ValueError: return KisResult("TRANSPORT_FAIL", "Invalid JSON response", None)
 
@@ -148,11 +152,11 @@ def _strict_post(url: str, headers: dict, data: dict, rate_limit_key: str = "def
             err_msg = res_data.get('msg1', res_data.get('error_description', 'Business Error'))
             return KisResult("BUSINESS_REJECT", err_msg, res_data)
 
+    # 🚨 패치 11: 타임아웃 및 네트워크 예외 시 재전송(Retry)을 절대 수행하지 않고 UNKNOWN / TRANSPORT_FAIL로 즉시 반환 (단발성 원칙 준수)
     except requests.exceptions.Timeout:
-        return KisResult("TRANSPORT_FAIL", "Timeout No Retry", None)
+        return KisResult("UNKNOWN", "Timeout - Single-shot POST unconfirmed, treating as UNKNOWN", None)
     except requests.exceptions.RequestException as e:
-        return KisResult("TRANSPORT_FAIL", f"HTTP Error: {str(e)}", None)
-
+        return KisResult("TRANSPORT_FAIL", f"HTTP Exception: {str(e)}", None)
 def fetch_kis_account_balance(app_key: str, app_secret: str, cano: str, acnt_prdt: str, token: str, is_mock: bool = True) -> KisResult:
     url = f"{get_base_url(is_mock)}/uapi/domestic-stock/v1/trading/inquire-balance"
     headers = {"authorization": f"Bearer {token}", "appkey": app_key, "appsecret": app_secret, "tr_id": "VTTC8434R" if is_mock else "TTTC8434R"}
