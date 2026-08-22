@@ -20,7 +20,7 @@ WORKER_ID = f"worker_{uuid.uuid4().hex[:8]}"
 def get_account_secrets(portfolio_id):
     try:
         secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
-        with open(secrets_path, "rb") as f: config = toml.load(f)
+        with open(secrets_path, "r", encoding="utf-8") as f: config = toml.loads(f.read())
         acc_key = "core" if portfolio_id == "CORE" else "satellite"
         c = config["kis_accounts"][acc_key]
         is_mock_raw = str(c.get("is_mock", "true")).strip().lower()

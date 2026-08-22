@@ -25,7 +25,7 @@ def check_password():
             st.session_state["password_correct"] = True; st.rerun()
     return False
 
-if not check_password(): st.stop()
+#if not check_password(): st.stop()
 
 def mts_metric_html(label, value, delta=None):
     val_color, val_str = "white", str(value)
