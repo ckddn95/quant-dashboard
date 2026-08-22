@@ -172,13 +172,14 @@ _fdr_cache = {}
 def evaluate_stock_for_ui(ticker: str, strat: Strategy, cfg: StrategyConfig, buy_price: float=0, highest_price: float=0, c_price: float=0, high_p: float=0, low_p: float=0, is_halted: bool=False, days_held: int=0):
     try:
         start_d = (datetime.datetime.now(KST) - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
-        end_d = (datetime.datetime.now(KST) - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        # 🚨 금요일 15:30 스캔 등 당일 실시간 종가/고가 누락 방지를 위해 end_d를 오늘(당일)까지 확장 허용
+        end_d = datetime.datetime.now(KST).strftime('%Y-%m-%d')
         cache_key = f"{ticker}_{end_d}"
         if cache_key in _fdr_cache: df = _fdr_cache[cache_key]
         else: 
             df = fdr.DataReader(str(ticker).zfill(6), start=start_d, end=end_d)
             _fdr_cache[cache_key] = df
-        if df.empty: return c_price, "분석 불가", 0.0, "T-1 일봉 없음"
+        if df.empty: return c_price, "분석 불가", 0.0, "일봉 데이터 없음"
         fdr_close, fdr_high, fdr_low = float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
         ma20, ma60, ma200 = df['Close'].rolling(20).mean().iloc[-1], df['Close'].rolling(60).mean().iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
         m60_up = True if len(df) < 60 else (ma60 > df['Close'].rolling(60).mean().iloc[-11])
@@ -239,7 +240,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
             return {"status": "error", "msg": "유효한 관심종목 티커가 없습니다."}
             
         dfs = {}
-        # Test 1 요건: 최근 1년 제한을 강제하지 않고 지정된 start_date ~ end_date 소급 허용 (관심종목 과거 이력 없을 시 현재 관심종목 과거 전체 소급)
         fetch_start = start_date
         all_dates = set()
         
@@ -488,7 +488,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
 
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
-    # 🚨 Test 3: Point-in-Time(상장폐지 포함) 과거 유니버스 데이터 부재로 인한 생존자 편향 방지 하드 블록
     return {
         "status": "error", 
         "msg": "DATA_UNAVAILABLE: 해당 연도의 Point-in-Time(상장폐지 포함) 과거 유니버스 데이터가 로컬에 구축되어 있지 않아 생존자 편향(Survivor Bias)을 피할 수 없습니다. 신뢰할 수 없는 허구의 수익률(Fake Success) 반환을 방지하기 위해 시뮬레이션을 하드 블록합니다."
