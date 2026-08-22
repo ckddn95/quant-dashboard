@@ -205,7 +205,13 @@ def fetch_kis_orderable_cash(app_key: str, app_secret: str, cano: str, acnt_prdt
     res = _safe_get(url, headers=headers, params=params, rate_limit_key=rate_key, auth_ctx=auth_ctx)
     if res.state == "SUCCESS_DATA":
         out = res.data['data'].get('output', {})
-        cash_val = float(out.get('nrcvb_buy_amt', out.get('ord_psbl_cash', 0.0)))
+        # 🚨 패치 15: ord_psbl_cash로의 Fallback을 완전히 차단. 순수 현금 필드(nrcvb_buy_amt)가 없으면 0원 처리하여 미수 매수 원천 차단
+        raw_nrcvb = out.get('nrcvb_buy_amt')
+        if raw_nrcvb is not None and str(raw_nrcvb).strip() != "":
+            cash_val = float(raw_nrcvb)
+        else:
+            cash_val = 0.0
+            
         return KisResult("SUCCESS_DATA", "OK", cash_val)
     return res
 
@@ -295,7 +301,6 @@ def execute_kis_order_001x(app_key: str, app_secret: str, cano: str, acnt_prdt: 
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    # 🚨 패치 14: KIS 공식 예제 준수 - 매수는 SLL_TYPE 빈값(""), 일반 매도는 SLL_TYPE="01" 로 명확히 분기
     data = {
         "CANO": cano, 
         "ACNT_PRDT_CD": acnt_prdt, 
@@ -323,7 +328,6 @@ def cancel_kis_order_0013(app_key: str, app_secret: str, cano: str, acnt_prdt: s
     auth_ctx = {"app_key": app_key, "app_secret": app_secret, "is_mock": is_mock}
     rate_key = f"{cano}_{is_mock}"
     
-    # 🚨 패치 14: KIS 공식 취소 스키마에 존재하지 않는 SLL_TYPE을 제거하고 표준 필드만으로 정밀 구성
     data = {
         "CANO": cano, 
         "ACNT_PRDT_CD": acnt_prdt, 
