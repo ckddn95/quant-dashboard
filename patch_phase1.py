@@ -1,4 +1,6 @@
-"""
+import os
+
+DATABASE_PY_CONTENT = '''"""
 Core-Satellite Quant System - Database Layer (Phase 1 Patched)
 V17 스키마 기반 무손실 마이그레이터, WAL 백업, PIT 관심종목 이력 포함.
 """
@@ -210,3 +212,40 @@ def request_cancel_for_system_orders(account_fp, strategy):
         """, (account_fp, strategy))
         conn.commit()
         return cursor.rowcount
+'''
+
+WORKER_PY_PATCH = '''
+# worker.py 의 ACK 검증 부분 패치 (P0-1)
+import re
+
+def patch_worker_file():
+    if not os.path.exists("worker.py"): return
+    with open("worker.py", "r", encoding="utf-8") as f:
+        content = f.read()
+    
+    # ACK 저장 시 broker_order_time 파싱 및 전달 로직 주입
+    if "transition_order_status(intent['intent_id'], 'ACKNOWLEDGED'" in content:
+        content = re.sub(
+            r"transition_order_status\(intent\['intent_id'\],\s*'ACKNOWLEDGED',\s*broker_order_id=([^\)]+)\)",
+            r"transition_order_status(intent['intent_id'], 'ACKNOWLEDGED', broker_order_id=\\1, broker_order_time=res.get('ord_tmd', ''))",
+            content
+        )
+        with open("worker.py", "w", encoding="utf-8") as f:
+            f.write(content)
+        print("✅ worker.py ACK 처리 로직 패치 완료")
+'''
+
+def apply_patch():
+    print("🚀 Phase 1 패치(V17 마이그레이터)를 시작합니다...")
+    
+    with open("database.py", "w", encoding="utf-8") as f:
+        f.write(DATABASE_PY_CONTENT)
+    print("✅ database.py 전면 재작성 완료 (V17 스키마, WAL, PIT 테이블, Kill Switch 함수 적용)")
+    
+    exec(WORKER_PY_PATCH)
+    patch_worker_file()
+    
+    print("🎉 Phase 1 패치가 완료되었습니다. 'python database.py' 를 실행하여 문법 오류가 없는지 확인하거나, 바로 'git commit'을 진행하십시오.")
+
+if __name__ == "__main__":
+    apply_patch()
