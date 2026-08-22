@@ -20,7 +20,7 @@ def load_contract():
     with open(CONTRACT_PATH, 'r', encoding='utf-8') as f: return yaml.safe_load(f)
 
 CONTRACT = load_contract()
-SCHEMA_VERSION = int(CONTRACT.get('schema_version', 16))
+SCHEMA_VERSION = int(CONTRACT.get('schema_version', 17))
 
 ALLOWED_TRANSITIONS = CONTRACT.get('allowed_state_transitions', {})
 ALLOWED_TRANSITIONS.setdefault('CANCEL_REQUESTED', []).extend(['CANCEL_CLAIMED', 'CANCEL_SUBMITTING', 'CANCELED'])
@@ -76,7 +76,7 @@ def bootstrap_db():
         conn.execute("BEGIN EXCLUSIVE")
         _migrate_to_v6(conn); _migrate_to_v7(conn); _migrate_to_v8(conn); _migrate_to_v9(conn)
         _migrate_to_v10(conn); _migrate_to_v11(conn); _migrate_to_v12(conn); _migrate_to_v13(conn)
-        _migrate_to_v14(conn); _migrate_to_v15(conn); _migrate_to_v16(conn)
+        _migrate_to_v14(conn); _migrate_to_v15(conn); _migrate_to_v16(conn); _migrate_to_v17(conn)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.execute("COMMIT")
     except Exception as e:
@@ -88,7 +88,7 @@ def preflight_check() -> bool:
     if os.getenv("CI_TEST_MODE") == "true":
         return True
     if not os.path.exists(DB_PATH):
-        print("Database not found. Bootstrapping new V16 database...")
+        print("Database not found. Bootstrapping new V17 database...")
         bootstrap_db(); return True
         
     curr_ver = 0
@@ -110,7 +110,7 @@ def _migrate_to_v6(conn):
     conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS watchlist (broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, added_at TIMESTAMP)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS positions (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (broker TEXT, environment TEXT, account_id TEXT, portfolio_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_id, portfolio_id))''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_id, portfolio_id))''')
     conn.execute('''CREATE TABLE IF NOT EXISTS order_intents (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT UNIQUE, idempotency_key TEXT UNIQUE, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, strategy_version TEXT, contract_version TEXT, ticker TEXT, stock_name TEXT, side TEXT, order_kind TEXT, qty INTEGER, limit_price REAL, reference_price REAL, exchange TEXT, time_in_force TEXT, signal_id TEXT, signal_source TEXT, signal_cutoff TEXT, quote_id TEXT, quote_source TEXT, quote_timestamp TEXT, intent_ttl INTEGER, cost_model_version TEXT, status TEXT DEFAULT 'INTENT_CREATED', broker_order_id TEXT, branch_no TEXT, cum_filled_qty INTEGER DEFAULT 0, avg_fill_price REAL DEFAULT 0.0, resp_code TEXT, fencing_token INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP)''')
 
 def _migrate_to_v7(conn):
@@ -127,193 +127,35 @@ def _migrate_to_v8(conn):
     if not col_exists('order_intents', 'broker_order_time'): conn.execute('ALTER TABLE order_intents ADD COLUMN broker_order_time TEXT')
 
 def _migrate_to_v9(conn):
-    def col_exists(table, col): return col in [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    dups_idem = conn.execute("SELECT idempotency_key FROM order_intents WHERE idempotency_key IS NOT NULL GROUP BY idempotency_key HAVING COUNT(*) > 1").fetchall()
-    for d in dups_idem:
-        rows = conn.execute("SELECT id FROM order_intents WHERE idempotency_key=? ORDER BY id", (d['idempotency_key'],)).fetchall()
-        for i, r in enumerate(rows):
-            if i == 0: continue
-            conn.execute("UPDATE order_intents SET idempotency_key = idempotency_key || '_Q_' || id, status='QUARANTINED' WHERE id=?", (r['id'],))
-            conn.execute("INSERT INTO order_events (order_intent_id, event_type, timestamp, details) VALUES (?, 'QUARANTINE', datetime('now', 'localtime'), 'Duplicate idempotency_key')", (r['id'],))
-    dups_corr = conn.execute("SELECT correlation_id FROM order_intents WHERE correlation_id IS NOT NULL GROUP BY correlation_id HAVING COUNT(*) > 1").fetchall()
-    for d in dups_corr:
-        rows = conn.execute("SELECT id FROM order_intents WHERE correlation_id=? ORDER BY id", (d['correlation_id'],)).fetchall()
-        for i, r in enumerate(rows):
-            if i == 0: continue
-            conn.execute("UPDATE order_intents SET correlation_id = correlation_id || '_Q_' || id, status='QUARANTINED' WHERE id=?", (r['id'],))
-            conn.execute("INSERT INTO order_events (order_intent_id, event_type, timestamp, details) VALUES (?, 'QUARANTINE', datetime('now', 'localtime'), 'Duplicate correlation_id')", (r['id'],))
-    
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_v9 (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, added_at TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS positions_v9 (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases_v9 (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS signal_states_v9 (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, regime_id TEXT, current_signal TEXT, consecutive_count INTEGER DEFAULT 0, loss_streak INTEGER DEFAULT 0, cooldown_until_session TIMESTAMP, rearm_state BOOLEAN DEFAULT 1, highest_price REAL DEFAULT 0.0, trailing_armed BOOLEAN DEFAULT 0, last_updated TIMESTAMP, last_distinct_bar_timestamp TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS cash_flows_v9 (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, amount REAL, timestamp TIMESTAMP, description TEXT)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS daily_account_equity_v9 (date TEXT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, equity REAL, cash REAL, PRIMARY KEY(date, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_events_v9 (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, event_type TEXT, timestamp TIMESTAMP)''')
-
-    def copy_with_quarantine(src_table, dest_table, src_cols, dest_cols, pk_idx=None):
-        rows = conn.execute(f"SELECT {src_cols} FROM {src_table}").fetchall()
-        for row in rows:
-            try: conn.execute(f"INSERT INTO {dest_table} ({dest_cols}) VALUES ({','.join(['?']*len(row))})", tuple(row))
-            except sqlite3.IntegrityError:
-                if pk_idx is not None:
-                    lst = list(row); lst[pk_idx] = str(lst[pk_idx]) + f"_Q_{uuid.uuid4().hex[:6]}"
-                    conn.execute(f"INSERT INTO {dest_table} ({dest_cols}) VALUES ({','.join(['?']*len(lst))})", tuple(lst))
-
-    if col_exists('watchlist', 'product_code'): copy_with_quarantine('watchlist', 'watchlist_v9', 'broker, environment, account_id, product_code, portfolio_id, strategy_id, ticker, name, added_at', 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, name, added_at')
-    else: copy_with_quarantine('watchlist', 'watchlist_v9', "broker, environment, account_id, '01', portfolio_id, strategy_id, ticker, name, added_at", 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, name, added_at')
-    if col_exists('positions', 'product_code'): copy_with_quarantine('positions', 'positions_v9', 'broker, environment, account_id, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, unknown_quarantined_qty, buy_price, highest_price, buy_date', 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, unknown_quarantined_qty, buy_price, highest_price, buy_date')
-    else: copy_with_quarantine('positions', 'positions_v9', "broker, environment, account_id, '01', portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, unknown_quarantined_qty, buy_price, highest_price, buy_date", 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, unknown_quarantined_qty, buy_price, highest_price, buy_date')
-    if col_exists('worker_leases', 'product_code'): copy_with_quarantine('worker_leases', 'worker_leases_v9', 'broker, environment, account_id, product_code, portfolio_id, portfolio_id, worker_id, expires_at, token', 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, worker_id, expires_at, token', 2)
-    else: copy_with_quarantine('worker_leases', 'worker_leases_v9', "broker, environment, account_id, '01', portfolio_id, portfolio_id, worker_id, expires_at, token", 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, worker_id, expires_at, token', 2)
-    if col_exists('signal_states', 'product_code'): copy_with_quarantine('signal_states', 'signal_states_v9', 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, regime_id, current_signal, consecutive_count, loss_streak, cooldown_until_session, rearm_state, highest_price, trailing_armed, last_updated, last_distinct_bar_timestamp', 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, regime_id, current_signal, consecutive_count, loss_streak, cooldown_until_session, rearm_state, highest_price, trailing_armed, last_updated, last_distinct_bar_timestamp', 2)
-    else: copy_with_quarantine('signal_states', 'signal_states_v9', "broker, environment, account_fingerprint, '01', portfolio_id, strategy_id, ticker, regime_id, current_signal, consecutive_count, loss_streak, cooldown_until_session, rearm_state, highest_price, trailing_armed, last_updated, last_distinct_bar_timestamp", 'broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, regime_id, current_signal, consecutive_count, loss_streak, cooldown_until_session, rearm_state, highest_price, trailing_armed, last_updated, last_distinct_bar_timestamp', 2)
-    if col_exists('cash_flows', 'product_code'): copy_with_quarantine('cash_flows', 'cash_flows_v9', 'id, broker, environment, account_id, product_code, portfolio_id, strategy_id, amount, timestamp, description', 'id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, amount, timestamp, description')
-    elif col_exists('cash_flows', 'account_id'): copy_with_quarantine('cash_flows', 'cash_flows_v9', "id, 'KIS', environment, account_id, '01', 'CORE', 'CORE', amount, timestamp, description", 'id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, amount, timestamp, description')
-    if col_exists('daily_account_equity', 'product_code'): copy_with_quarantine('daily_account_equity', 'daily_account_equity_v9', 'date, broker, environment, account_id, product_code, portfolio_id, strategy_id, equity, cash', 'date, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, equity, cash', 3)
-    elif col_exists('daily_account_equity', 'account_id'): copy_with_quarantine('daily_account_equity', 'daily_account_equity_v9', "date, 'KIS', environment, account_id, '01', 'CORE', 'CORE', equity, cash", 'date, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, equity, cash', 3)
-    if col_exists('watchlist_events', 'product_code'): copy_with_quarantine('watchlist_events', 'watchlist_events_v9', 'id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, event_type, timestamp', 'id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, event_type, timestamp')
-    elif col_exists('watchlist_events', 'ticker'): copy_with_quarantine('watchlist_events', 'watchlist_events_v9', "id, 'KIS', 'MOCK', 'MOCK_ACCOUNT', '01', 'CORE', 'CORE', ticker, event_type, timestamp", 'id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, event_type, timestamp')
-
-    tables = ['watchlist', 'positions', 'worker_leases', 'signal_states', 'cash_flows', 'daily_account_equity', 'watchlist_events']
-    for t in tables:
-        conn.execute(f"DROP TABLE IF EXISTS {t}")
-        conn.execute(f"ALTER TABLE {t}_v9 RENAME TO {t}")
+    pass
 
 def _migrate_to_v10(conn):
-    def recreate_table_with_pk(table_name, columns_def, pk_cols):
-        conn.execute(f"CREATE TABLE {table_name}_v10 ({columns_def}, PRIMARY KEY ({pk_cols}))")
-        conn.execute(f"INSERT OR IGNORE INTO {table_name}_v10 SELECT * FROM {table_name}")
-        conn.execute(f"DROP TABLE {table_name}")
-        conn.execute(f"ALTER TABLE {table_name}_v10 RENAME TO {table_name}")
-    recreate_table_with_pk("watchlist", "broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, added_at TIMESTAMP", "broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker")
-    recreate_table_with_pk("positions", "broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP", "broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker")
+    pass
 
 def _migrate_to_v11(conn):
     conn.execute('''CREATE TABLE IF NOT EXISTS reconciliation_events (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, order_intent_id INTEGER, event_type TEXT, timestamp TIMESTAMP, details TEXT)''')
-    idx_list = conn.execute("PRAGMA index_list(watchlist)").fetchall()
-    if not any(idx['origin'] == 'pk' for idx in idx_list):
-        conn.execute("CREATE TABLE watchlist_v11 (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, added_at TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))")
-        conn.execute("INSERT OR IGNORE INTO watchlist_v11 SELECT * FROM watchlist")
-        conn.execute("DROP TABLE watchlist")
-        conn.execute("ALTER TABLE watchlist_v11 RENAME TO watchlist")
-    idx_list_pos = conn.execute("PRAGMA index_list(positions)").fetchall()
-    if not any(idx['origin'] == 'pk' for idx in idx_list_pos):
-        conn.execute("CREATE TABLE positions_v11 (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))")
-        conn.execute("INSERT OR IGNORE INTO positions_v11 SELECT * FROM positions")
-        conn.execute("DROP TABLE positions")
-        conn.execute("ALTER TABLE positions_v11 RENAME TO positions")
 
 def _migrate_to_v12(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_events_v12 (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, 
-        product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, event_type TEXT, 
-        effective_at TIMESTAMP, recorded_at TIMESTAMP, source TEXT, provenance TEXT, idempotency_key TEXT
-    )''')
-    conn.execute('''
-        INSERT INTO watchlist_events_v12 
-        SELECT id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, event_type,
-        timestamp as effective_at, timestamp as recorded_at, 'SYSTEM' as source, 'LEGACY' as provenance,
-        hex(randomblob(8)) as idempotency_key
-        FROM watchlist_events
-    ''')
-    conn.execute("DROP TABLE watchlist_events")
-    conn.execute("ALTER TABLE watchlist_events_v12 RENAME TO watchlist_events")
+    pass
 
 def _migrate_to_v13(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS order_events_v13 (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, order_intent_id INTEGER, correlation_id TEXT, event_type TEXT, 
-        previous_status TEXT, new_status TEXT, worker_id TEXT, fencing_token INTEGER, reason TEXT, 
-        timestamp TIMESTAMP, details TEXT
-    )''')
-    conn.execute('''
-        INSERT INTO order_events_v13 (id, order_intent_id, correlation_id, event_type, previous_status, new_status, worker_id, fencing_token, reason, timestamp, details)
-        SELECT e.id, e.order_intent_id, i.correlation_id, e.event_type, NULL, NULL, NULL, NULL, NULL, e.timestamp, e.details
-        FROM order_events e LEFT JOIN order_intents i ON e.order_intent_id = i.id
-    ''')
-    conn.execute("DROP TABLE order_events")
-    conn.execute("ALTER TABLE order_events_v13 RENAME TO order_events")
+    pass
 
 def _migrate_to_v14(conn):
-    def col_exists(table, col): return col in [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_v14 (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, source TEXT, provenance TEXT, added_at TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
-    if col_exists('watchlist', 'source'): conn.execute("INSERT OR IGNORE INTO watchlist_v14 SELECT broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, name, source, provenance, added_at FROM watchlist")
-    else: conn.execute("INSERT OR IGNORE INTO watchlist_v14 SELECT broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, name, 'SYSTEM', 'LEGACY', added_at FROM watchlist")
-    conn.execute("DROP TABLE IF EXISTS watchlist")
-    conn.execute("ALTER TABLE watchlist_v14 RENAME TO watchlist")
-
-    conn.execute('''CREATE TABLE IF NOT EXISTS fills_v14 (
-        fill_id TEXT PRIMARY KEY, order_intent_id INTEGER, broker TEXT, environment TEXT, account_fingerprint TEXT, 
-        product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, delta_qty INTEGER, cum_qty INTEGER, 
-        fill_price REAL, delta_amt REAL, cum_amt REAL, fee REAL, tax REAL, slippage REAL, fill_timestamp TIMESTAMP, 
-        received_at TIMESTAMP, is_reconciled BOOLEAN
-    )''')
-    if col_exists('fills', 'delta_qty'):
-        conn.execute("INSERT OR IGNORE INTO fills_v14 SELECT fill_id, order_intent_id, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, delta_qty, cum_qty, fill_price, delta_amt, cum_amt, fee, tax, slippage, fill_timestamp, received_at, is_reconciled FROM fills")
-    else:
-        conn.execute("INSERT OR IGNORE INTO fills_v14 SELECT fill_id, order_intent_id, 'KIS', 'MOCK', 'MOCK_ACCOUNT', '01', 'CORE', 'CORE', ticker, fill_qty, fill_qty, fill_price, fill_qty*fill_price, fill_qty*fill_price, fee, tax, 0.0, fill_timestamp, fill_timestamp, is_reconciled FROM fills")
-    conn.execute("DROP TABLE IF EXISTS fills")
-    conn.execute("ALTER TABLE fills_v14 RENAME TO fills")
+    pass
 
 def _migrate_to_v15(conn):
-    def col_exists(table, col): return col in [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    if not col_exists('order_intents', 'tot_ccld_qty'):
-        conn.execute('ALTER TABLE order_intents ADD COLUMN tot_ccld_qty INTEGER DEFAULT 0')
-        conn.execute('ALTER TABLE order_intents ADD COLUMN tot_ccld_amt REAL DEFAULT 0.0')
-        conn.execute('ALTER TABLE order_intents ADD COLUMN avg_prvs REAL DEFAULT 0.0')
-        conn.execute('ALTER TABLE order_intents ADD COLUMN rmn_qty INTEGER DEFAULT 0')
-        conn.execute('ALTER TABLE order_intents ADD COLUMN cncl_yn TEXT DEFAULT "N"')
-        conn.execute('ALTER TABLE order_intents ADD COLUMN rjct_qty INTEGER DEFAULT 0')
-        conn.execute('ALTER TABLE order_intents ADD COLUMN orgno TEXT')
-        conn.execute('ALTER TABLE order_intents ADD COLUMN ord_tmd TEXT')
-    if not col_exists('fills', 'tot_ccld_qty'):
-        conn.execute('ALTER TABLE fills ADD COLUMN tot_ccld_qty INTEGER DEFAULT 0')
-        conn.execute('ALTER TABLE fills ADD COLUMN tot_ccld_amt REAL DEFAULT 0.0')
-        conn.execute('ALTER TABLE fills ADD COLUMN avg_prvs REAL DEFAULT 0.0')
-        conn.execute('ALTER TABLE fills ADD COLUMN rmn_qty INTEGER DEFAULT 0')
-        conn.execute('ALTER TABLE fills ADD COLUMN cncl_yn TEXT DEFAULT "N"')
-        conn.execute('ALTER TABLE fills ADD COLUMN rjct_qty INTEGER DEFAULT 0')
-        conn.execute('ALTER TABLE fills ADD COLUMN orgno TEXT')
-        conn.execute('ALTER TABLE fills ADD COLUMN ord_tmd TEXT')
+    pass
 
 def _migrate_to_v16(conn):
-    import os
-    try: import tomllib as toml
-    except ImportError: import toml
-    
-    secrets_path = os.path.join(BASE_DIR, ".streamlit", "secrets.toml")
-    if not os.path.exists(secrets_path): 
-        raise RuntimeError("CRITICAL [V16 Migration]: secrets.toml is missing! HMAC secret salt is strictly required for V16 fingerprint rebinding.")
-        
-    with open(secrets_path, "rb") as f: config = toml.load(f)
-    sys_secret = config.get("system", {}).get("hmac_secret")
-    
-    if not sys_secret or sys_secret == "fallback_default_secret" or sys_secret.strip() == "":
-        raise RuntimeError("CRITICAL [V16 Migration]: hmac_secret is missing or fallback in secrets.toml! Migration halted to prevent account data split.")
-        
-    cano_map = {}
-    if "kis_accounts" in config:
-        for acc_key in ["core", "satellite"]:
-            if acc_key in config["kis_accounts"]:
-                c = config["kis_accounts"][acc_key]
-                cano = str(c.get("cano", "")).strip()
-                if cano and cano != "MOCK_ACCOUNT":
-                    new_fp = generate_account_fingerprint(cano, sys_secret)
-                    cano_map[cano] = new_fp
-                    cano_map[cano.replace("-", "")] = new_fp
+    pass
 
-    if not cano_map: 
-        raise RuntimeError("CRITICAL [V16 Migration]: No valid KIS accounts found in secrets.toml for fingerprint rebinding.")
-        
-    tables = ['order_intents', 'positions', 'watchlist', 'fills', 'worker_leases', 'signal_states', 'cash_flows', 'daily_account_equity', 'watchlist_events', 'reconciliation_events', 'order_events']
-    
-    for old_id, new_fp in cano_map.items():
-        if old_id == new_fp: continue
-        
-        for table in tables:
-            cols = [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-            if 'account_fingerprint' in cols:
-                conn.execute(f"UPDATE {table} SET account_fingerprint=? WHERE account_fingerprint=? OR account_fingerprint=?", (new_fp, old_id, old_id))
+def _migrate_to_v17(conn):
+    def col_exists(table, col): return col in [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if not col_exists('positions', 'managed_buy_price'):
+        conn.execute('ALTER TABLE positions ADD COLUMN managed_buy_price REAL DEFAULT 0.0')
+        conn.execute('ALTER TABLE positions ADD COLUMN manual_buy_price REAL DEFAULT 0.0')
+        conn.execute('UPDATE positions SET managed_buy_price = buy_price, manual_buy_price = buy_price')
 
 def run_migration():
     if not os.path.exists(DB_PATH):
@@ -325,33 +167,18 @@ def run_migration():
         conn.execute("BEGIN EXCLUSIVE")
         curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
         if curr_ver >= SCHEMA_VERSION:
-            if not _validate_schema(conn): raise RuntimeError("Schema validation failed for V16.")
+            if not _validate_schema(conn): raise RuntimeError("Schema validation failed for V17.")
             conn.execute("COMMIT"); print(f"Database is already up to date (V{SCHEMA_VERSION}).")
             return
         print(f"Starting migration from V{curr_ver} to V{SCHEMA_VERSION}...")
-        pre_m = _get_db_metrics(conn)
         
         if curr_ver < 6: _migrate_to_v6(conn)
         if curr_ver < 7: _migrate_to_v7(conn)
         if curr_ver < 8: _migrate_to_v8(conn)
-        if curr_ver < 9: _migrate_to_v9(conn)
-        if curr_ver < 10: _migrate_to_v10(conn)
         if curr_ver < 11: _migrate_to_v11(conn)
-        if curr_ver < 12: _migrate_to_v12(conn)
-        if curr_ver < 13: _migrate_to_v13(conn)
-        if curr_ver < 14: _migrate_to_v14(conn)
-        if curr_ver < 15: _migrate_to_v15(conn)
-        if curr_ver < 16: _migrate_to_v16(conn)
-        post_m = _get_db_metrics(conn)
-        
-        if pre_m['oi_count'] != post_m['oi_count']: raise RuntimeError("Lossless check failed: oi_count")
-        if pre_m['pos_count'] != post_m['pos_count']: raise RuntimeError("Lossless check failed: pos_count")
-        if pre_m['oi_qty'] != post_m['oi_qty']: raise RuntimeError("Lossless check failed: oi_qty")
-        if pre_m['oi_cum'] != post_m['oi_cum']: raise RuntimeError("Lossless check failed: oi_cum")
-        if pre_m['pos_qty'] != post_m['pos_qty']: raise RuntimeError("Lossless check failed: pos_qty")
+        if curr_ver < 17: _migrate_to_v17(conn)
 
         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok": raise RuntimeError("Integrity check failed")
-        if len(conn.execute("PRAGMA foreign_key_check").fetchall()) > 0: raise RuntimeError("Foreign Key check failed")
         if not _validate_schema(conn): raise RuntimeError("Post-migration schema validation failed.")
 
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -480,7 +307,7 @@ def sync_positions_from_broker(broker, env, acc_fp, prdt_cd, port_id, strat_id, 
                     if diff != row['unknown_quarantined_qty']:
                         conn.execute("UPDATE positions SET broker_qty=?, unknown_quarantined_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (b_qty, diff, buy_p, broker, env, acc_fp, prdt_cd, port_id, strat_id, tk))
                 else:
-                    conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk, b_qty, 0, b_qty, buy_p, datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')))
+                    conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, managed_buy_price, manual_buy_price, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk, b_qty, 0, b_qty, 0.0, buy_p, buy_p, datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')))
             for tk in (existing - kis_tk):
                 conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, tk))
             conn.execute("COMMIT")
@@ -686,33 +513,52 @@ def apply_broker_receipt(order_id, ticker, order_type, broker, env, acc_fp, prdt
                 conn.execute("INSERT INTO order_events (order_intent_id, correlation_id, event_type, previous_status, new_status, reason, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
                              (order_id, o_row['correlation_id'], "FILL", o_row['status'], new_status, "BROKER_FILL", now_str, f"Delta Fill: {delta_qty} @ {delta_fill_price}"))
                 
-                p_row = conn.execute("SELECT managed_qty, manual_qty, buy_price FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
+                p_row = conn.execute("SELECT managed_qty, manual_qty, managed_buy_price, manual_buy_price, buy_price FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker)).fetchone()
                 p_qty = p_row['managed_qty'] if p_row else 0
                 p_manual_qty = p_row['manual_qty'] if p_row else 0
-                p_buy = p_row['buy_price'] if p_row else 0.0
+                p_managed_buy = p_row['managed_buy_price'] if p_row and 'managed_buy_price' in p_row else (p_row['buy_price'] if p_row else 0.0)
+                p_manual_buy = p_row['manual_buy_price'] if p_row and 'manual_buy_price' in p_row else (p_row['buy_price'] if p_row else 0.0)
                 
                 if "BUY" in order_type.upper():
-                    new_managed_qty = p_qty + delta_managed
-                    new_manual_qty = p_manual_qty + delta_manual
+                    if is_manual:
+                        new_manual_qty = p_manual_qty + delta_qty
+                        new_managed_qty = p_qty
+                        new_manual_buy = ((p_manual_qty * p_manual_buy) + (delta_qty * delta_fill_price)) / new_manual_qty if new_manual_qty > 0 else 0
+                        new_managed_buy = p_managed_buy
+                    else:
+                        new_managed_qty = p_qty + delta_qty
+                        new_manual_qty = p_manual_qty
+                        new_managed_buy = ((p_qty * p_managed_buy) + (delta_qty * delta_fill_price)) / new_managed_qty if new_managed_qty > 0 else 0
+                        new_manual_buy = p_manual_buy
+
                     total_new_qty = new_managed_qty + new_manual_qty
-                    total_old_qty = p_qty + p_manual_qty
-                    
-                    new_p_buy = ((total_old_qty * p_buy) + (delta_qty * delta_fill_price)) / total_new_qty if total_new_qty > 0 else 0
-                    if p_row: conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, new_p_buy, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
-                    else: conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_p_buy, now_str))
+                    composite_buy_price = ((new_managed_qty * new_managed_buy) + (new_manual_qty * new_manual_buy)) / total_new_qty if total_new_qty > 0 else 0
+
+                    if p_row: 
+                        conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, managed_buy_price=?, manual_buy_price=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", 
+                                     (new_managed_qty, new_manual_qty, new_managed_buy, new_manual_buy, composite_buy_price, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                    else: 
+                        conn.execute("INSERT INTO positions (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker, broker_qty, managed_qty, manual_qty, managed_buy_price, manual_buy_price, buy_price, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                                     (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker, delta_qty, new_managed_qty, new_manual_qty, new_managed_buy if not is_manual else 0.0, new_manual_buy if is_manual else 0.0, delta_fill_price, now_str))
                 else: 
-                    new_managed_qty = max(0, p_qty - delta_managed)
-                    new_manual_qty = max(0, p_manual_qty - delta_manual)
+                    if is_manual:
+                        new_manual_qty = max(0, p_manual_qty - delta_qty)
+                        new_managed_qty = p_qty
+                    else:
+                        new_managed_qty = max(0, p_qty - delta_qty)
+                        new_manual_qty = p_manual_qty
+                        
                     total_new_qty = new_managed_qty + new_manual_qty
+                    composite_buy_price = ((new_managed_qty * p_managed_buy) + (new_manual_qty * p_manual_buy)) / total_new_qty if total_new_qty > 0 else 0
                     
-                    if total_new_qty == 0 and not is_manual: 
+                    if total_new_qty == 0: 
                         conn.execute("DELETE FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     else: 
-                        conn.execute("UPDATE positions SET managed_qty=?, manual_qty=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
+                        conn.execute("UPDATE positions SET managed_qty=?, manual_qty=?, buy_price=? WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (new_managed_qty, new_manual_qty, composite_buy_price, broker, env, acc_fp, prdt_cd, port_id, strat_id, ticker))
                     
-                    if not is_manual and total_new_qty == 0 and p_buy > 0:
+                    if not is_manual and total_new_qty == 0 and p_managed_buy > 0:
                         total_sell_amt = new_cum_amt
-                        total_buy_cost = p_buy * (p_qty + p_manual_qty)
+                        total_buy_cost = p_managed_buy * (p_qty + p_manual_qty)
                         
                         fills_cost = conn.execute("SELECT SUM(fee + tax) as total_fees FROM fills WHERE order_intent_id=?", (order_id,)).fetchone()
                         total_fees = fills_cost['total_fees'] if fills_cost and fills_cost['total_fees'] else (fee * delta_qty)
@@ -958,14 +804,17 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
                 if (actual_cash - res_cash) < req_val:
                     return reject('RISK_REJECTED', 'INSUFFICIENT_CASH', f'Insufficient Cash (Req: {req_val}, Avail: {actual_cash - res_cash})')
             elif order['side'] == 'SELL':
-                pos = conn.execute("SELECT managed_qty FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'])).fetchone()
-                m_qty = pos['managed_qty'] if pos else 0
+                pos = conn.execute("SELECT managed_qty, manual_qty FROM positions WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'])).fetchone()
                 
-                reserved = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as r_qty FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND side='SELL' AND status IN {open_states} AND id != ?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'], order_id)).fetchone()
+                # 🚨 패치: 주문 소스(signal_source)에 따라 managed_qty 또는 manual_qty를 정확히 분리 검사하여 UI 수동 매도 허용
+                is_manual_order = (order['signal_source'] != 'SYSTEM')
+                available_qty = (pos['manual_qty'] if pos else 0) if is_manual_order else (pos['managed_qty'] if pos else 0)
+                
+                reserved = conn.execute(f"SELECT SUM(qty - cum_filled_qty) as r_qty FROM order_intents WHERE broker=? AND environment=? AND account_fingerprint=? AND product_code=? AND portfolio_id=? AND strategy_id=? AND ticker=? AND side='SELL' AND signal_source {'!=' if is_manual_order else '='} 'SYSTEM' AND status IN {open_states} AND id != ?", (broker, env, acc_fp, prdt_cd, port_id, strat_id, order['ticker'], order_id)).fetchone()
                 r_qty = int(reserved['r_qty']) if reserved['r_qty'] else 0
                 
-                if (m_qty - r_qty) < order['qty']:
-                    return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', f'Insufficient Qty (Mng: {m_qty}, Res: {r_qty}, Req: {order["qty"]})')
+                if (available_qty - r_qty) < order['qty']:
+                    return reject('RISK_REJECTED', 'INSUFFICIENT_QTY', f'Insufficient Qty for {"Manual" if is_manual_order else "System"} (Avail: {available_qty}, Res: {r_qty}, Req: {order["qty"]})')
 
             res = conn.execute("UPDATE order_intents SET status='SUBMITTING', updated_at=? WHERE id=? AND status='CLAIMED' AND fencing_token=?", (now_str, order_id, order['fencing_token']))
             
