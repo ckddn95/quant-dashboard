@@ -224,7 +224,8 @@ def run_scanner_safe(strat: Strategy, cfg: StrategyConfig):
 
 def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_cash: float, start_date: datetime.date, end_date: datetime.date, cfg: StrategyConfig, is_weekly_scan: bool = False, external_cash_flows: dict = None, use_legacy_cost: bool = False, user_restricted_universe_by_date: dict = None):
     try:
-        if target_stocks_df.empty and not is_weekly_scan: return {"status": "error", "msg": "분석 대상 종목이 없습니다."}
+        if target_stocks_df is None or target_stocks_df.empty: 
+            return {"status": "error", "msg": "Test 1은 관심종목만 사용하며, 보유종목을 포함하지 않거나 관심종목 내역이 없습니다."}
         external_cash_flows = external_cash_flows or {}
         
         krx_df = load_krx_universe()
@@ -233,17 +234,13 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
         ticker_to_market = {r['Code']: ("KOSPI" if "KOSPI" in str(r['Market']).upper() else "KOSDAQ") for _, r in krx_df.iterrows()}
         ticker_to_name = {r['Code']: r['Name'] for _, r in krx_df.iterrows()}
         
-        if target_stocks_df is not None and not target_stocks_df.empty: 
-            tickers = list(target_stocks_df['티커'].astype(str).str.zfill(6))
-        else: 
-            if strat == Strategy.CORE:
-                tickers = list(krx_df[krx_df['Market'].str.contains('KOSPI', case=False, na=False)].sort_values('Marcap', ascending=False).head(100)['Code'])
-            else:
-                tickers = list(krx_df[krx_df['Market'].str.contains('KOSDAQ', case=False, na=False)].sort_values('Marcap', ascending=False).head(100)['Code'])
-            if not tickers: tickers = list(krx_df.sort_values('Marcap', ascending=False).head(100)['Code'])
+        tickers = list(target_stocks_df['티커'].astype(str).str.zfill(6))
+        if not tickers:
+            return {"status": "error", "msg": "유효한 관심종목 티커가 없습니다."}
             
         dfs = {}
-        fetch_start = start_date - datetime.timedelta(days=365)
+        # Test 1 요건: 최근 1년 제한을 강제하지 않고 지정된 start_date ~ end_date 소급 허용 (관심종목 과거 이력 없을 시 현재 관심종목 과거 전체 소급)
+        fetch_start = start_date
         all_dates = set()
         
         def fetch_data(tk):
@@ -408,7 +405,6 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
                     
                     is_buy, score, reason = calc_buy_signal(strat, cfg, row['Close'], row['MA20'], row['MA60'], row['MA200'], row['M60_UP'])
                     
-                    # 🚨 패치 13: 재무장(Rearm) 조건 단일화 (신호가 false에서 true로 다시 켜질 때만 재진입 허용)
                     if not is_buy:
                         rearm_state[tk] = True
                     elif is_buy and rearm_state.get(tk, True):
@@ -492,6 +488,7 @@ def run_quant_simulation(target_stocks_df: pd.DataFrame, strat: Strategy, init_c
     except Exception as e: return {"status": "error", "msg": f"엔진 오류: {str(e)}"}
 
 def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, cfg: StrategyConfig, use_legacy_cost: bool=False):
+    # 🚨 Test 3: Point-in-Time(상장폐지 포함) 과거 유니버스 데이터 부재로 인한 생존자 편향 방지 하드 블록
     return {
         "status": "error", 
         "msg": "DATA_UNAVAILABLE: 해당 연도의 Point-in-Time(상장폐지 포함) 과거 유니버스 데이터가 로컬에 구축되어 있지 않아 생존자 편향(Survivor Bias)을 피할 수 없습니다. 신뢰할 수 없는 허구의 수익률(Fake Success) 반환을 방지하기 위해 시뮬레이션을 하드 블록합니다."
