@@ -1,6 +1,6 @@
 whitepaper_version: "2.2.0"
 contract_version: "2.2.0"
-schema_version: 15
+schema_version: 16
 strategy_version: "1.0.0"
 cost_model_version: "2.2.0"
 
@@ -12,7 +12,7 @@ strategy:
     alloc: 0.35
     ts_tgt: 0.30
     ts_drp: -0.10
-    cd: 60
+    cd: 3
     min_h: 5
     boost: true
   SATELLITE:
@@ -22,7 +22,7 @@ strategy:
     alloc: 0.20
     ts_tgt: 0.20
     ts_drp: -0.07
-    cd: 30
+    cd: 3
     min_h: 3
     boost: true
 
@@ -38,7 +38,13 @@ execution_rules:
   quote_freshness_ttl_sec: 15
   intent_ttl_sec: 300
   market_buy_reservation_buffer: 1.05
+  cash_policy: "CASH_ONLY_NO_CREDIT"
   real_approval_status: "POST_BLOCKED"
+
+cooldown_policy:
+  loss_streak_threshold: 2
+  cooldown_sessions: 3
+  rearm_condition: "SIGNAL_FALSE_TO_TRUE"
 
 cost_model:
   broker_fee_rate: 0.00015
