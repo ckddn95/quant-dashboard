@@ -1,6 +1,6 @@
-whitepaper_version: "2.2.0"
-contract_version: "2.2.0"
-schema_version: 16
+whitepaper_version: "2.2.1"
+contract_version: "2.2.1"
+schema_version: 17
 strategy_version: "1.0.0"
 cost_model_version: "2.2.0"
 
@@ -12,7 +12,7 @@ strategy:
     alloc: 0.35
     ts_tgt: 0.30
     ts_drp: -0.10
-    cd: 3
+    cd: 20
     min_h: 5
     boost: true
   SATELLITE:
@@ -22,7 +22,7 @@ strategy:
     alloc: 0.20
     ts_tgt: 0.20
     ts_drp: -0.07
-    cd: 3
+    cd: 10
     min_h: 3
     boost: true
 
@@ -43,7 +43,7 @@ execution_rules:
 
 cooldown_policy:
   loss_streak_threshold: 2
-  cooldown_sessions: 3
+  cooldown_sessions: 20
   rearm_condition: "SIGNAL_FALSE_TO_TRUE"
 
 cost_model:
