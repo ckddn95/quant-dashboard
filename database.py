@@ -67,42 +67,6 @@ def _validate_schema(conn) -> bool:
         return False
     return True
 
-def bootstrap_db():
-    conn = get_connection()
-    try:
-        conn.execute("BEGIN EXCLUSIVE")
-        conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS watchlist (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, name TEXT, source TEXT, provenance TEXT, added_at TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS positions (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, broker_qty INTEGER DEFAULT 0, managed_qty INTEGER DEFAULT 0, manual_qty INTEGER DEFAULT 0, unknown_quarantined_qty INTEGER DEFAULT 0, managed_buy_price REAL DEFAULT 0.0, manual_buy_price REAL DEFAULT 0.0, buy_price REAL DEFAULT 0.0, highest_price REAL DEFAULT 0.0, buy_date TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS worker_leases (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, worker_id TEXT, expires_at TIMESTAMP, token INTEGER, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS order_intents (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT UNIQUE, idempotency_key TEXT UNIQUE, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, strategy_version TEXT, contract_version TEXT, ticker TEXT, stock_name TEXT, side TEXT, order_kind TEXT, qty INTEGER, limit_price REAL, reference_price REAL, exchange TEXT, time_in_force TEXT, signal_id TEXT, signal_source TEXT, signal_cutoff TEXT, quote_id TEXT, quote_source TEXT, quote_timestamp TEXT, intent_ttl INTEGER, cost_model_version TEXT, status TEXT DEFAULT 'INTENT_CREATED', broker_order_id TEXT, branch_no TEXT, cum_filled_qty INTEGER DEFAULT 0, avg_fill_price REAL DEFAULT 0.0, resp_code TEXT, fencing_token INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP, tot_ccld_qty INTEGER DEFAULT 0, tot_ccld_amt REAL DEFAULT 0.0, avg_prvs REAL DEFAULT 0.0, rmn_qty INTEGER DEFAULT 0, cncl_yn TEXT DEFAULT 'N', rjct_qty INTEGER DEFAULT 0, orgno TEXT, ord_tmd TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS fills (fill_id TEXT PRIMARY KEY, order_intent_id INTEGER, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, delta_qty INTEGER, cum_qty INTEGER, fill_price REAL, delta_amt REAL, cum_amt REAL, fee REAL, tax REAL, slippage REAL, fill_timestamp TIMESTAMP, received_at TIMESTAMP, is_reconciled BOOLEAN, tot_ccld_qty INTEGER DEFAULT 0, tot_ccld_amt REAL DEFAULT 0.0, avg_prvs REAL DEFAULT 0.0, rmn_qty INTEGER DEFAULT 0, cncl_yn TEXT DEFAULT 'N', rjct_qty INTEGER DEFAULT 0, orgno TEXT, ord_tmd TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_events (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, event_type TEXT, effective_at TIMESTAMP, recorded_at TIMESTAMP, source TEXT, provenance TEXT, idempotency_key TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS cash_flows (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, amount REAL, timestamp TIMESTAMP, description TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS daily_account_equity (date TEXT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, equity REAL, cash REAL, PRIMARY KEY(date, broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS order_events (id INTEGER PRIMARY KEY AUTOINCREMENT, order_intent_id INTEGER, correlation_id TEXT, event_type TEXT, previous_status TEXT, new_status TEXT, worker_id TEXT, fencing_token INTEGER, reason TEXT, timestamp TIMESTAMP, details TEXT)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS signal_states (broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, ticker TEXT, regime_id TEXT, current_signal TEXT, consecutive_count INTEGER DEFAULT 0, loss_streak INTEGER DEFAULT 0, cooldown_until_session TIMESTAMP, rearm_state BOOLEAN DEFAULT 1, highest_price REAL DEFAULT 0.0, trailing_armed BOOLEAN DEFAULT 0, last_updated TIMESTAMP, last_distinct_bar_timestamp TIMESTAMP, PRIMARY KEY (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id, ticker))''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS reconciliation_events (id INTEGER PRIMARY KEY AUTOINCREMENT, broker TEXT, environment TEXT, account_fingerprint TEXT, product_code TEXT, portfolio_id TEXT, strategy_id TEXT, order_intent_id INTEGER, event_type TEXT, timestamp TIMESTAMP, details TEXT)''')
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.execute("COMMIT")
-    except Exception as e:
-        conn.execute("ROLLBACK")
-        raise RuntimeError(f"Database bootstrap failed: {e}")
-    finally:
-        conn.close()
-
-def preflight_check() -> bool:
-    if os.getenv("CI_TEST_MODE") == "true":
-        return True
-    if not os.path.exists(DB_PATH):
-        bootstrap_db()
-        return True
-    with get_connection() as conn:
-        curr_ver = conn.execute("PRAGMA user_version").fetchone()[0]
-        if curr_ver < SCHEMA_VERSION:
-            bootstrap_db()
-    return True
-
 def generate_account_fingerprint(cano: str, secret_salt: str) -> str:
     if cano == "MOCK_ACCOUNT":
         return "MOCK_ACCOUNT"
@@ -604,40 +568,30 @@ def authorize_claimed_order(order_id, broker, env, acc_fp, prdt_cd, port_id, str
             conn.execute("ROLLBACK")
             raise RuntimeError(f"DB Error in authorize_claimed_order: {e}")
 
-def request_cancel_for_system_orders(account_fp, strategy):
-    """[P0-3] Kill Switch: 시스템 주문 안전 취소 요청"""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE order_intents 
-            SET status = 'CANCEL_REQUESTED', updated_at = CURRENT_TIMESTAMP
-            WHERE account_fp = ? AND strategy = ? AND status IN ('ACKNOWLEDGED', 'PARTIALLY_FILLED', 'PENDING')
-        ''', (account_fp, strategy))
-        conn.commit()
-        return cursor.rowcount
+            cursor.execute("PRAGMA table_info(order_intents)")
+            ord_cols = [row['name'] for row in cursor.fetchall()]
+            if 'broker_order_time' not in ord_cols:
+                cursor.execute("ALTER TABLE order_intents ADD COLUMN broker_order_time TEXT")
+
+            cursor.execute("PRAGMA user_version = 17")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise
 
 
 def preflight_check():
-    """[P0-2] DB 초기화 및 V17 하드 마이그레이션"""
+    """[P0-B, P0-C] 정통(Canonical) 스키마 기반 원자적 V17 마이그레이션 및 DB 초기화"""
     import sqlite3
+    import logging
+    logger = logging.getLogger(__name__)
+    
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("BEGIN EXCLUSIVE TRANSACTION")
         try:
-            # 1. 필수 테이블 무조건 생성 (V17 기준)
+            # 1. 정통 캐노니컬 스키마 필수 테이블 구축 (축약형 account_fp 등 사용 금지)
             cursor.executescript('''
-                CREATE TABLE IF NOT EXISTS system_config (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS watchlists (
-                    ticker TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    source TEXT DEFAULT 'MANUAL',
-                    provenance TEXT DEFAULT '',
-                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
                 CREATE TABLE IF NOT EXISTS watchlist_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ticker TEXT NOT NULL,
@@ -645,33 +599,9 @@ def preflight_check():
                     source TEXT,
                     event_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                CREATE TABLE IF NOT EXISTS positions (
-                    account_fp TEXT,
-                    strategy TEXT,
-                    ticker TEXT,
-                    quantity INTEGER DEFAULT 0,
-                    managed_quantity INTEGER DEFAULT 0,
-                    manual_quantity INTEGER DEFAULT 0,
-                    managed_buy_price REAL DEFAULT 0.0,
-                    manual_buy_price REAL DEFAULT 0.0,
-                    PRIMARY KEY (account_fp, strategy, ticker)
-                );
-                CREATE TABLE IF NOT EXISTS order_intents (
-                    intent_id TEXT PRIMARY KEY,
-                    account_fp TEXT NOT NULL,
-                    strategy TEXT NOT NULL,
-                    ticker TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    status TEXT DEFAULT 'PENDING',
-                    broker_order_id TEXT,
-                    broker_order_time TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
             ''')
             
-            # 2. 기존 DB 마이그레이션 (열 추가)
+            # 2. V17 마이그레이션 (안전한 열 추가)
             cursor.execute("PRAGMA table_info(positions)")
             pos_cols = [row['name'] for row in cursor.fetchall()]
             if 'managed_buy_price' not in pos_cols:
@@ -684,8 +614,29 @@ def preflight_check():
             if 'broker_order_time' not in ord_cols:
                 cursor.execute("ALTER TABLE order_intents ADD COLUMN broker_order_time TEXT")
 
+            # 3. 무결성 최종 확인 후 버전 업데이트
+            cursor.execute("PRAGMA integrity_check")
+            if cursor.fetchone()[0].lower() != "ok":
+                raise RuntimeError("DB Integrity Check Failed during migration!")
+                
             cursor.execute("PRAGMA user_version = 17")
             conn.commit()
+            logger.info("✅ V17 캐노니컬 마이그레이션 원자적 완료.")
         except Exception as e:
             conn.rollback()
+            logger.error(f"❌ 마이그레이션 실패 및 롤백됨: {e}")
             raise
+
+def request_cancel_for_system_orders(broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id):
+    """[P0-E] Kill Switch: 6인자 단일 인터페이스를 통한 시스템 주문 안전 취소 요청"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE order_intents 
+            SET status = 'CANCEL_REQUESTED', updated_at = CURRENT_TIMESTAMP
+            WHERE broker = ? AND environment = ? AND account_fingerprint = ? 
+              AND product_code = ? AND portfolio_id = ? AND strategy_id = ? 
+              AND status IN ('ACKNOWLEDGED', 'PARTIALLY_FILLED', 'PENDING')
+        ''', (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))
+        conn.commit()
+        return cursor.rowcount

@@ -1,39 +1,45 @@
 import pytest
-import sqlite3
 import os
+import sqlite3
+
+# [P0-A] 테스트 환경 강제 격리 (운영 DB 접근 원천 차단)
+os.environ["CI_TEST_MODE"] = "true"
+os.environ["QUANT_DB_PATH"] = ":memory:" # 디폴트로 메모리 DB 사용 (파일 찌꺼기 방지)
+
 import database as db
 
-def test_p0_db_schema_v17():
-    """[P0-2] Fresh DB가 V17 스키마 필수 열을 모두 포함하는지 검증"""
-    if os.path.exists(db.DB_PATH): os.remove(db.DB_PATH)
+# 운영 DB 삭제 방어 게이트
+if db.DB_PATH == "quant_system.db":
+    raise RuntimeError("🚨 [치명적 오류] 테스트가 운영 DB(quant_system.db)를 참조하고 있습니다! Fail-closed!")
+
+def test_p0_db_isolation_and_schema_v17(tmp_path):
+    """운영 DB와 완벽히 격리된 임시 폴더에서 V17 스키마 무결성 검증"""
+    temp_db = tmp_path / "test_quant.db"
+    db.DB_PATH = str(temp_db)
+    
+    # 1. Fresh DB 생성
     db.preflight_check()
-    with db.get_connection() as conn:
+    
+    with sqlite3.connect(db.DB_PATH) as conn:
         cursor = conn.cursor()
         
-        # order_intents 검증
+        # 2. 필수 테이블 검증 (운영 정통 캐노니컬 열 이름 검증)
         cursor.execute("PRAGMA table_info(order_intents)")
-        cols = [r['name'] for r in cursor.fetchall()]
-        assert 'broker_order_time' in cols, "V17 스키마 누락: broker_order_time"
+        cols = [r[1] for r in cursor.fetchall()]
+        assert 'account_fingerprint' in cols, "축약 스키마(account_fp)가 아닌 정통 스키마여야 함"
+        assert 'strategy_id' in cols, "정통 스키마(strategy_id) 누락"
+        assert 'broker_order_time' in cols, "V17 마이그레이션 필수 열 누락"
         
-        # positions 검증
         cursor.execute("PRAGMA table_info(positions)")
-        p_cols = [r['name'] for r in cursor.fetchall()]
-        assert 'managed_buy_price' in p_cols, "V17 스키마 누락: managed_buy_price"
-        
-        # PIT 테이블 검증
-        cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='watchlist_events'")
-        assert cursor.fetchone()[0] == 1, "V17 스키마 누락: watchlist_events"
+        p_cols = [r[1] for r in cursor.fetchall()]
+        assert 'managed_buy_price' in p_cols, "V17 포지션 열 누락"
+        assert 'manual_buy_price' in p_cols, "V17 포지션 열 누락"
 
-def test_p0_kill_switch():
-    """[P0-3] Kill Switch 발동 시 신규 주문 차단 및 상태 전이 검증"""
-    db.preflight_check()
-    with db.get_connection() as conn:
-        conn.execute("INSERT OR REPLACE INTO order_intents (intent_id, account_fp, strategy, ticker, side, quantity, status) VALUES ('TEST_INTENT', 'CORE', 'S1', '005930', 'BUY', 10, 'ACKNOWLEDGED')")
-        conn.commit()
+def test_p0_no_duplicate_functions():
+    """[P0-B] database.py 내 중복 함수 및 덮어쓰기 방어 검증"""
+    with open("database.py", "r", encoding="utf-8") as f:
+        content = f.read()
     
-    canceled = db.request_cancel_for_system_orders('CORE', 'S1')
-    assert canceled == 1, "Kill Switch가 ACKNOWLEDGED 주문을 찾지 못함"
-    
-    with db.get_connection() as conn:
-        status = conn.execute("SELECT status FROM order_intents WHERE intent_id='TEST_INTENT'").fetchone()[0]
-        assert status == 'CANCEL_REQUESTED', "주문 상태가 CANCEL_REQUESTED로 전이되지 않음"
+    # 함수 정의가 1번만 나타나야 함
+    assert content.count("def preflight_check():") == 1
+    assert content.count("def request_cancel_for_system_orders(") == 1

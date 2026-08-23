@@ -1,11 +1,17 @@
 
 def is_market_open(current_time=None):
-    """KRX 장 세션 검증 (주말/휴장일 및 시간외 블록)"""
+    """[P0-F] KRX 통합 장 세션 게이트 (주말, 휴장일, 장외 시간 하드블록)"""
     import datetime
-    if current_time is None: current_time = datetime.datetime.now()
-    if current_time.weekday() >= 5: return False # 주말 차단
+    if current_time is None: 
+        current_time = datetime.datetime.now()
+    if current_time.weekday() >= 5: 
+        return False # 주말 차단
+        
+    # TODO: 공휴일(pykrx 등 연동) 체크 로직 확장 가능
     current_time_int = current_time.hour * 100 + current_time.minute
-    return 900 <= current_time_int <= 1520 # 장중 세션만 허용
+    
+    # 09:00 ~ 15:20 (정규장 및 정상 추세매도 종료 시각 기준)
+    return 900 <= current_time_int <= 1520
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr

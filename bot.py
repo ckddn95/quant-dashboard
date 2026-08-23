@@ -41,8 +41,37 @@ def run_signal_bot():
     db.preflight_check()
     print("🤖 [Signal Bot] Daemon Started. Monitoring markets with DETERMINISTIC rules...")
 
+    
     while True:
         try:
+            # [P0-D] 매 반복마다 KST 시간을 반드시 새로 갱신 (과거 값 잔류 방지)
+            import datetime
+            import pytz
+            import time
+            kst = pytz.timezone('Asia/Seoul')
+            now_kst = datetime.datetime.now(kst)
+            
+            # [P0-D] 5초 지연 보조 스케줄러 (정각 미완성 봉 방지)
+            if now_kst.second < 5:
+                time.sleep(5 - now_kst.second)
+                now_kst = datetime.datetime.now(kst) # 대기 후 다시 정확한 시간 갱신
+            
+            hm = now_kst.hour * 100 + now_kst.minute
+
+            # [P0-E] Kill Switch (6인자 인터페이스 완벽 연동)
+            if getattr(global_state, 'kill_switch_active', False):
+                logger.warning("🚨 [Kill Switch] 가동 중! 신규 신호 평가 및 주문 생성 중단.")
+                for pf in portfolios:
+                    db.request_cancel_for_system_orders(
+                        broker=pf.get('broker'),
+                        environment=pf.get('environment'),
+                        account_fingerprint=pf.get('account_fingerprint'),
+                        product_code=pf.get('product_code'),
+                        portfolio_id=pf.get('portfolio_id'),
+                        strategy_id=pf.get('strategy_id')
+                    )
+                time.sleep(10)
+                continue
         # [P0-4] 미완성 1분봉 반환 방지를 위해 정각에서 5초 대기 (5초 지연 호출)
         import datetime, time
         if datetime.datetime.now().second < 5:
