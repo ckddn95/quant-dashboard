@@ -1,99 +1,26 @@
-whitepaper_version: "2.2.1"
-contract_version: "2.2.1"
-schema_version: 17
-strategy_version: "1.0.0"
-cost_model_version: "2.2.0"
-
-strategy:
-  CORE:
-    ma200: true
-    buf: 0.015
-    sl: -0.15
-    alloc: 0.35
-    ts_tgt: 0.30
-    ts_drp: -0.10
-    cd: 20
-    min_h: 5
-    boost: true
-  SATELLITE:
-    ma200: true
-    buf: 0.010
-    sl: -0.12
-    alloc: 0.20
-    ts_tgt: 0.20
-    ts_drp: -0.07
-    cd: 10
-    min_h: 3
-    boost: true
-
-booster_policy:
-  mode: "ABSOLUTE_ADDITION"
-  value: 0.10
-
-trend_exit:
-  buffer_factor: 0.5
-
-execution_rules:
-  require_two_distinct_1min_bars: true
-  quote_freshness_ttl_sec: 15
-  intent_ttl_sec: 300
-  market_buy_reservation_buffer: 1.05
-  cash_policy: "CASH_ONLY_NO_CREDIT"
-  real_approval_status: "POST_BLOCKED"
-
-cooldown_policy:
-  loss_streak_threshold: 2
-  cooldown_sessions: 20
-  rearm_condition: "SIGNAL_FALSE_TO_TRUE"
-
-cost_model:
-  broker_fee_rate: 0.00015
-  org_fee_rate: 0.000036
-  buy_slippage_rate: 0.001
-  sell_slippage_rate: 0.001
-  legacy_all_in_025_mode: false
-  tax_schedule:
-    2022: {"KOSPI": 0.0023, "KOSDAQ": 0.0023}
-    2023: {"KOSPI": 0.0020, "KOSDAQ": 0.0020}
-    2024: {"KOSPI": 0.0018, "KOSDAQ": 0.0018}
-    2025: {"KOSPI": 0.0015, "KOSDAQ": 0.0015}
-    2026: {"KOSPI": 0.0020, "KOSDAQ": 0.0020}
-
-allowed_state_transitions:
-  INTENT_CREATED: ["CLAIMED", "CANCELED", "QUARANTINED", "EXPIRED"]
-  CLAIMED: ["SUBMITTING", "CANCELED", "RISK_REJECTED", "EXPIRED", "QUARANTINED", "INTENT_CREATED"]
-  SUBMITTING: ["ACKNOWLEDGED", "REJECTED", "UNKNOWN", "FILLED", "CANCELED"]
-  ACKNOWLEDGED: ["PARTIALLY_FILLED", "FILLED", "CANCEL_REQUESTED", "CANCELED"]
-  PARTIALLY_FILLED: ["FILLED", "CANCEL_REQUESTED", "CANCELED"]
-  UNKNOWN: ["ACKNOWLEDGED", "FILLED", "REJECTED", "CANCELED", "RECONCILIATION_REQUIRED"]
-  CANCEL_REQUESTED: ["CANCEL_CLAIMED", "CANCEL_SUBMITTING", "CANCEL_ACKNOWLEDGED", "CANCEL_UNKNOWN", "FILLED", "REJECTED", "CANCELED"]
-  CANCEL_CLAIMED: ["CANCEL_SUBMITTING", "CANCEL_REQUESTED"]
-  CANCEL_SUBMITTING: ["CANCEL_ACKNOWLEDGED", "CANCEL_UNKNOWN", "REJECTED", "CANCELED"]
-  CANCEL_UNKNOWN: ["CANCELED", "FILLED", "CANCEL_ACKNOWLEDGED"]
-  CANCEL_ACKNOWLEDGED: ["CANCELED", "FILLED"]
-  RECONCILIATION_REQUIRED: ["FILLED", "CANCELED", "REJECTED"]
-  FILLED: []
-  CANCELED: []
-  REJECTED: []
-  RISK_REJECTED: []
-  QUARANTINED: []
-  EXPIRED: []
-
-# [Phase 5] 퀀트 시스템 운용 원칙 동기화 (V17 마이그레이션 완료)
+# [Phase 5] Institutional Quant System - Canonical Contract (V2.3)
+schema_version: "2.3.0"
 rules:
   execution:
-    - name: "1분봉 2연속 확인 원칙"
-      description: "매수 및 추세매도는 반드시 '완성된 1분봉 2개'가 연속으로 신호를 만족할 때만 진입한다."
-    - name: "즉각 대응 원칙"
-      description: "손절 및 트레일링 스탑은 1분봉 완성을 기다리지 않고, 실시간 호가(Tick)를 기준으로 즉시 발동한다."
-    - name: "수동/자동 물량 격리"
-      description: "수동으로 매수한 물량(Manual)은 봇이 익절/손절 계산에 포함시키지 않으며 독립적으로 관리한다."
+    - name: "1분봉 2연속 타격"
+      description: "매수 및 정상 추세매도는 반드시 '완성된 연속 1분봉 2개'가 모두 조건을 만족할 때 진입."
+    - name: "실시간 즉각 대응"
+      description: "하드 손절 및 트레일링 스탑은 1분봉 완성을 기다리지 않고 Tick(현재가) 도달 시 즉시 발동."
+    - name: "수동/자동 물량 완벽 격리"
+      description: "수동으로 진입한 물량(manual_qty)은 시스템의 매도/손절 계산에서 원천 배제됨."
   
+  cooldown_and_rearm:
+    core_strategy_days: 20
+    satellite_strategy_days: 10
+    rearm_policy: "SIGNAL_FALSE_TO_TRUE"
+    description: "연속 2회 손실 발생 시 명시된 영업일 동안 쿨다운. 이후 신호가 False를 거쳐 다시 True가 될 때만 재무장(진입) 허용."
+
   canary_deployment:
-    status: "POST_BLOCKED"  # 현재 모든 REAL 매매는 기술적으로 차단됨
+    status: "POST_BLOCKED" # 절대 임의 해제 금지
     approval_gate:
-      required_steps:
-        - "단일 계좌, 단일 전략(Core or Satellite) 명시적 선택"
-        - "유동성이 풍부한 승인 종목 1개 제한 (예: 005930)"
-        - "최초 주문은 무조건 1주, 혹은 최대 10만 원 이하 소액(Canary) 진행"
-        - "시스템 관리자가 PC 앞에서 체결-DB 반영을 육안 확인 후 무인 운영 승인"
+      required_account_fingerprint: "REQUIRED_BY_USER"
+      environment: "REAL"
+      allowed_strategies: ["CORE"] # 단일 전략만 허용
+      max_qty_per_order: 1
+      max_amt_per_order: 100000
+      kill_switch_active: False

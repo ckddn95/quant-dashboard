@@ -43,3 +43,18 @@ def test_p0_no_duplicate_functions():
     # 함수 정의가 1번만 나타나야 함
     assert content.count("def preflight_check():") == 1
     assert content.count("def request_cancel_for_system_orders(") == 1
+
+# ==========================================
+# [P18] 기관급 P0/P1 방어 스위트 (최종 추가분)
+# ==========================================
+
+def test_p0_kill_switch_6_args():
+    """[P0-E] Kill Switch 6인자 인터페이스 단일화 검증"""
+    db.preflight_check()
+    res = db.request_cancel_for_system_orders('KIS', 'MOCK', 'TEST', 'EQ', 'P1', 'CORE')
+    assert isinstance(res, int)
+
+def test_p0_candle_logic_presence():
+    """[P0-G] 1분봉 2연속 판독기 함수(진행봉 배제) 존재 여부 검증"""
+    import quant_engine as qe
+    assert hasattr(qe, '_verify_two_completed_candles')

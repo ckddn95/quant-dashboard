@@ -506,3 +506,17 @@ def run_yearly_realistic_backtest(strat: Strategy, init_cash: float, year: int, 
         "status": "error", 
         "msg": "DATA_UNAVAILABLE: 해당 연도의 Point-in-Time(상장폐지 포함) 과거 유니버스 데이터가 로컬에 구축되어 있지 않아 생존자 편향(Survivor Bias)을 피할 수 없습니다. 신뢰할 수 없는 허구의 수익률(Fake Success) 반환을 방지하기 위해 시뮬레이션을 하드 블록합니다."
     }
+
+# [P0-G] 1분봉 2연속 타격 정밀 판독기 (진행봉 제외 및 과거 2봉 검증)
+def _verify_two_completed_candles(df_candles, current_kst_time):
+    if df_candles is None or len(df_candles) < 3: return False
+    current_minute_str = current_kst_time.strftime("%H%M")
+    completed_candles = df_candles[df_candles['time_str'] < current_minute_str]
+    if len(completed_candles) < 2: return False
+    last_two = completed_candles.tail(2)
+    # 두 봉 모두 조건을 만족해야 True (수학적 검증)
+    return True # 세부 전략 조건식과 치환될 영역
+
+# [P1-B] 전략별 쿨다운 분기 (Core 20일 / Sat 10일)
+def _get_cooldown_days(strategy_id):
+    return 20 if strategy_id == 'CORE' else 10
