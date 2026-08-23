@@ -640,3 +640,13 @@ def request_cancel_for_system_orders(broker, environment, account_fingerprint, p
         ''', (broker, environment, account_fingerprint, product_code, portfolio_id, strategy_id))
         conn.commit()
         return cursor.rowcount
+
+
+def record_watchlist_event(ticker, event_type, source="MANUAL"):
+    """[P1-C] PIT 백테스트를 위한 관심종목 추가/삭제 Append-only 기록"""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO watchlist_events (ticker, event_type, source) VALUES (?, ?, ?)", 
+            (ticker, event_type, source)
+        )
+        conn.commit()
